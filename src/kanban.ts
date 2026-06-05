@@ -107,9 +107,10 @@ function parseOrderComment(text: string): OrderInfo | null {
 }
 
 function replaceOrderComment(line: string, digits: string, stateChar: string): string {
+  const indent = (line.match(/^(\s*)/) || ["", ""])[1];
   const clean = line.replace(/%%[\s\S]*?@\s*\d+\s*\w\s*%%/g, "").trim();
   const comment = `%% @${digits}${stateChar} %%`;
-  return clean ? `${clean} ${comment}` : comment;
+  return indent + (clean ? `${clean} ${comment}` : comment);
 }
 
 async function updateFileOrderComment(
@@ -584,38 +585,16 @@ async function promoteSubToChild(
     if (subLineNum < 1 || subLineNum > lines.length) return false;
 
     const original = lines[subLineNum - 1];
-    const subIndent = (original.match(/^(\s*)/) || [""])[0].length;
 
-    let blockEndIdx = subLineNum - 1;
-    for (let i = subLineNum; i < lines.length; i++) {
-      const trim = lines[i].trim();
-      if (!trim) {
-        blockEndIdx = i;
-        continue;
-      }
-      const lineIndent = (lines[i].match(/^(\s*)/) || [""])[0].length;
-      if (lineIndent >= subIndent) {
-        blockEndIdx = i;
-      } else break;
+    // Add the tag to the existing line in place — no removal or re-insertion
+    const existingTags = extractTags(original);
+    if (!existingTags.some((t) => normalizeTag(t) === normalizeTag(parentTag))) {
+      const withoutOrder = original.replace(/%% @\d+\w %%/g, "").trimEnd();
+      lines[subLineNum - 1] = `${withoutOrder} ${parentTag}`;
+      await writeFileLines(app, tFile, lines);
     }
 
-    const cleanText = original
-      .replace(/^\s*(?:-\s*\[[ xX]\]\s*|\d+\.\s*|[*+-]\s+)/, "")
-      .split(/\s+/)
-      .filter((w) => !config.normKanban.includes(normalizeTag(w)))
-      .join(" ")
-      .trim();
-
-    const newLine = `${" ".repeat(subIndent)}- [ ] ${cleanText} ${parentTag}`;
-
-    lines.splice(subLineNum - 1, 1);
-
-    let insertAfter = blockEndIdx;
-    if (blockEndIdx >= subLineNum - 1) insertAfter = blockEndIdx - 1;
-    lines.splice(insertAfter + 1, 0, newLine);
-
-    const newLineNum = insertAfter + 2;
-    await writeFileLines(app, tFile, lines);
+    const newLineNum = subLineNum;
 
     // Compute order: midpoint between parent card and the next one in column
     const targetPaths = await getTargetFilePaths(app, config);
@@ -651,7 +630,7 @@ async function promoteSubToChild(
     await updateFileOrderComment(app, filePath, newLineNum, newCalc.digits, newState);
 
     new Notice(
-      `Promoted subtask to card in ${parentTag.replace(/^#/, "").toUpperCase()}.`
+      `Tagged subtask with ${parentTag.replace(/^#/, "").toUpperCase()}.`
     );
     requestAnimationFrame(() => setTimeout(refresh, 50));
     return true;
@@ -1092,6 +1071,9 @@ function createCardHTML(
     const parentTag =
       item.item.tags.find((t: string) => normalizeTag(t) === currentNorm) || "";
     const hasCheckbox = /^- \[[ xX]\] /.test(sub.text);
+    const alreadyTagged = extractTags(sub.text).some((t: string) =>
+      config.normKanban.includes(normalizeTag(t))
+    );
     let subText = sub.text
       .replace(/%% @\d+\w %%/g, "")
       .trim()
@@ -1104,7 +1086,7 @@ function createCardHTML(
       isSub: true,
       showCheckbox: hasCheckbox,
       vaultName,
-      enablePromotion: hasCheckbox,
+      enablePromotion: hasCheckbox && !alreadyTagged,
       subLine: sub.line,
       parentTag,
       parentOrder: item.order,
