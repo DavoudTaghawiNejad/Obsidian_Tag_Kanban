@@ -1,0 +1,9 @@
+{
+  "id": "kanban-board",
+  "name": "Kanban Board",
+  "version": "1.0.0",
+  "minAppVersion": "1.0.0",
+  "description": "Interactive Kanban board that reads tasks by tag from your vault notes. No Dataview required.",
+  "author": "taghawi",
+  "isDesktopOnly": false
+}
