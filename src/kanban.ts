@@ -1526,8 +1526,8 @@ export function attachListeners(
       const newText = input.value.trim();
       card.setAttribute("draggable", "true");
       if (card.querySelector("details")) {
-        titleDiv.onclick = function (this: HTMLElement) {
-          this.closest(".kanban-card")
+        titleDiv.onclick = function () {
+          (this as HTMLElement).closest(".kanban-card")
             ?.querySelector("details")
             ?.toggleAttribute("open");
         };
@@ -1948,9 +1948,9 @@ export function attachListeners(
   boardEl.addEventListener("dragover", onDragOver);
   boardEl.addEventListener("dragleave", onDragLeave);
   boardEl.addEventListener("drop", onDrop);
-  boardEl.addEventListener("touchstart", onTouchStart as EventListener, { passive: true });
-  boardEl.addEventListener("touchmove", onTouchMove as EventListener, { passive: false });
-  boardEl.addEventListener("touchend", onTouchEnd as EventListener, { passive: false });
+  boardEl.addEventListener("touchstart", onTouchStart as unknown as EventListener, { passive: true });
+  boardEl.addEventListener("touchmove", onTouchMove as unknown as EventListener, { passive: false });
+  boardEl.addEventListener("touchend", onTouchEnd as unknown as EventListener, { passive: false });
   boardEl.addEventListener("touchcancel", clearTouch, { passive: true });
 
   return () => {
@@ -1965,9 +1965,9 @@ export function attachListeners(
     boardEl.removeEventListener("dragover", onDragOver);
     boardEl.removeEventListener("dragleave", onDragLeave);
     boardEl.removeEventListener("drop", onDrop);
-    boardEl.removeEventListener("touchstart", onTouchStart as EventListener);
-    boardEl.removeEventListener("touchmove", onTouchMove as EventListener);
-    boardEl.removeEventListener("touchend", onTouchEnd as EventListener);
+    boardEl.removeEventListener("touchstart", onTouchStart as unknown as EventListener);
+    boardEl.removeEventListener("touchmove", onTouchMove as unknown as EventListener);
+    boardEl.removeEventListener("touchend", onTouchEnd as unknown as EventListener);
     boardEl.removeEventListener("touchcancel", clearTouch);
   };
 }

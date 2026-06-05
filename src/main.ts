@@ -22,7 +22,7 @@ export const DEFAULT_SETTINGS: KanbanSettings = {
 };
 
 export default class KanbanPlugin extends Plugin {
-  settings: KanbanSettings;
+  settings!: KanbanSettings;
 
   async onload() {
     await this.loadSettings();
