@@ -300,10 +300,9 @@ async function addNewItem(app, rawInsertTarget, columnTag, userText, dateStr, co
     let [notePath, heading = ""] = rawInsertTarget.trim().split("#");
     if (!notePath.endsWith(".md"))
       notePath += ".md";
-    const tFile = app.vault.getAbstractFileByPath(notePath);
+    let tFile = app.vault.getAbstractFileByPath(notePath);
     if (!tFile) {
-      new import_obsidian.Notice(`Insert target "${notePath}" not found.`);
-      return false;
+      tFile = await app.vault.create(notePath, "");
     }
     const lines = (await app.vault.read(tFile)).split("\n");
     let yamlEnd = 0;

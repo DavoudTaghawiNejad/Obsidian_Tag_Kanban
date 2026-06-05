@@ -443,10 +443,9 @@ async function addNewItem(
     let [notePath, heading = ""] = rawInsertTarget.trim().split("#");
     if (!notePath.endsWith(".md")) notePath += ".md";
 
-    const tFile = app.vault.getAbstractFileByPath(notePath) as TFile | null;
+    let tFile = app.vault.getAbstractFileByPath(notePath) as TFile | null;
     if (!tFile) {
-      new Notice(`Insert target "${notePath}" not found.`);
-      return false;
+      tFile = await app.vault.create(notePath, "");
     }
 
     const lines = (await app.vault.read(tFile)).split("\n");
