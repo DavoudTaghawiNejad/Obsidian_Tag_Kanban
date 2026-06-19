@@ -1428,6 +1428,9 @@ export function attachListeners(
       )
     );
 
+    // No family: standalone card — skip coloring entirely
+    if (family.size === 1 && topParent === card) return;
+
     // Colour: top parent → red, direct children → blue, everything else in family → green
     topParent.classList.add("kh-self");
     for (const member of family) {
