@@ -1180,20 +1180,20 @@ export async function buildBoard(
   const columns = groupByColumns(items, config);
   await assignInitialOrders(app, columns, config);
 
-  // Inject CSS once
-  if (!document.getElementById("kanban-board-styles")) {
-    const css = document.createElement("style");
-    css.id = "kanban-board-styles";
-    css.textContent = `
+  // Inject CSS (always refresh so changes take effect without full reload)
+  let _css = document.getElementById("kanban-board-styles");
+  if (!_css) { _css = document.createElement("style"); _css.id = "kanban-board-styles"; document.head.appendChild(_css); }
+  (_css as HTMLStyleElement).textContent = `
       #kanban-scroll::-webkit-scrollbar{height:8px}
       .kanban-card{-webkit-user-select:none;user-select:none;touch-action:none;}
       .drop-zone{touch-action:none;}
+      .kanban-card.kh-self{outline:2px solid #e03e3e!important;background:rgba(224,62,62,0.08)!important;}
+      .kanban-card.kh-parent{outline:2px solid #2db55d!important;background:rgba(45,181,93,0.08)!important;}
+      .kanban-card.kh-sibling{outline:2px solid #4a90d9!important;background:rgba(74,144,217,0.08)!important;}
       @media(max-width:700px){
         #kanban-scroll{flex-direction:column;overflow-x:hidden;}
         #kanban-scroll>div{flex:none!important;width:calc(100% - 16px)!important;max-width:none!important;margin:0 8px 16px!important;}
       }`;
-    document.head.appendChild(css);
-  }
 
   // Build DOM
   const wrapper = containerEl.createEl("div", {
@@ -1375,6 +1375,82 @@ export function attachListeners(
     const m = zone.className.match(/drop-zone-(\w+)/);
     return m ? m[1] : null;
   };
+
+  // ── Card relationship highlighting ──
+  const clearHighlights = () => {
+    boardEl.querySelectorAll<HTMLElement>(".kanban-card").forEach((c) =>
+      c.classList.remove("kh-self", "kh-parent", "kh-sibling")
+    );
+  };
+
+  const subsHasLine = (subs: any[], line: number): boolean =>
+    subs.some((s: any) => s.line === line);
+
+  const applyHighlights = (card: HTMLElement) => {
+    clearHighlights();
+    const file = card.dataset.file!;
+    const allCards = Array.from(boardEl.querySelectorAll<HTMLElement>(".kanban-card"));
+
+    // Walk up to find the top-most ancestor
+    let topParent = card;
+    for (let safety = 0; safety < 20; safety++) {
+      const tpLine = parseInt(topParent.dataset.line!, 10);
+      const parent = allCards.find(
+        (o) => o !== topParent && o.dataset.file === file &&
+          subsHasLine(JSON.parse(o.dataset.subs || "[]"), tpLine)
+      );
+      if (!parent) break;
+      topParent = parent;
+    }
+
+    // BFS: collect every card reachable downward from the top parent
+    const family = new Set<HTMLElement>([topParent]);
+    const queue: HTMLElement[] = [topParent];
+    while (queue.length) {
+      const curr = queue.shift()!;
+      const subs = JSON.parse(curr.dataset.subs || "[]");
+      for (const other of allCards) {
+        if (family.has(other) || other.dataset.file !== file) continue;
+        if (subsHasLine(subs, parseInt(other.dataset.line!, 10))) {
+          family.add(other);
+          queue.push(other);
+        }
+      }
+    }
+
+    // Direct children of the hovered card
+    const ownSubs = JSON.parse(card.dataset.subs || "[]");
+    const children = new Set<HTMLElement>(
+      allCards.filter(
+        (o) => o !== card && o.dataset.file === file &&
+          subsHasLine(ownSubs, parseInt(o.dataset.line!, 10))
+      )
+    );
+
+    // Colour: top parent → red, direct children → blue, everything else in family → green
+    topParent.classList.add("kh-self");
+    for (const member of family) {
+      if (member === topParent) continue;
+      member.classList.add(children.has(member) ? "kh-sibling" : "kh-parent");
+    }
+  };
+
+  function onMouseOver(e: MouseEvent) {
+    const card = (e.target as Element).closest(".kanban-card") as HTMLElement | null;
+    if (!card) return;
+    if (!card.classList.contains("kh-self")) applyHighlights(card);
+  }
+
+  function onMouseOut(e: MouseEvent) {
+    const toEl = e.relatedTarget as Element | null;
+    if (!toEl?.closest(".kanban-card")) clearHighlights();
+  }
+
+  function onCardClick(e: MouseEvent) {
+    const card = (e.target as Element).closest(".kanban-card") as HTMLElement | null;
+    if (!card) return;
+    applyHighlights(card);
+  }
 
   async function doMove(
     card: ReturnType<typeof cardDataFrom>,
@@ -1563,6 +1639,7 @@ export function attachListeners(
     draggedCard = cardDataFrom(card);
     card.style.opacity = ".5";
     e.dataTransfer!.effectAllowed = "move";
+    applyHighlights(card);
   }
   function onDragEnd(e: DragEvent) {
     draggedCard = null;
@@ -1571,6 +1648,7 @@ export function attachListeners(
     document.querySelectorAll<HTMLElement>(".insert-slot").forEach(
       (s) => (s.style.borderTopColor = "transparent")
     );
+    clearHighlights();
   }
   function onDragOver(e: DragEvent) {
     e.preventDefault();
@@ -1918,6 +1996,9 @@ export function attachListeners(
   }
 
   // Attach all listeners
+  boardEl.addEventListener("mouseover", onMouseOver);
+  boardEl.addEventListener("mouseout", onMouseOut);
+  boardEl.addEventListener("click", onCardClick);
   boardEl.addEventListener("click", onPromoteClick);
   boardEl.addEventListener("click", onTabClick);
   boardEl.addEventListener("click", onAddClick);
@@ -1935,6 +2016,9 @@ export function attachListeners(
   boardEl.addEventListener("touchcancel", clearTouch, { passive: true });
 
   return () => {
+    boardEl.removeEventListener("mouseover", onMouseOver);
+    boardEl.removeEventListener("mouseout", onMouseOut);
+    boardEl.removeEventListener("click", onCardClick);
     boardEl.removeEventListener("click", onPromoteClick);
     boardEl.removeEventListener("click", onTabClick);
     boardEl.removeEventListener("click", onAddClick);
