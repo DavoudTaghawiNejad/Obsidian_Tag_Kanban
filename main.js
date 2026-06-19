@@ -84,36 +84,70 @@ function parseOrderComment(text) {
   const order = parseFloat("0." + m[1]);
   return order > 0 && order < 1 ? { order, digits: m[1], state, len: m[1].length } : null;
 }
-function replaceOrderComment(line, digits, stateChar) {
-  const indent = (line.match(/^(\s*)/) || ["", ""])[1];
-  const clean = line.replace(/%%[\s\S]*?@\s*\d+\s*\w\s*%%/g, "").trim();
-  const comment = `%% @${digits}${stateChar} %%`;
-  return indent + (clean ? `${clean} ${comment}` : comment);
+function parseTaskLine(raw) {
+  const indent = (raw.match(/^(\s*)/) || ["", ""])[1];
+  let rest = raw.slice(indent.length);
+  let orderDigits = null;
+  let orderState = null;
+  const om = rest.match(/%% @(\d+)(\w) %%/);
+  if (om) {
+    orderDigits = om[1];
+    orderState = om[2].toLowerCase() === "x" ? "expanded" : "collapsed";
+  }
+  rest = rest.replace(/\s*%%[\s\S]*?%%/g, "").trim();
+  let date = null;
+  const dm = rest.match(/(^|\s)(@\d{4}-\d{2}-\d{2})\b/);
+  if (dm)
+    date = dm[2];
+  rest = rest.replace(/\s*(?:^|\s)@\d{4}-\d{2}-\d{2}\b/g, "").trim();
+  let bullet = "";
+  let checked = null;
+  const cbm = rest.match(/^([-*+])\s+\[([^\]]*)\]\s*/);
+  if (cbm) {
+    bullet = cbm[1];
+    checked = cbm[2].trim().toLowerCase() === "x";
+    rest = rest.slice(cbm[0].length);
+  } else {
+    const bm = rest.match(/^([-*+])\s+/);
+    if (bm) {
+      bullet = bm[1];
+      rest = rest.slice(bm[0].length);
+    }
+  }
+  const tags = rest.match(/(?<!\w)#\w+/g) || [];
+  const text = rest.replace(/\s*(?<!\w)#\w+/g, "").trim();
+  return { indent, bullet, checked, text, tags, date, orderDigits, orderState };
+}
+function serializeTaskLine(t) {
+  const parts = [];
+  if (t.bullet) {
+    parts.push(t.checked !== null ? `${t.bullet} [${t.checked ? "x" : " "}]` : t.bullet);
+  }
+  if (t.text)
+    parts.push(t.text);
+  parts.push(...t.tags);
+  if (t.date)
+    parts.push(t.date);
+  if (t.orderDigits && t.orderState !== null) {
+    parts.push(`%% @${t.orderDigits}${t.orderState === "expanded" ? "x" : "c"} %%`);
+  }
+  return t.indent + parts.join(" ");
 }
 async function updateFileOrderComment(app, filePath, lineNum, newDigits, newState = null) {
   try {
-    const tFile = app.vault.getAbstractFileByPath(filePath);
-    if (!tFile)
-      throw new Error("File not found");
-    const lines = (await app.vault.read(tFile)).split("\n");
+    const { tFile, lines } = await readFileLines(app, filePath);
     if (lineNum < 1 || lineNum > lines.length)
       return false;
-    const existing = parseOrderComment(lines[lineNum - 1]);
-    const digits = newDigits ?? existing?.digits;
+    const parsed = parseTaskLine(lines[lineNum - 1]);
+    const digits = newDigits ?? parsed.orderDigits;
     if (!digits)
       return false;
-    let stateChar;
-    if (newState) {
-      stateChar = newState === "expanded" ? "x" : "c";
-    } else if (existing) {
-      stateChar = existing.state === "expanded" ? "x" : "c";
-    } else {
-      stateChar = "c";
-    }
-    if (existing && existing.digits === digits && existing.state === (stateChar === "x" ? "expanded" : "collapsed")) {
+    const state = newState ?? parsed.orderState ?? "collapsed";
+    if (parsed.orderDigits === digits && parsed.orderState === state)
       return true;
-    }
-    lines[lineNum - 1] = replaceOrderComment(lines[lineNum - 1], digits, stateChar);
+    parsed.orderDigits = digits;
+    parsed.orderState = state;
+    lines[lineNum - 1] = serializeTaskLine(parsed);
     await app.vault.modify(tFile, lines.join("\n"));
     return true;
   } catch (e) {
@@ -275,19 +309,19 @@ async function moveToColumn(app, filePath, lineNum, originalTags, targetTag, isD
     }
     if (idx === -1)
       throw new Error("Line not found by tag fingerprint");
-    const indent = (lines[idx].match(/^(\s*)/) || [""])[0];
-    const stripped = lines[idx].split(/\s+/).filter((w) => !config.normKanban.includes(normalizeTag(w))).join(" ").trim();
-    let clean = isDone ? stripped.replace(/-\s*\[\s*\]\s*/, "- [x] ") : stripped.replace(/-\s*\[(x|X)\s*\]\s*/, "- [ ] ");
-    let newLine = `${indent}${clean} ${targetTag}`;
-    if (dateStrToAppend) {
-      newLine = newLine.replace(/\s*@\d{4}-\d{2}-\d{2}\b/g, "") + ` ${dateStrToAppend}`;
-    }
-    lines[idx] = newLine;
-    await writeFileLines(app, tFile, lines);
+    const parsed = parseTaskLine(lines[idx]);
+    parsed.tags = parsed.tags.filter((t) => !config.normKanban.includes(normalizeTag(t)));
+    parsed.tags.push(targetTag);
+    if (parsed.checked !== null)
+      parsed.checked = isDone;
+    if (dateStrToAppend)
+      parsed.date = dateStrToAppend;
     if (newDigits !== null) {
-      const resolvedState = newState ?? ([config.normDone, config.normLater].includes(normalizeTag(targetTag)) ? "collapsed" : "expanded");
-      await updateFileOrderComment(app, filePath, idx + 1, newDigits, resolvedState);
+      parsed.orderDigits = newDigits;
+      parsed.orderState = newState ?? ([config.normDone, config.normLater].includes(normalizeTag(targetTag)) ? "collapsed" : "expanded");
     }
+    lines[idx] = serializeTaskLine(parsed);
+    await writeFileLines(app, tFile, lines);
     return true;
   } catch (e) {
     console.error("moveToColumn failed:", e);
@@ -342,17 +376,22 @@ async function addNewItem(app, rawInsertTarget, columnTag, userText, dateStr, co
 }
 async function archiveToSection(app, filePath, mainLineNum, subLines, config, _isTopLevel = true) {
   try {
-    let archiveLine = function(idx) {
-      let line = lines[idx];
-      line = line.replace(/^(\s*- \[) (\] )/, "$1x$2");
-      line = line.split(/\s+/).filter((w) => !config.normKanban.includes(normalizeTag(w))).join(" ").replace(/%% @\d+\w %%/g, "").trim();
-      lines[idx] = line;
+    let archiveLine = function(idx, tickBox) {
+      if (idx < 0 || idx >= lines.length)
+        return;
+      const parsed = parseTaskLine(lines[idx]);
+      if (tickBox && parsed.checked !== null)
+        parsed.checked = true;
+      parsed.tags = parsed.tags.filter((t) => !config.normKanban.includes(normalizeTag(t)));
+      parsed.orderDigits = null;
+      parsed.orderState = null;
+      lines[idx] = serializeTaskLine(parsed);
     };
     const { tFile, lines } = await readFileLines(app, filePath);
-    archiveLine(mainLineNum - 1);
+    archiveLine(mainLineNum - 1, true);
     const recurse = (subs) => {
       for (const sub of subs) {
-        archiveLine(sub.line - 1);
+        archiveLine(sub.line - 1, false);
         if (sub.subs?.length)
           recurse(sub.subs);
       }
@@ -789,8 +828,8 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
     data-order="${item.order || ""}"
     data-digits="${item.digits || ""}"
     data-state="${item.state}"
-    data-tags='${JSON.stringify(item.item.tags)}'
-    data-subs='${JSON.stringify(item.item.subs.map((s) => ({ line: s.line, text: s.text, subs: s.subs || [] })))}'
+    data-tags='${JSON.stringify(item.item.tags).replace(/'/g, "&#39;")}'
+    data-subs='${JSON.stringify(item.item.subs.map((s) => ({ line: s.line, text: s.text, subs: s.subs || [] }))).replace(/'/g, "&#39;")}'
     data-is-promoted="${item.isPromoted || false}"
     style="padding:10px 14px;margin:8px 0;border-radius:10px;background:var(--background-secondary);
            box-shadow:0 2px 8px rgba(0,0,0,.12);${border};cursor:move;position:relative;">
@@ -1542,11 +1581,16 @@ function attachListeners(boardEl, config, app, refresh) {
       return;
     let count = 0;
     for (const card of Array.from(zone.querySelectorAll(".kanban-card"))) {
+      let subs = [];
+      try {
+        subs = JSON.parse(card.dataset.subs || "[]");
+      } catch {
+      }
       const ok = await archiveToSection(
         app,
         card.dataset.file,
         parseInt(card.dataset.line, 10),
-        JSON.parse(card.dataset.subs || "[]"),
+        subs,
         config,
         card.dataset.isPromoted !== "true"
       );
