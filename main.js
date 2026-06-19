@@ -833,6 +833,7 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
     data-is-promoted="${item.isPromoted || false}"
     style="padding:10px 14px;margin:8px 0;border-radius:10px;background:var(--background-secondary);
            box-shadow:0 2px 8px rgba(0,0,0,.12);${border};cursor:move;position:relative;">
+    ${item.indent > 0 ? '<span class="demote-btn" style="position:absolute;top:4px;left:6px;font-size:0.75em;color:var(--interactive-accent);line-height:1;cursor:pointer;">&#x25B6;</span>' : ""}
     ${bodyHTML}
     ${badge}
   </div>`;
@@ -1173,8 +1174,27 @@ function attachListeners(boardEl, config, app, refresh) {
       refresh
     );
   }
+  async function onDemoteClick(e) {
+    const btn = e.target.closest(".demote-btn");
+    if (!btn)
+      return;
+    e.stopPropagation();
+    const card = btn.closest(".kanban-card");
+    if (!card)
+      return;
+    const filePath = card.dataset.file;
+    const lineNum = parseInt(card.dataset.line, 10);
+    const { tFile, lines } = await readFileLines(app, filePath);
+    if (lineNum < 1 || lineNum > lines.length)
+      return;
+    const parsed = parseTaskLine(lines[lineNum - 1]);
+    parsed.tags = parsed.tags.filter((t) => !config.normKanban.includes(normalizeTag(t)));
+    lines[lineNum - 1] = serializeTaskLine(parsed);
+    await writeFileLines(app, tFile, lines);
+    refresh();
+  }
   async function onDblClick(e) {
-    if (e.target.closest("a,button,.promote-icon"))
+    if (e.target.closest("a,button,.promote-icon,.demote-btn"))
       return;
     const titleDiv = e.target.closest(".card-title");
     if (!titleDiv)
@@ -1383,7 +1403,7 @@ function attachListeners(boardEl, config, app, refresh) {
       clearTouch();
       return;
     }
-    if (e.target.closest("button,a,.promote-icon"))
+    if (e.target.closest("button,a,.promote-icon,.demote-btn"))
       return;
     const card = e.target.closest(".kanban-card");
     touchStartX = e.touches[0].clientX;
@@ -1606,6 +1626,7 @@ function attachListeners(boardEl, config, app, refresh) {
   boardEl.addEventListener("mouseout", onMouseOut);
   boardEl.addEventListener("click", onCardClick);
   boardEl.addEventListener("click", onPromoteClick);
+  boardEl.addEventListener("click", onDemoteClick);
   boardEl.addEventListener("click", onTabClick);
   boardEl.addEventListener("click", onAddClick);
   boardEl.addEventListener("click", onArchiveClick);
@@ -1625,6 +1646,7 @@ function attachListeners(boardEl, config, app, refresh) {
     boardEl.removeEventListener("mouseout", onMouseOut);
     boardEl.removeEventListener("click", onCardClick);
     boardEl.removeEventListener("click", onPromoteClick);
+    boardEl.removeEventListener("click", onDemoteClick);
     boardEl.removeEventListener("click", onTabClick);
     boardEl.removeEventListener("click", onAddClick);
     boardEl.removeEventListener("click", onArchiveClick);

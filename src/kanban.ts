@@ -1132,6 +1132,7 @@ function createCardHTML(
     data-is-promoted="${item.isPromoted || false}"
     style="padding:10px 14px;margin:8px 0;border-radius:10px;background:var(--background-secondary);
            box-shadow:0 2px 8px rgba(0,0,0,.12);${border};cursor:move;position:relative;">
+    ${item.indent > 0 ? '<span class="demote-btn" style="position:absolute;top:4px;left:6px;font-size:0.75em;color:var(--interactive-accent);line-height:1;cursor:pointer;">&#x25B6;</span>' : ''}
     ${bodyHTML}
     ${badge}
   </div>`;
@@ -1548,9 +1549,26 @@ export function attachListeners(
     );
   }
 
+  async function onDemoteClick(e: Event) {
+    const btn = (e.target as Element).closest(".demote-btn") as HTMLElement | null;
+    if (!btn) return;
+    e.stopPropagation();
+    const card = btn.closest(".kanban-card") as HTMLElement | null;
+    if (!card) return;
+    const filePath = card.dataset.file!;
+    const lineNum = parseInt(card.dataset.line!, 10);
+    const { tFile, lines } = await readFileLines(app, filePath);
+    if (lineNum < 1 || lineNum > lines.length) return;
+    const parsed = parseTaskLine(lines[lineNum - 1]);
+    parsed.tags = parsed.tags.filter((t) => !config.normKanban.includes(normalizeTag(t)));
+    lines[lineNum - 1] = serializeTaskLine(parsed);
+    await writeFileLines(app, tFile, lines);
+    refresh();
+  }
+
   // ── Inline card text editing ──
   async function onDblClick(e: MouseEvent) {
-    if ((e.target as Element).closest("a,button,.promote-icon")) return;
+    if ((e.target as Element).closest("a,button,.promote-icon,.demote-btn")) return;
     const titleDiv = (e.target as Element).closest(".card-title") as HTMLElement | null;
     if (!titleDiv) return;
     const card = titleDiv.closest(".kanban-card") as HTMLElement | null;
@@ -1770,7 +1788,7 @@ export function attachListeners(
       clearTouch();
       return;
     }
-    if ((e.target as Element).closest("button,a,.promote-icon")) return;
+    if ((e.target as Element).closest("button,a,.promote-icon,.demote-btn")) return;
 
     const card = (e.target as Element).closest(".kanban-card") as HTMLElement | null;
     touchStartX = e.touches[0].clientX;
@@ -2006,6 +2024,7 @@ export function attachListeners(
   boardEl.addEventListener("mouseout", onMouseOut);
   boardEl.addEventListener("click", onCardClick);
   boardEl.addEventListener("click", onPromoteClick);
+  boardEl.addEventListener("click", onDemoteClick);
   boardEl.addEventListener("click", onTabClick);
   boardEl.addEventListener("click", onAddClick);
   boardEl.addEventListener("click", onArchiveClick);
@@ -2026,6 +2045,7 @@ export function attachListeners(
     boardEl.removeEventListener("mouseout", onMouseOut);
     boardEl.removeEventListener("click", onCardClick);
     boardEl.removeEventListener("click", onPromoteClick);
+    boardEl.removeEventListener("click", onDemoteClick);
     boardEl.removeEventListener("click", onTabClick);
     boardEl.removeEventListener("click", onAddClick);
     boardEl.removeEventListener("click", onArchiveClick);
