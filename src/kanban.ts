@@ -496,72 +496,33 @@ async function archiveToSection(
   mainLineNum: number,
   subLines: any[],
   config: KanbanConfig,
-  isTopLevel = true
+  _isTopLevel = true
 ): Promise<boolean> {
   try {
     const { tFile, lines } = await readFileLines(app, filePath);
 
-    function tagArchived(idx: number) {
-      const words = lines[idx]
+    function archiveLine(idx: number) {
+      let line = lines[idx];
+      // Check the checkbox
+      line = line.replace(/^(\s*- \[) (\] )/, "$1x$2");
+      // Strip kanban tags and order comment
+      line = line
         .split(/\s+/)
-        .filter(
-          (w) => !config.normKanban.includes(normalizeTag(w)) && w !== "#archived"
-        );
-      lines[idx] =
-        words.join(" ").trim().replace(/%% @\d+\w %%/g, "").trim() +
-        " #archived";
+        .filter((w) => !config.normKanban.includes(normalizeTag(w)))
+        .join(" ")
+        .replace(/%% @\d+\w %%/g, "")
+        .trim();
+      lines[idx] = line;
     }
 
-    tagArchived(mainLineNum - 1);
-    const recurse = async (subs: any[]) => {
+    archiveLine(mainLineNum - 1);
+    const recurse = (subs: any[]) => {
       for (const sub of subs) {
-        tagArchived(sub.line - 1);
-        if (sub.subs?.length) await recurse(sub.subs);
+        archiveLine(sub.line - 1);
+        if (sub.subs?.length) recurse(sub.subs);
       }
     };
-    await recurse(subLines);
-
-    if (!isTopLevel) {
-      await writeFileLines(app, tFile, lines);
-      return true;
-    }
-
-    const allIdxs = new Set([mainLineNum]);
-    const collect = (subs: any[]) => {
-      for (const s of subs) {
-        allIdxs.add(s.line);
-        collect(s.subs || []);
-      }
-    };
-    collect(subLines);
-
-    const sortedIdxs = Array.from(allIdxs).sort((a, b) => a - b);
-    const blockTexts = sortedIdxs.map((i) => lines[i - 1]);
-    const minIndent = Math.min(
-      ...blockTexts.map((l) => (l.match(/^(\s*)/) || [""])[0].length)
-    );
-    const normalizedBlock = blockTexts.map((l) => {
-      const indent = (l.match(/^(\s*)/) || [""])[0].length;
-      return " ".repeat(indent - minIndent) + l.slice(indent);
-    });
-
-    sortedIdxs
-      .slice()
-      .reverse()
-      .forEach((i) => lines.splice(i - 1, 1));
-
-    const CALLOUT = "> [!Note]Kanban Archive";
-    let headingIdx = lines.findIndex((l) => l.trim() === CALLOUT);
-    let insertIdx: number;
-    if (headingIdx === -1) {
-      lines.push(CALLOUT);
-      insertIdx = lines.length;
-    } else {
-      insertIdx = headingIdx + 1;
-      while (insertIdx < lines.length && lines[insertIdx].startsWith(">"))
-        insertIdx++;
-    }
-    lines.splice(insertIdx, 0, ...normalizedBlock.map((t) => "> " + t));
+    recurse(subLines);
 
     await writeFileLines(app, tFile, lines);
     return true;

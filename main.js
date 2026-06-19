@@ -340,58 +340,24 @@ async function addNewItem(app, rawInsertTarget, columnTag, userText, dateStr, co
     return false;
   }
 }
-async function archiveToSection(app, filePath, mainLineNum, subLines, config, isTopLevel = true) {
+async function archiveToSection(app, filePath, mainLineNum, subLines, config, _isTopLevel = true) {
   try {
-    let tagArchived = function(idx) {
-      const words = lines[idx].split(/\s+/).filter(
-        (w) => !config.normKanban.includes(normalizeTag(w)) && w !== "#archived"
-      );
-      lines[idx] = words.join(" ").trim().replace(/%% @\d+\w %%/g, "").trim() + " #archived";
+    let archiveLine = function(idx) {
+      let line = lines[idx];
+      line = line.replace(/^(\s*- \[) (\] )/, "$1x$2");
+      line = line.split(/\s+/).filter((w) => !config.normKanban.includes(normalizeTag(w))).join(" ").replace(/%% @\d+\w %%/g, "").trim();
+      lines[idx] = line;
     };
     const { tFile, lines } = await readFileLines(app, filePath);
-    tagArchived(mainLineNum - 1);
-    const recurse = async (subs) => {
+    archiveLine(mainLineNum - 1);
+    const recurse = (subs) => {
       for (const sub of subs) {
-        tagArchived(sub.line - 1);
+        archiveLine(sub.line - 1);
         if (sub.subs?.length)
-          await recurse(sub.subs);
+          recurse(sub.subs);
       }
     };
-    await recurse(subLines);
-    if (!isTopLevel) {
-      await writeFileLines(app, tFile, lines);
-      return true;
-    }
-    const allIdxs = /* @__PURE__ */ new Set([mainLineNum]);
-    const collect = (subs) => {
-      for (const s of subs) {
-        allIdxs.add(s.line);
-        collect(s.subs || []);
-      }
-    };
-    collect(subLines);
-    const sortedIdxs = Array.from(allIdxs).sort((a, b) => a - b);
-    const blockTexts = sortedIdxs.map((i) => lines[i - 1]);
-    const minIndent = Math.min(
-      ...blockTexts.map((l) => (l.match(/^(\s*)/) || [""])[0].length)
-    );
-    const normalizedBlock = blockTexts.map((l) => {
-      const indent = (l.match(/^(\s*)/) || [""])[0].length;
-      return " ".repeat(indent - minIndent) + l.slice(indent);
-    });
-    sortedIdxs.slice().reverse().forEach((i) => lines.splice(i - 1, 1));
-    const CALLOUT = "> [!Note]Kanban Archive";
-    let headingIdx = lines.findIndex((l) => l.trim() === CALLOUT);
-    let insertIdx;
-    if (headingIdx === -1) {
-      lines.push(CALLOUT);
-      insertIdx = lines.length;
-    } else {
-      insertIdx = headingIdx + 1;
-      while (insertIdx < lines.length && lines[insertIdx].startsWith(">"))
-        insertIdx++;
-    }
-    lines.splice(insertIdx, 0, ...normalizedBlock.map((t) => "> " + t));
+    recurse(subLines);
     await writeFileLines(app, tFile, lines);
     return true;
   } catch (e) {
@@ -1062,6 +1028,8 @@ function attachListeners(boardEl, config, app, refresh) {
         (o) => o !== card && o.dataset.file === file && subsHasLine(ownSubs, parseInt(o.dataset.line, 10))
       )
     );
+    if (family.size === 1 && topParent === card)
+      return;
     topParent.classList.add("kh-self");
     for (const member of family) {
       if (member === topParent)
