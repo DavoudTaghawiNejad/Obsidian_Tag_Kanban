@@ -578,57 +578,53 @@ async function promoteSubToChild(
   refresh: () => void
 ): Promise<boolean> {
   try {
-    const { tFile, lines } = await readFileLines(app, filePath);
-    if (subLineNum < 1 || subLineNum > lines.length) return false;
+    const normParent = normalizeTag(parentTag);
 
-    const original = lines[subLineNum - 1];
-
-    // Add the tag to the existing line in place — no removal or re-insertion
-    const existingTags = extractTags(original);
-    if (!existingTags.some((t) => normalizeTag(t) === normalizeTag(parentTag))) {
-      const withoutOrder = original.replace(/%% @\d+\w %%/g, "").trimEnd();
-      lines[subLineNum - 1] = `${withoutOrder} ${parentTag}`;
-      await writeFileLines(app, tFile, lines);
-    }
-
-    const newLineNum = subLineNum;
-
-    // Compute order: midpoint between parent card and the next one in column
+    // Compute order from current board state BEFORE modifying the file
     const targetPaths = await getTargetFilePaths(app, config);
     const allItems = await collectItems(app, targetPaths, config);
     const columns = groupByColumns(allItems, config);
-    const normParent = normalizeTag(parentTag);
+
+    const parentCard = (columns[normParent]?.cards || [])
+      .find((c: any) => c.order !== null && Math.abs(c.order - parentOrder) < 1e-10);
+
+    const prevSibling = parentCard
+      ? { digits: parentCard.digits || "0", len: parentCard.len || 1, order: parentOrder }
+      : { digits: parentOrder.toString().split(".")[1] || "0", len: (parentOrder.toString().split(".")[1] || "0").length, order: parentOrder };
+
     const higher = (columns[normParent]?.cards || [])
       .filter((c: any) => c.order !== null && c.order > parentOrder)
       .sort((a: any, b: any) => a.order - b.order);
 
     let newCalc: { digits: string; len: number };
     if (higher.length) {
-      newCalc = calcMidDigits(
-        {
-          digits: parentOrder.toString().split(".")[1] || "0",
-          len: (parentOrder.toString().split(".")[1] || "0").length,
-          order: parentOrder,
-        },
-        higher[0],
-        false
-      );
+      newCalc = calcMidDigits(prevSibling, higher[0], false);
     } else {
       const fallback = Math.min(0.999, parentOrder + 0.1);
-      newCalc = { digits: fallback.toFixed(3).split(".")[1], len: 3 };
+      newCalc = { digits: fallback.toFixed(Math.max(prevSibling.len, 3)).split(".")[1], len: Math.max(prevSibling.len, 3) };
     }
 
-    const newState: "expanded" | "collapsed" = [
-      config.normDone,
-      config.normLater,
-    ].includes(normParent)
-      ? "collapsed"
-      : "expanded";
-    await updateFileOrderComment(app, filePath, newLineNum, newCalc.digits, newState);
+    const newState: "expanded" | "collapsed" = [config.normDone, config.normLater].includes(normParent)
+      ? "collapsed" : "expanded";
 
-    new Notice(
-      `Tagged subtask with ${parentTag.replace(/^#/, "").toUpperCase()}.`
-    );
+    // Write tag + order in a single file write
+    const { tFile, lines } = await readFileLines(app, filePath);
+    if (subLineNum < 1 || subLineNum > lines.length) return false;
+
+    const parsed = parseTaskLine(lines[subLineNum - 1]);
+    if (!parsed.tags.some((t) => normalizeTag(t) === normParent)) {
+      parsed.tags.push(parentTag);
+    }
+    if (parentCard && !parsed.date) {
+      const dm = parentCard.item.text.match(/@\d{4}-\d{2}-\d{2}/);
+      if (dm) parsed.date = dm[0];
+    }
+    parsed.orderDigits = newCalc.digits;
+    parsed.orderState = newState;
+    lines[subLineNum - 1] = serializeTaskLine(parsed);
+    await writeFileLines(app, tFile, lines);
+
+    new Notice(`Tagged subtask with ${parentTag.replace(/^#/, "").toUpperCase()}.`);
     requestAnimationFrame(() => setTimeout(refresh, 50));
     return true;
   } catch (e: any) {

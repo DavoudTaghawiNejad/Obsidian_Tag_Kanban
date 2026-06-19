@@ -406,45 +406,38 @@ async function archiveToSection(app, filePath, mainLineNum, subLines, config, _i
 }
 async function promoteSubToChild(app, filePath, subLineNum, parentTag, parentOrder, config, refresh) {
   try {
-    const { tFile, lines } = await readFileLines(app, filePath);
-    if (subLineNum < 1 || subLineNum > lines.length)
-      return false;
-    const original = lines[subLineNum - 1];
-    const existingTags = extractTags(original);
-    if (!existingTags.some((t) => normalizeTag(t) === normalizeTag(parentTag))) {
-      const withoutOrder = original.replace(/%% @\d+\w %%/g, "").trimEnd();
-      lines[subLineNum - 1] = `${withoutOrder} ${parentTag}`;
-      await writeFileLines(app, tFile, lines);
-    }
-    const newLineNum = subLineNum;
+    const normParent = normalizeTag(parentTag);
     const targetPaths = await getTargetFilePaths(app, config);
     const allItems = await collectItems(app, targetPaths, config);
     const columns = groupByColumns(allItems, config);
-    const normParent = normalizeTag(parentTag);
+    const parentCard = (columns[normParent]?.cards || []).find((c) => c.order !== null && Math.abs(c.order - parentOrder) < 1e-10);
+    const prevSibling = parentCard ? { digits: parentCard.digits || "0", len: parentCard.len || 1, order: parentOrder } : { digits: parentOrder.toString().split(".")[1] || "0", len: (parentOrder.toString().split(".")[1] || "0").length, order: parentOrder };
     const higher = (columns[normParent]?.cards || []).filter((c) => c.order !== null && c.order > parentOrder).sort((a, b) => a.order - b.order);
     let newCalc;
     if (higher.length) {
-      newCalc = calcMidDigits(
-        {
-          digits: parentOrder.toString().split(".")[1] || "0",
-          len: (parentOrder.toString().split(".")[1] || "0").length,
-          order: parentOrder
-        },
-        higher[0],
-        false
-      );
+      newCalc = calcMidDigits(prevSibling, higher[0], false);
     } else {
       const fallback = Math.min(0.999, parentOrder + 0.1);
-      newCalc = { digits: fallback.toFixed(3).split(".")[1], len: 3 };
+      newCalc = { digits: fallback.toFixed(Math.max(prevSibling.len, 3)).split(".")[1], len: Math.max(prevSibling.len, 3) };
     }
-    const newState = [
-      config.normDone,
-      config.normLater
-    ].includes(normParent) ? "collapsed" : "expanded";
-    await updateFileOrderComment(app, filePath, newLineNum, newCalc.digits, newState);
-    new import_obsidian.Notice(
-      `Tagged subtask with ${parentTag.replace(/^#/, "").toUpperCase()}.`
-    );
+    const newState = [config.normDone, config.normLater].includes(normParent) ? "collapsed" : "expanded";
+    const { tFile, lines } = await readFileLines(app, filePath);
+    if (subLineNum < 1 || subLineNum > lines.length)
+      return false;
+    const parsed = parseTaskLine(lines[subLineNum - 1]);
+    if (!parsed.tags.some((t) => normalizeTag(t) === normParent)) {
+      parsed.tags.push(parentTag);
+    }
+    if (parentCard && !parsed.date) {
+      const dm = parentCard.item.text.match(/@\d{4}-\d{2}-\d{2}/);
+      if (dm)
+        parsed.date = dm[0];
+    }
+    parsed.orderDigits = newCalc.digits;
+    parsed.orderState = newState;
+    lines[subLineNum - 1] = serializeTaskLine(parsed);
+    await writeFileLines(app, tFile, lines);
+    new import_obsidian.Notice(`Tagged subtask with ${parentTag.replace(/^#/, "").toUpperCase()}.`);
     requestAnimationFrame(() => setTimeout(refresh, 50));
     return true;
   } catch (e) {
