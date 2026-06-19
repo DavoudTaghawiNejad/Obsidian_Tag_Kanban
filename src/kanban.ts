@@ -1297,6 +1297,7 @@ export async function buildBoard(
       return s;
     };
 
+    if (col.cards.length > 0) zone.appendChild(insertSlot(0));
     col.cards.forEach((card: any, i: number) => {
       zone.innerHTML += createCardHTML(card, card.multiTag, norm, config, vaultName);
       if (i < col.cards.length - 1) zone.appendChild(insertSlot(i + 1));
@@ -1372,7 +1373,7 @@ export function attachListeners(
   };
 
   const resolveTargetNorm = (zone: HTMLElement): string | null => {
-    const m = zone.className.match(/drop-zone-(\w+)/);
+    const m = zone.className.match(/drop-zone-([\w-]+)/);
     return m ? m[1] : null;
   };
 
@@ -1472,7 +1473,10 @@ export function attachListeners(
       : "expanded";
     const siblings = zone ? siblingDataFrom(zone) : [];
     const insertIdx = zone ? currentInsertIndex : siblings.length;
-    const newCalc = calcInsertOrder(siblings, insertIdx, card.isPromoted);
+    const isMulti = card.originalTags
+      .map(normalizeTag)
+      .filter((t: string) => config.normKanban.includes(t)).length > 1;
+    const newCalc = calcInsertOrder(siblings, insertIdx, isMulti);
     const colTitle = targetTag
       .replace(/^#/, "")
       .replace(/\b\w/g, (l: string) => l.toUpperCase());

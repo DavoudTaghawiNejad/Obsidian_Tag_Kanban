@@ -957,6 +957,8 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
       s.dataset.index = String(idx);
       return s;
     };
+    if (col.cards.length > 0)
+      zone.appendChild(insertSlot(0));
     col.cards.forEach((card, i) => {
       zone.innerHTML += createCardHTML(card, card.multiTag, norm, config, vaultName);
       if (i < col.cards.length - 1)
@@ -1017,7 +1019,7 @@ function attachListeners(boardEl, config, app, refresh) {
     }
   };
   const resolveTargetNorm = (zone) => {
-    const m = zone.className.match(/drop-zone-(\w+)/);
+    const m = zone.className.match(/drop-zone-([\w-]+)/);
     return m ? m[1] : null;
   };
   const clearHighlights = () => {
@@ -1100,7 +1102,8 @@ function attachListeners(boardEl, config, app, refresh) {
     ].includes(targetNorm) ? "collapsed" : "expanded";
     const siblings = zone ? siblingDataFrom(zone) : [];
     const insertIdx = zone ? currentInsertIndex : siblings.length;
-    const newCalc = calcInsertOrder(siblings, insertIdx, card.isPromoted);
+    const isMulti = card.originalTags.map(normalizeTag).filter((t) => config.normKanban.includes(t)).length > 1;
+    const newCalc = calcInsertOrder(siblings, insertIdx, isMulti);
     const colTitle = targetTag.replace(/^#/, "").replace(/\b\w/g, (l) => l.toUpperCase());
     if (targetNorm === config.normLater) {
       const { lines } = await readFileLines(app, card.filePath);
