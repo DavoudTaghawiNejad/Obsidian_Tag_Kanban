@@ -1011,9 +1011,7 @@ function inputStyle() {
 }
 
 function buttonHtml(label: string, accent: boolean) {
-  const bg = accent
-    ? "var(--kb-accent)"
-    : "var(--background-modifier-error)";
+  const bg = accent ? "var(--interactive-accent)" : "var(--background-modifier-border)";
   const color = accent ? "var(--text-on-accent)" : "var(--text-normal)";
   return `<button style="padding:8px 16px;background:${bg};color:${color};border:none;border-radius:4px;cursor:pointer;">${label}</button>`;
 }

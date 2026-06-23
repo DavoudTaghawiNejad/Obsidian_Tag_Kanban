@@ -732,7 +732,7 @@ function inputStyle() {
   return "width:100%;padding:8px;margin-bottom:10px;border:1px solid var(--background-modifier-border);border-radius:4px;box-sizing:border-box;background:var(--background-secondary);color:var(--text-normal);";
 }
 function buttonHtml(label, accent) {
-  const bg = accent ? "var(--kb-accent)" : "var(--background-modifier-error)";
+  const bg = accent ? "var(--interactive-accent)" : "var(--background-modifier-border)";
   const color = accent ? "var(--text-on-accent)" : "var(--text-normal)";
   return `<button style="padding:8px 16px;background:${bg};color:${color};border:none;border-radius:4px;cursor:pointer;">${label}</button>`;
 }
