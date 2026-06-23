@@ -238,7 +238,8 @@ function linksToHtml(text, vaultName) {
       return `<a href="${url}" target="_blank" rel="noopener" title="${title}" style="display:inline-block;padding:0 5px;border-radius:4px;border:1px solid var(--kb-link);color:var(--kb-link);text-decoration:none;font-size:.8em;line-height:1.6;vertical-align:middle;">\u{1F517}</a>`;
     }
   );
-  text = text.replace(/(?<!href=")https?:\/\/[^\s<>"]+/g, (url) => {
+  text = text.replace(/<(https?:\/\/[^\s<>"]+)>|(?<!href=")(https?:\/\/[^\s<>"]+)/g, (_, bracketed, bare) => {
+    const url = bracketed ?? bare;
     const title = url.replace(/"/g, "&quot;");
     return `<a href="${url}" target="_blank" rel="noopener" title="${title}" style="display:inline-block;padding:0 5px;border-radius:4px;border:1px solid var(--kb-link);color:var(--kb-link);text-decoration:none;font-size:.8em;line-height:1.6;vertical-align:middle;">\u{1F517}</a>`;
   });
@@ -946,6 +947,7 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
       #kanban-scroll::-webkit-scrollbar{height:8px}
       .kanban-card{-webkit-user-select:none;user-select:none;touch-action:none;}
       .drop-zone{touch-action:none;}
+      #kanban-wrapper [data-col-container]:last-child .drop-zone{border-right:2px dashed var(--background-modifier-border);}
       .kanban-card.kh-self{outline:4px solid var(--kb-family-self)!important;background:color-mix(in srgb,var(--kb-family-self) 20%,var(--kb-card-bg))!important;}
       .kanban-card.kh-parent{outline:4px solid var(--kb-family-parent)!important;background:color-mix(in srgb,var(--kb-family-parent) 20%,var(--kb-card-bg))!important;}
       .kanban-card.kh-sibling{outline:4px solid var(--kb-family-sibling)!important;background:color-mix(in srgb,var(--kb-family-sibling) 20%,var(--kb-card-bg))!important;}
@@ -994,10 +996,10 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
     const col = columns[norm];
     if (!col)
       continue;
-    const colStyle = isNarrow ? `width:calc(100% - 16px);margin:0 8px 20px;padding:10px;` : `flex:1;min-width:200px;max-width:260px;padding:10px 4px 10px 0;margin:0;display:flex;flex-direction:column;`;
+    const colStyle = isNarrow ? `width:calc(100% - 16px);margin:0 8px 20px;padding:10px;` : `flex:1;min-width:200px;max-width:260px;padding:10px 0 10px 0;margin:0;display:flex;flex-direction:column;`;
     const colDiv = scroll.createEl("div", { attr: { style: colStyle, "data-col-container": norm } });
     const header = colDiv.createEl("div", {
-      attr: { style: "display:flex;align-items:center;margin-bottom:10px;" }
+      attr: { style: "display:flex;align-items:center;margin-bottom:10px;padding:0 4px;" }
     });
     header.createEl("h4", {
       text: col.rawTag.replace(/^#/, "").toUpperCase(),
@@ -1022,7 +1024,7 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
     const zone = colDiv.createEl("div", {
       attr: {
         class: `drop-zone drop-zone-${norm}`,
-        style: "min-height:200px;border:2px dashed var(--background-modifier-border);border-radius:4px;padding:5px;flex-grow:1;display:flex;flex-direction:column;"
+        style: "min-height:200px;border:2px dashed var(--background-modifier-border);border-right:none;border-radius:0;padding:5px;flex-grow:1;display:flex;flex-direction:column;"
       }
     });
     const insertSlot = (idx) => {

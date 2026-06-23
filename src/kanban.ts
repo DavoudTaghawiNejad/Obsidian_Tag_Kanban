@@ -330,8 +330,9 @@ function linksToHtml(text: string, vaultName: string): string {
     }
   );
 
-  // 3. Bare URLs (not already inside href="…")
-  text = text.replace(/(?<!href=")https?:\/\/[^\s<>"]+/g, (url) => {
+  // 3. Bare URLs — handles both <https://…> autolinks (strips the <>) and plain URLs
+  text = text.replace(/<(https?:\/\/[^\s<>"]+)>|(?<!href=")(https?:\/\/[^\s<>"]+)/g, (_, bracketed, bare) => {
+    const url = bracketed ?? bare;
     const title = url.replace(/"/g, "&quot;");
     return `<a href="${url}" target="_blank" rel="noopener" title="${title}" style="display:inline-block;padding:0 5px;border-radius:4px;border:1px solid var(--kb-link);color:var(--kb-link);text-decoration:none;font-size:.8em;line-height:1.6;vertical-align:middle;">🔗</a>`;
   });
