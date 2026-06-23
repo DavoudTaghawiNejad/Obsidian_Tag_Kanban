@@ -27,6 +27,7 @@ export interface KanbanConfig {
   normDone: string;
   normToday: string;
   normLater: string;
+  allChildrenDoneColor: string;
 }
 
 export function buildConfig(settings: KanbanSettings): KanbanConfig {
@@ -43,6 +44,7 @@ export function buildConfig(settings: KanbanSettings): KanbanConfig {
     normDone: normalizeTag(settings.doneColumn),
     normToday: normalizeTag(settings.todayColumn),
     normLater: normalizeTag(settings.laterColumn),
+    allChildrenDoneColor: settings.allChildrenDoneColor,
   };
 }
 
@@ -1060,6 +1062,22 @@ function createCardHTML(
   const hasSubs = item.item.subs.length > 0;
   const isExpanded = item.state === "expanded";
 
+  // Returns true if any descendant has a non-done kanban column tag.
+  // Returns true if any node in the subtree has a non-done kanban column tag.
+  function hasActiveDescendant(subs: any[]): boolean {
+    for (const s of subs ?? []) {
+      const tags: string[] = s.tags ?? [];
+      if (tags.some((t: string) => {
+        const norm = normalizeTag(t);
+        return config.normKanban.includes(norm) && norm !== config.normDone;
+      })) return true;
+      if (s.subs?.length && hasActiveDescendant(s.subs)) return true;
+    }
+    return false;
+  }
+  // Border when the card has children but none of them are in an active column.
+  const allChildrenDone = item.item.subs.length > 0 && !hasActiveDescendant(item.item.subs);
+
   function renderSub(sub: any, depth: number): string {
     const parentTag =
       item.item.tags.find((t: string) => normalizeTag(t) === currentNorm) || "";
@@ -1109,7 +1127,9 @@ function createCardHTML(
 
   const border = isMulti
     ? "background:var(--background-modifier-error-hover);border:1px solid var(--background-modifier-error);"
-    : "border:1px solid var(--background-modifier-border);";
+    : allChildrenDone
+      ? `border:2px solid ${config.allChildrenDoneColor};`
+      : "border:1px solid var(--background-modifier-border);";
 
   const src = item.source.path.split("/").pop().replace(/\.md$/, "");
   const href = `obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(item.filePath)}`;

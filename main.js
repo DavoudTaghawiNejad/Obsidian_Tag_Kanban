@@ -43,7 +43,8 @@ function buildConfig(settings) {
     normKanban,
     normDone: normalizeTag(settings.doneColumn),
     normToday: normalizeTag(settings.todayColumn),
-    normLater: normalizeTag(settings.laterColumn)
+    normLater: normalizeTag(settings.laterColumn),
+    allChildrenDoneColor: settings.allChildrenDoneColor
   };
 }
 function validateConfig(settings) {
@@ -776,6 +777,20 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
   const mainContent = linksToHtml(rawText, vaultName);
   const hasSubs = item.item.subs.length > 0;
   const isExpanded = item.state === "expanded";
+  function hasActiveDescendant(subs) {
+    for (const s of subs ?? []) {
+      const tags = s.tags ?? [];
+      if (tags.some((t) => {
+        const norm = normalizeTag(t);
+        return config.normKanban.includes(norm) && norm !== config.normDone;
+      }))
+        return true;
+      if (s.subs?.length && hasActiveDescendant(s.subs))
+        return true;
+    }
+    return false;
+  }
+  const allChildrenDone = item.item.subs.length > 0 && !hasActiveDescendant(item.item.subs);
   function renderSub(sub, depth) {
     const parentTag = item.item.tags.find((t) => normalizeTag(t) === currentNorm) || "";
     const hasCheckbox = /^- \[[ xX]\] /.test(sub.text);
@@ -809,7 +824,7 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
            <div style="padding-left:8px;">${renderSubTree(item.item.subs)}</div>
          </details>
        </div>` : `<div class="card-title" style="padding:6px 0;font-weight:600;">${mainContent}</div>`;
-  const border = isMulti ? "background:var(--background-modifier-error-hover);border:1px solid var(--background-modifier-error);" : "border:1px solid var(--background-modifier-border);";
+  const border = isMulti ? "background:var(--background-modifier-error-hover);border:1px solid var(--background-modifier-error);" : allChildrenDone ? `border:2px solid ${config.allChildrenDoneColor};` : "border:1px solid var(--background-modifier-border);";
   const src = item.source.path.split("/").pop().replace(/\.md$/, "");
   const href = `obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(item.filePath)}`;
   const badge = `<div style="margin-top:8px;font-size:.8em;color:var(--text-muted);">
@@ -1778,7 +1793,8 @@ var DEFAULT_SETTINGS = {
   laterColumn: "#later",
   newTaskInsert: "Tasks",
   parentPages: [],
-  allVaultNotes: true
+  allVaultNotes: true,
+  allChildrenDoneColor: "#e03e3e"
 };
 var KanbanPlugin = class extends import_obsidian3.Plugin {
   async onload() {
@@ -1847,6 +1863,12 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
     new import_obsidian3.Setting(containerEl).setName("Later column").setDesc("Tag for the scheduled / later column \u2014 shows a date picker on drop").addText(
       (text) => text.setPlaceholder("#later").setValue(this.plugin.settings.laterColumn).onChange(async (value) => {
         this.plugin.settings.laterColumn = value.trim();
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian3.Setting(containerEl).setName("All children done \u2014 highlight color").setDesc("Border color for cards whose child tasks are all done (hex or CSS color). Default: #e03e3e").addText(
+      (text) => text.setPlaceholder("#e03e3e").setValue(this.plugin.settings.allChildrenDoneColor).onChange(async (value) => {
+        this.plugin.settings.allChildrenDoneColor = value.trim();
         await this.plugin.saveSettings();
       })
     );

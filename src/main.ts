@@ -9,6 +9,7 @@ export interface KanbanSettings {
   newTaskInsert: string;
   parentPages: string[];
   allVaultNotes: boolean;
+  allChildrenDoneColor: string;
 }
 
 export const DEFAULT_SETTINGS: KanbanSettings = {
@@ -19,6 +20,7 @@ export const DEFAULT_SETTINGS: KanbanSettings = {
   newTaskInsert: "Tasks",
   parentPages: [],
   allVaultNotes: true,
+  allChildrenDoneColor: "#e03e3e",
 };
 
 export default class KanbanPlugin extends Plugin {
@@ -131,6 +133,19 @@ class KanbanSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.laterColumn)
           .onChange(async (value) => {
             this.plugin.settings.laterColumn = value.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("All children done — highlight color")
+      .setDesc("Border color for cards whose child tasks are all done (hex or CSS color). Default: #e03e3e")
+      .addText((text) =>
+        text
+          .setPlaceholder("#e03e3e")
+          .setValue(this.plugin.settings.allChildrenDoneColor)
+          .onChange(async (value) => {
+            this.plugin.settings.allChildrenDoneColor = value.trim();
             await this.plugin.saveSettings();
           })
       );
