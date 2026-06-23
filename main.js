@@ -44,7 +44,18 @@ function buildConfig(settings) {
     normDone: normalizeTag(settings.doneColumn),
     normToday: normalizeTag(settings.todayColumn),
     normLater: normalizeTag(settings.laterColumn),
-    allChildrenDoneColor: settings.allChildrenDoneColor
+    allChildrenDoneColor: settings.allChildrenDoneColor,
+    columnColors: Object.fromEntries(
+      (settings.kanban || []).map((tag, i) => [normalizeTag(tag), (settings.columnColors || [])[i] || ""])
+    ),
+    colorCardBg: settings.colorCardBg || "",
+    colorColumnBg: settings.colorColumnBg || "",
+    colorText: settings.colorText || "",
+    colorAccent: settings.colorAccent || "",
+    colorLink: settings.colorLink || "",
+    colorFamilySelf: settings.colorFamilySelf || "#e03e3e",
+    colorFamilyParent: settings.colorFamilyParent || "#2db55d",
+    colorFamilySibling: settings.colorFamilySibling || "#4a90d9"
   };
 }
 function validateConfig(settings) {
@@ -217,19 +228,19 @@ function linksToHtml(text, vaultName) {
         href += `&section=${encodeURIComponent(section)}`;
       const noteName = filePath.split("/").pop().replace(/\.md$/, "");
       const label = (alias || noteName).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-      return `<a href="${href}" style="color:var(--text-accent);text-decoration:underline dotted;text-underline-offset:2px;">${label}</a>`;
+      return `<a href="${href}" style="color:var(--kb-link);text-decoration:underline dotted;text-underline-offset:2px;">${label}</a>`;
     }
   );
   text = text.replace(
     /\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g,
     (_, label, url) => {
       const title = label.replace(/"/g, "&quot;");
-      return `<a href="${url}" target="_blank" rel="noopener" title="${title}" style="display:inline-block;padding:0 5px;border-radius:4px;border:1px solid var(--text-accent);color:var(--text-accent);text-decoration:none;font-size:.8em;line-height:1.6;vertical-align:middle;">\u{1F517}</a>`;
+      return `<a href="${url}" target="_blank" rel="noopener" title="${title}" style="display:inline-block;padding:0 5px;border-radius:4px;border:1px solid var(--kb-link);color:var(--kb-link);text-decoration:none;font-size:.8em;line-height:1.6;vertical-align:middle;">\u{1F517}</a>`;
     }
   );
   text = text.replace(/(?<!href=")https?:\/\/[^\s<>"]+/g, (url) => {
     const title = url.replace(/"/g, "&quot;");
-    return `<a href="${url}" target="_blank" rel="noopener" title="${title}" style="display:inline-block;padding:0 5px;border-radius:4px;border:1px solid var(--text-accent);color:var(--text-accent);text-decoration:none;font-size:.8em;line-height:1.6;vertical-align:middle;">\u{1F517}</a>`;
+    return `<a href="${url}" target="_blank" rel="noopener" title="${title}" style="display:inline-block;padding:0 5px;border-radius:4px;border:1px solid var(--kb-link);color:var(--kb-link);text-decoration:none;font-size:.8em;line-height:1.6;vertical-align:middle;">\u{1F517}</a>`;
   });
   return text;
 }
@@ -255,7 +266,7 @@ function renderCheckbox(text, opts = {}) {
   }
   if (vaultName)
     content = linksToHtml(content, vaultName);
-  const promoteHtml = enablePromotion && isSub && subLine && parentTag && parentOrder !== null ? `<span class="promote-icon" style="margin-left:6px;font-size:1.2em;cursor:pointer;color:var(--interactive-accent);"
+  const promoteHtml = enablePromotion && isSub && subLine && parentTag && parentOrder !== null ? `<span class="promote-icon" style="margin-left:6px;font-size:1.2em;cursor:pointer;color:var(--kb-accent);"
            data-line="${subLine}" data-parent-tag="${parentTag}" data-parent-order="${parentOrder}">&#9655</span>` : "";
   return `${cbHtml}${content}${promoteHtml}`;
 }
@@ -687,7 +698,7 @@ function inputStyle() {
   return "width:100%;padding:8px;margin-bottom:10px;border:1px solid var(--background-modifier-border);border-radius:4px;box-sizing:border-box;background:var(--background-secondary);color:var(--text-normal);";
 }
 function buttonHtml(label, accent) {
-  const bg = accent ? "var(--interactive-accent)" : "var(--background-modifier-error)";
+  const bg = accent ? "var(--kb-accent)" : "var(--background-modifier-error)";
   const color = accent ? "var(--text-on-accent)" : "var(--text-normal)";
   return `<button style="padding:8px 16px;background:${bg};color:${color};border:none;border-radius:4px;cursor:pointer;">${label}</button>`;
 }
@@ -777,20 +788,34 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
   const mainContent = linksToHtml(rawText, vaultName);
   const hasSubs = item.item.subs.length > 0;
   const isExpanded = item.state === "expanded";
+  function isCheckboxItem(s) {
+    return /^[-*+]\s+\[[ xX]\]/.test((s.text ?? "").trim());
+  }
   function hasActiveDescendant(subs) {
     for (const s of subs ?? []) {
-      const tags = s.tags ?? [];
-      if (tags.some((t) => {
-        const norm = normalizeTag(t);
-        return config.normKanban.includes(norm) && norm !== config.normDone;
-      }))
-        return true;
+      if (isCheckboxItem(s)) {
+        const tags = s.tags ?? [];
+        if (tags.some((t) => {
+          const norm = normalizeTag(t);
+          return config.normKanban.includes(norm) && norm !== config.normDone;
+        }))
+          return true;
+      }
       if (s.subs?.length && hasActiveDescendant(s.subs))
         return true;
     }
     return false;
   }
-  const allChildrenDone = item.item.subs.length > 0 && !hasActiveDescendant(item.item.subs);
+  function hasTaskDescendant(subs) {
+    for (const s of subs ?? []) {
+      if (isCheckboxItem(s))
+        return true;
+      if (s.subs?.length && hasTaskDescendant(s.subs))
+        return true;
+    }
+    return false;
+  }
+  const allChildrenDone = hasTaskDescendant(item.item.subs) && !hasActiveDescendant(item.item.subs);
   function renderSub(sub, depth) {
     const parentTag = item.item.tags.find((t) => normalizeTag(t) === currentNorm) || "";
     const hasCheckbox = /^- \[[ xX]\] /.test(sub.text);
@@ -817,18 +842,18 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
          <div class="card-title" style="padding:6px 32px 6px 0;font-weight:600;cursor:pointer;"
               onclick="this.closest('.kanban-card').querySelector('details').toggleAttribute('open')">
            ${mainContent}
-           <span style="position:absolute;top:6px;right:8px;font-size:1.4em;color:var(--interactive-accent);user-select:none;">${isExpanded ? "\u25B2" : "\u25BC"}</span>
+           <span style="position:absolute;top:6px;right:8px;font-size:1.4em;color:var(--kb-accent);user-select:none;">${isExpanded ? "\u25B2" : "\u25BC"}</span>
          </div>
          <details ${isExpanded ? "open" : ""} style="margin:4px 0 0 0;">
            <summary style="display:none;"></summary>
            <div style="padding-left:8px;">${renderSubTree(item.item.subs)}</div>
          </details>
        </div>` : `<div class="card-title" style="padding:6px 0;font-weight:600;">${mainContent}</div>`;
-  const border = isMulti ? "background:var(--background-modifier-error-hover);border:1px solid var(--background-modifier-error);" : allChildrenDone ? `border:2px solid ${config.allChildrenDoneColor};` : "border:1px solid var(--background-modifier-border);";
+  const border = isMulti ? "background:var(--background-modifier-error-hover);border:1px solid var(--background-modifier-error);" : allChildrenDone ? `border:2px solid var(--kb-children-done);background:color-mix(in srgb,var(--kb-children-done) 20%,var(--kb-card-bg));` : "border:1px solid var(--background-modifier-border);";
   const src = item.source.path.split("/").pop().replace(/\.md$/, "");
   const href = `obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(item.filePath)}`;
   const badge = `<div style="margin-top:8px;font-size:.8em;color:var(--text-muted);">
-    from: <a href="${href}" style="color:var(--text-accent);text-decoration:none;">${src}</a></div>`;
+    from: <a href="${href}" style="color:var(--kb-link);text-decoration:none;">${src}</a></div>`;
   return `<div draggable="true" class="kanban-card"
     data-file="${item.filePath}"
     data-line="${item.item.line}"
@@ -839,12 +864,42 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
     data-tags='${JSON.stringify(item.item.tags).replace(/'/g, "&#39;")}'
     data-subs='${JSON.stringify(item.item.subs.map((s) => ({ line: s.line, text: s.text, subs: s.subs || [] }))).replace(/'/g, "&#39;")}'
     data-is-promoted="${item.isPromoted || false}"
-    style="padding:10px 14px;margin:8px 0;border-radius:10px;background:var(--background-secondary);
+    style="padding:10px 14px;margin:8px 0;border-radius:10px;background:var(--kb-card-bg);color:var(--kb-text);
            box-shadow:0 2px 8px rgba(0,0,0,.12);${border};cursor:move;position:relative;">
-    ${item.indent > 0 ? '<span class="demote-btn" style="position:absolute;top:4px;left:6px;font-size:0.75em;color:var(--interactive-accent);line-height:1;cursor:pointer;">&#x25B6;</span>' : ""}
+    ${item.indent > 0 ? '<span class="demote-btn" style="position:absolute;top:4px;left:6px;font-size:0.75em;color:var(--kb-accent);line-height:1;cursor:pointer;">&#x25B6;</span>' : ""}
     ${bodyHTML}
     ${badge}
   </div>`;
+}
+function buildColorCSS(config) {
+  const cv = (val, fb) => val && val.trim() ? val.trim() : fb;
+  const perColRules = Object.entries(config.columnColors).filter(([, c]) => c).map(([norm, color]) => `
+      #kanban-wrapper [data-col-container="${norm}"]{background:${color};}
+      #kanban-wrapper [data-col-norm="${norm}"]{background:${color};color:var(--text-normal);}
+      #kanban-wrapper [data-col-norm="${norm}"][data-col-active="1"]{background:color-mix(in srgb,${color} 75%,black);color:var(--text-normal);}
+    `).join("");
+  return `
+    #kanban-wrapper{
+      --kb-card-bg:${cv(config.colorCardBg, "var(--background-secondary)")};
+      --kb-col-bg:${cv(config.colorColumnBg, "var(--background-secondary)")};
+      --kb-text:${cv(config.colorText, "var(--text-normal)")};
+      --kb-accent:${cv(config.colorAccent, "var(--interactive-accent)")};
+      --kb-link:${cv(config.colorLink, "var(--text-accent)")};
+      --kb-family-self:${config.colorFamilySelf};
+      --kb-family-parent:${config.colorFamilyParent};
+      --kb-family-sibling:${config.colorFamilySibling};
+      --kb-children-done:${config.allChildrenDoneColor};
+      color:var(--kb-text);
+    }
+    #kanban-wrapper [data-col-container]{background:var(--kb-col-bg);}
+    #kanban-wrapper [data-col-norm]{background:var(--kb-col-bg);color:var(--kb-text);}
+    #kanban-wrapper [data-col-norm][data-col-active="1"]{background:var(--kb-accent);color:var(--text-on-accent);font-weight:600;}
+    ${perColRules}`;
+}
+function refreshColorVars(config) {
+  const el = document.getElementById("kanban-color-vars");
+  if (el)
+    el.textContent = buildColorCSS(config);
 }
 async function buildBoard(app, containerEl, config, savedActiveCol) {
   const vaultName = app.vault.getName();
@@ -873,6 +928,13 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
   }
   const columns = groupByColumns(items, config);
   await assignInitialOrders(app, columns, config);
+  let _colorCss = document.getElementById("kanban-color-vars");
+  if (!_colorCss) {
+    _colorCss = document.createElement("style");
+    _colorCss.id = "kanban-color-vars";
+    document.head.appendChild(_colorCss);
+  }
+  _colorCss.textContent = buildColorCSS(config);
   let _css = document.getElementById("kanban-board-styles");
   if (!_css) {
     _css = document.createElement("style");
@@ -883,9 +945,9 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
       #kanban-scroll::-webkit-scrollbar{height:8px}
       .kanban-card{-webkit-user-select:none;user-select:none;touch-action:none;}
       .drop-zone{touch-action:none;}
-      .kanban-card.kh-self{outline:2px solid #e03e3e!important;background:rgba(224,62,62,0.08)!important;}
-      .kanban-card.kh-parent{outline:2px solid #2db55d!important;background:rgba(45,181,93,0.08)!important;}
-      .kanban-card.kh-sibling{outline:2px solid #4a90d9!important;background:rgba(74,144,217,0.08)!important;}
+      .kanban-card.kh-self{outline:4px solid var(--kb-family-self)!important;background:color-mix(in srgb,var(--kb-family-self) 20%,var(--kb-card-bg))!important;}
+      .kanban-card.kh-parent{outline:4px solid var(--kb-family-parent)!important;background:color-mix(in srgb,var(--kb-family-parent) 20%,var(--kb-card-bg))!important;}
+      .kanban-card.kh-sibling{outline:4px solid var(--kb-family-sibling)!important;background:color-mix(in srgb,var(--kb-family-sibling) 20%,var(--kb-card-bg))!important;}
       @media(max-width:700px){
         #kanban-scroll{flex-direction:column;overflow-x:hidden;}
         #kanban-scroll>div{flex:none!important;width:calc(100% - 16px)!important;max-width:none!important;margin:0 8px 16px!important;}
@@ -918,9 +980,7 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
         attr: {
           style: `min-height:44px;padding:8px 18px;border-radius:22px;
             border:1px solid var(--background-modifier-border);
-            background:${isActive ? "var(--interactive-accent)" : "var(--background-secondary)"};
-            color:${isActive ? "var(--text-on-accent)" : "var(--text-normal)"};
-            font-size:.9em;cursor:pointer;font-weight:${isActive ? "600" : "400"};
+            font-size:.9em;cursor:pointer;
             transition:transform .1s,outline .1s;touch-action:none;`
         }
       });
@@ -933,14 +993,14 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
     const col = columns[norm];
     if (!col)
       continue;
-    const colStyle = isNarrow ? "width:calc(100% - 16px);margin:0 8px 20px;padding:10px;background:var(--background-secondary);border-radius:8px;" : "flex:1;min-width:260px;max-width:320px;background:var(--background-secondary);padding:10px 10px 10px 0;border-radius:4px;margin:0 10px 0 0;display:flex;flex-direction:column;";
-    const colDiv = scroll.createEl("div", { attr: { style: colStyle } });
+    const colStyle = isNarrow ? `width:calc(100% - 16px);margin:0 8px 20px;padding:10px;border-radius:8px;` : `flex:1;min-width:260px;max-width:320px;padding:10px 10px 10px 0;border-radius:4px;margin:0 10px 0 0;display:flex;flex-direction:column;`;
+    const colDiv = scroll.createEl("div", { attr: { style: colStyle, "data-col-container": norm } });
     const header = colDiv.createEl("div", {
       attr: { style: "display:flex;align-items:center;margin-bottom:10px;" }
     });
     header.createEl("h4", {
       text: col.rawTag.replace(/^#/, "").toUpperCase(),
-      attr: { style: "margin:0;flex-grow:1;font-weight:bold;" }
+      attr: { style: "margin:0;flex-grow:1;font-weight:bold;color:var(--kb-text);" }
     });
     if (norm !== config.normDone) {
       const btn = header.createEl("button", {
@@ -1028,7 +1088,7 @@ function attachListeners(boardEl, config, app, refresh) {
       (s) => s.style.borderTopColor = "transparent"
     );
     if (nearest) {
-      nearest.style.borderTopColor = "var(--interactive-accent)";
+      nearest.style.borderTopColor = "var(--kb-accent)";
       currentInsertIndex = parseInt(nearest.dataset.index, 10);
     }
   };
@@ -1224,7 +1284,7 @@ function attachListeners(boardEl, config, app, refresh) {
       width:100%;box-sizing:border-box;
       background:var(--background-primary);
       color:var(--text-normal);
-      border:none;border-bottom:2px solid var(--interactive-accent);
+      border:none;border-bottom:2px solid var(--kb-accent);
       outline:none;padding:2px 0;font-size:inherit;font-weight:600;
       font-family:inherit;border-radius:0;`;
     card.setAttribute("draggable", "false");
@@ -1309,7 +1369,7 @@ function attachListeners(boardEl, config, app, refresh) {
     if (!zone)
       return;
     e.dataTransfer.dropEffect = "move";
-    zone.style.borderColor = "var(--interactive-accent)";
+    zone.style.borderColor = "var(--kb-accent)";
     highlightNearestSlot(zone, e.clientY);
   }
   function onDragLeave(e) {
@@ -1352,7 +1412,7 @@ function attachListeners(boardEl, config, app, refresh) {
     boardEl.querySelectorAll("[data-col-norm]").forEach((t) => {
       t.style.outline = "";
       t.style.transform = "";
-      t.style.background = t.dataset.colActive === "1" ? "var(--interactive-accent)" : "var(--background-secondary)";
+      t.style.background = "";
     });
   };
   const clearTouch = () => {
@@ -1432,12 +1492,14 @@ function attachListeners(boardEl, config, app, refresh) {
       touchTimer = setTimeout(() => {
         if (!selectedCard) {
           selectedCard = card;
-          card.style.outline = "2px solid var(--interactive-accent)";
+          card.style.outline = "2px solid var(--kb-accent)";
           card.style.transform = "scale(1.02)";
           boardEl.querySelectorAll("[data-col-norm]").forEach((t) => {
-            if (t.dataset.colActive !== "1")
-              t.style.background = "color-mix(in srgb, var(--interactive-accent) 15%, var(--background-secondary))";
-            t.style.outline = "1px dashed var(--interactive-accent)";
+            if (t.dataset.colActive !== "1") {
+              const cc = config.columnColors[t.dataset.colNorm || ""] || "";
+              t.style.background = cc ? `color-mix(in srgb,${cc} 85%,var(--kb-accent))` : `color-mix(in srgb,var(--kb-accent) 15%,var(--kb-col-bg))`;
+            }
+            t.style.outline = "1px dashed var(--kb-accent)";
           });
         }
       }, HOLD_DELAY);
@@ -1480,7 +1542,7 @@ function attachListeners(boardEl, config, app, refresh) {
           (z) => z.style.borderColor = "var(--background-modifier-border)"
         );
         if (zone2) {
-          zone2.style.borderColor = "var(--interactive-accent)";
+          zone2.style.borderColor = "var(--kb-accent)";
           highlightNearestSlot(zone2, clientY);
         }
         e.preventDefault();
@@ -1514,14 +1576,14 @@ function attachListeners(boardEl, config, app, refresh) {
       t.style.transform = "";
     });
     if (zone) {
-      zone.style.borderColor = "var(--interactive-accent)";
+      zone.style.borderColor = "var(--kb-accent)";
       highlightNearestSlot(zone, clientY);
     } else if (tabNorm) {
       const tab = boardEl.querySelector(
         `[data-col-norm="${tabNorm}"]`
       );
       if (tab) {
-        tab.style.outline = "2px solid var(--interactive-accent)";
+        tab.style.outline = "2px solid var(--kb-accent)";
         tab.style.transform = "scale(1.08)";
       }
     }
@@ -1604,7 +1666,7 @@ function attachListeners(boardEl, config, app, refresh) {
     const btn = e.target.closest("button[data-column]");
     if (!btn || btn.dataset.column !== config.normDone)
       return;
-    const zone = btn.closest("div[style*='background:var(--background-secondary)']")?.querySelector(".drop-zone");
+    const zone = btn.closest("[data-col-container]")?.querySelector(".drop-zone");
     if (!zone)
       return;
     let count = 0;
@@ -1713,6 +1775,10 @@ var KanbanView = class extends import_obsidian2.ItemView {
   async refresh() {
     await this.renderBoard();
   }
+  // Updates color CSS vars without a full re-render. Called from saveSettings().
+  refreshColors() {
+    refreshColorVars(buildConfig(this.plugin.settings));
+  }
   scheduleMidnightRefresh() {
     if (this.midnightTimer)
       clearTimeout(this.midnightTimer);
@@ -1794,7 +1860,16 @@ var DEFAULT_SETTINGS = {
   newTaskInsert: "Tasks",
   parentPages: [],
   allVaultNotes: true,
-  allChildrenDoneColor: "#e03e3e"
+  allChildrenDoneColor: "#e03e3e",
+  columnColors: [],
+  colorCardBg: "",
+  colorColumnBg: "",
+  colorText: "",
+  colorAccent: "",
+  colorLink: "",
+  colorFamilySelf: "#e03e3e",
+  colorFamilyParent: "#2db55d",
+  colorFamilySibling: "#4a90d9"
 };
 var KanbanPlugin = class extends import_obsidian3.Plugin {
   async onload() {
@@ -1831,6 +1906,9 @@ var KanbanPlugin = class extends import_obsidian3.Plugin {
   }
   async saveSettings() {
     await this.saveData(this.settings);
+    this.app.workspace.getLeavesOfType(VIEW_TYPE_KANBAN).forEach((leaf) => {
+      leaf.view.refreshColors();
+    });
   }
 };
 var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
@@ -1866,12 +1944,6 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("All children done \u2014 highlight color").setDesc("Border color for cards whose child tasks are all done (hex or CSS color). Default: #e03e3e").addText(
-      (text) => text.setPlaceholder("#e03e3e").setValue(this.plugin.settings.allChildrenDoneColor).onChange(async (value) => {
-        this.plugin.settings.allChildrenDoneColor = value.trim();
-        await this.plugin.saveSettings();
-      })
-    );
     new import_obsidian3.Setting(containerEl).setName("New task insert location").setDesc(
       'Note name (and optional heading) where the + button inserts new tasks, e.g. "Tasks" or "Tasks#Inbox"'
     ).addText(
@@ -1899,6 +1971,134 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
         })
       );
     }
+    containerEl.createEl("h3", { text: "Colors" });
+    containerEl.createEl("p", {
+      text: "Theme-override fields show a \u21BA button to revert to the Obsidian theme default.",
+      attr: { style: "color:var(--text-muted);font-size:.85em;margin-top:-6px;" }
+    });
+    const themeColor = (name, desc, get, set, fallback) => {
+      new import_obsidian3.Setting(containerEl).setName(name).setDesc(desc + (get() ? "" : " (using theme default)")).addColorPicker(
+        (cp) => cp.setValue(get() || fallback).onChange(async (value) => {
+          set(value);
+          await this.plugin.saveSettings();
+        })
+      ).addExtraButton(
+        (btn) => btn.setIcon("rotate-ccw").setTooltip("Reset to theme default").onClick(async () => {
+          set("");
+          await this.plugin.saveSettings();
+          this.display();
+        })
+      );
+    };
+    const fixedColor = (name, desc, get, set) => {
+      new import_obsidian3.Setting(containerEl).setName(name).setDesc(desc).addColorPicker(
+        (cp) => cp.setValue(get()).onChange(async (value) => {
+          set(value);
+          await this.plugin.saveSettings();
+        })
+      );
+    };
+    themeColor(
+      "Card background",
+      "Background color of each card.",
+      () => this.plugin.settings.colorCardBg,
+      (v) => {
+        this.plugin.settings.colorCardBg = v;
+      },
+      "#1e1e1e"
+    );
+    themeColor(
+      "Column background",
+      "Default background for columns without a per-column color.",
+      () => this.plugin.settings.colorColumnBg,
+      (v) => {
+        this.plugin.settings.colorColumnBg = v;
+      },
+      "#1e1e1e"
+    );
+    themeColor(
+      "Font color",
+      "Text color for cards, column headers, and tabs.",
+      () => this.plugin.settings.colorText,
+      (v) => {
+        this.plugin.settings.colorText = v;
+      },
+      "#ffffff"
+    );
+    themeColor(
+      "Accent / symbol color",
+      "Color for \u25B6 promote, \u25B2/\u25BC expand, active column tab, and drag highlight.",
+      () => this.plugin.settings.colorAccent,
+      (v) => {
+        this.plugin.settings.colorAccent = v;
+      },
+      "#7f6df2"
+    );
+    themeColor(
+      "Link color",
+      "Color for wiki links and URL badges on cards.",
+      () => this.plugin.settings.colorLink,
+      (v) => {
+        this.plugin.settings.colorLink = v;
+      },
+      "#7f6df2"
+    );
+    fixedColor(
+      "Family highlight \u2014 self",
+      "Outline color for the hovered card in family highlight mode.",
+      () => this.plugin.settings.colorFamilySelf,
+      (v) => {
+        this.plugin.settings.colorFamilySelf = v;
+      }
+    );
+    fixedColor(
+      "Family highlight \u2014 parent",
+      "Outline color for the parent card in family highlight mode.",
+      () => this.plugin.settings.colorFamilyParent,
+      (v) => {
+        this.plugin.settings.colorFamilyParent = v;
+      }
+    );
+    fixedColor(
+      "Family highlight \u2014 siblings",
+      "Outline color for sibling cards in family highlight mode.",
+      () => this.plugin.settings.colorFamilySibling,
+      (v) => {
+        this.plugin.settings.colorFamilySibling = v;
+      }
+    );
+    fixedColor(
+      "All children done \u2014 highlight",
+      "Border color for cards whose child tasks are all done or have no task children.",
+      () => this.plugin.settings.allChildrenDoneColor,
+      (v) => {
+        this.plugin.settings.allChildrenDoneColor = v;
+      }
+    );
+    containerEl.createEl("h4", { text: "Per-column colors" });
+    containerEl.createEl("p", {
+      text: "Background color for each column and its narrow-mode tab. \u21BA removes the custom color.",
+      attr: { style: "color:var(--text-muted);font-size:.85em;margin-top:-6px;" }
+    });
+    this.plugin.settings.kanban.forEach((tag, i) => {
+      const currentColor = (this.plugin.settings.columnColors || [])[i] || "";
+      new import_obsidian3.Setting(containerEl).setName(tag.replace(/^#/, "").toUpperCase()).addColorPicker(
+        (cp) => cp.setValue(currentColor || "#1e1e1e").onChange(async (value) => {
+          if (!this.plugin.settings.columnColors)
+            this.plugin.settings.columnColors = [];
+          this.plugin.settings.columnColors[i] = value;
+          await this.plugin.saveSettings();
+        })
+      ).addExtraButton(
+        (btn) => btn.setIcon("rotate-ccw").setTooltip("Remove custom color").onClick(async () => {
+          if (!this.plugin.settings.columnColors)
+            this.plugin.settings.columnColors = [];
+          this.plugin.settings.columnColors[i] = "";
+          await this.plugin.saveSettings();
+          this.display();
+        })
+      );
+    });
     new import_obsidian3.Setting(containerEl).setName("Open board").addButton(
       (btn) => btn.setButtonText("Open Kanban Board").onClick(() => {
         this.plugin.activateView();

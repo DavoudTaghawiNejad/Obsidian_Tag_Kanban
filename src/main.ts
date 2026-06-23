@@ -10,6 +10,16 @@ export interface KanbanSettings {
   parentPages: string[];
   allVaultNotes: boolean;
   allChildrenDoneColor: string;
+  // Colors — empty string means "use Obsidian theme default"
+  columnColors: string[];
+  colorCardBg: string;
+  colorColumnBg: string;
+  colorText: string;
+  colorAccent: string;
+  colorLink: string;
+  colorFamilySelf: string;
+  colorFamilyParent: string;
+  colorFamilySibling: string;
 }
 
 export const DEFAULT_SETTINGS: KanbanSettings = {
@@ -21,6 +31,15 @@ export const DEFAULT_SETTINGS: KanbanSettings = {
   parentPages: [],
   allVaultNotes: true,
   allChildrenDoneColor: "#e03e3e",
+  columnColors: [],
+  colorCardBg: "",
+  colorColumnBg: "",
+  colorText: "",
+  colorAccent: "",
+  colorLink: "",
+  colorFamilySelf: "#e03e3e",
+  colorFamilyParent: "#2db55d",
+  colorFamilySibling: "#4a90d9",
 };
 
 export default class KanbanPlugin extends Plugin {
@@ -66,6 +85,9 @@ export default class KanbanPlugin extends Plugin {
 
   async saveSettings() {
     await this.saveData(this.settings);
+    this.app.workspace.getLeavesOfType(VIEW_TYPE_KANBAN).forEach((leaf) => {
+      (leaf.view as KanbanView).refreshColors();
+    });
   }
 }
 
@@ -138,19 +160,6 @@ class KanbanSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("All children done — highlight color")
-      .setDesc("Border color for cards whose child tasks are all done (hex or CSS color). Default: #e03e3e")
-      .addText((text) =>
-        text
-          .setPlaceholder("#e03e3e")
-          .setValue(this.plugin.settings.allChildrenDoneColor)
-          .onChange(async (value) => {
-            this.plugin.settings.allChildrenDoneColor = value.trim();
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
       .setName("New task insert location")
       .setDesc(
         'Note name (and optional heading) where the + button inserts new tasks, e.g. "Tasks" or "Tasks#Inbox"'
@@ -199,6 +208,165 @@ class KanbanSettingTab extends PluginSettingTab {
             })
         );
     }
+
+    // ── Colors ────────────────────────────────────────────────────────────────
+    containerEl.createEl("h3", { text: "Colors" });
+    containerEl.createEl("p", {
+      text: "Theme-override fields show a ↺ button to revert to the Obsidian theme default.",
+      attr: { style: "color:var(--text-muted);font-size:.85em;margin-top:-6px;" },
+    });
+
+    // Helper: color picker that falls back to theme default when value is empty.
+    // Shows a ↺ reset button to clear the override.
+    const themeColor = (
+      name: string,
+      desc: string,
+      get: () => string,
+      set: (v: string) => void,
+      fallback: string
+    ) => {
+      new Setting(containerEl)
+        .setName(name)
+        .setDesc(desc + (get() ? "" : " (using theme default)"))
+        .addColorPicker((cp) =>
+          cp
+            .setValue(get() || fallback)
+            .onChange(async (value) => {
+              set(value);
+              await this.plugin.saveSettings();
+            })
+        )
+        .addExtraButton((btn) =>
+          btn
+            .setIcon("rotate-ccw")
+            .setTooltip("Reset to theme default")
+            .onClick(async () => {
+              set("");
+              await this.plugin.saveSettings();
+              this.display();
+            })
+        );
+    };
+
+    // Helper: required color (no theme-default option).
+    const fixedColor = (
+      name: string,
+      desc: string,
+      get: () => string,
+      set: (v: string) => void
+    ) => {
+      new Setting(containerEl)
+        .setName(name)
+        .setDesc(desc)
+        .addColorPicker((cp) =>
+          cp
+            .setValue(get())
+            .onChange(async (value) => {
+              set(value);
+              await this.plugin.saveSettings();
+            })
+        );
+    };
+
+    themeColor(
+      "Card background",
+      "Background color of each card.",
+      () => this.plugin.settings.colorCardBg,
+      (v) => { this.plugin.settings.colorCardBg = v; },
+      "#1e1e1e"
+    );
+
+    themeColor(
+      "Column background",
+      "Default background for columns without a per-column color.",
+      () => this.plugin.settings.colorColumnBg,
+      (v) => { this.plugin.settings.colorColumnBg = v; },
+      "#1e1e1e"
+    );
+
+    themeColor(
+      "Font color",
+      "Text color for cards, column headers, and tabs.",
+      () => this.plugin.settings.colorText,
+      (v) => { this.plugin.settings.colorText = v; },
+      "#ffffff"
+    );
+
+    themeColor(
+      "Accent / symbol color",
+      "Color for ▶ promote, ▲/▼ expand, active column tab, and drag highlight.",
+      () => this.plugin.settings.colorAccent,
+      (v) => { this.plugin.settings.colorAccent = v; },
+      "#7f6df2"
+    );
+
+    themeColor(
+      "Link color",
+      "Color for wiki links and URL badges on cards.",
+      () => this.plugin.settings.colorLink,
+      (v) => { this.plugin.settings.colorLink = v; },
+      "#7f6df2"
+    );
+
+    fixedColor(
+      "Family highlight — self",
+      "Outline color for the hovered card in family highlight mode.",
+      () => this.plugin.settings.colorFamilySelf,
+      (v) => { this.plugin.settings.colorFamilySelf = v; }
+    );
+
+    fixedColor(
+      "Family highlight — parent",
+      "Outline color for the parent card in family highlight mode.",
+      () => this.plugin.settings.colorFamilyParent,
+      (v) => { this.plugin.settings.colorFamilyParent = v; }
+    );
+
+    fixedColor(
+      "Family highlight — siblings",
+      "Outline color for sibling cards in family highlight mode.",
+      () => this.plugin.settings.colorFamilySibling,
+      (v) => { this.plugin.settings.colorFamilySibling = v; }
+    );
+
+    fixedColor(
+      "All children done — highlight",
+      "Border color for cards whose child tasks are all done or have no task children.",
+      () => this.plugin.settings.allChildrenDoneColor,
+      (v) => { this.plugin.settings.allChildrenDoneColor = v; }
+    );
+
+    containerEl.createEl("h4", { text: "Per-column colors" });
+    containerEl.createEl("p", {
+      text: "Background color for each column and its narrow-mode tab. ↺ removes the custom color.",
+      attr: { style: "color:var(--text-muted);font-size:.85em;margin-top:-6px;" },
+    });
+
+    this.plugin.settings.kanban.forEach((tag, i) => {
+      const currentColor = (this.plugin.settings.columnColors || [])[i] || "";
+      new Setting(containerEl)
+        .setName(tag.replace(/^#/, "").toUpperCase())
+        .addColorPicker((cp) =>
+          cp
+            .setValue(currentColor || "#1e1e1e")
+            .onChange(async (value) => {
+              if (!this.plugin.settings.columnColors) this.plugin.settings.columnColors = [];
+              this.plugin.settings.columnColors[i] = value;
+              await this.plugin.saveSettings();
+            })
+        )
+        .addExtraButton((btn) =>
+          btn
+            .setIcon("rotate-ccw")
+            .setTooltip("Remove custom color")
+            .onClick(async () => {
+              if (!this.plugin.settings.columnColors) this.plugin.settings.columnColors = [];
+              this.plugin.settings.columnColors[i] = "";
+              await this.plugin.saveSettings();
+              this.display();
+            })
+        );
+    });
 
     new Setting(containerEl)
       .setName("Open board")

@@ -28,6 +28,16 @@ export interface KanbanConfig {
   normToday: string;
   normLater: string;
   allChildrenDoneColor: string;
+  // Colors (empty string → fall back to Obsidian theme variable)
+  columnColors: Record<string, string>;
+  colorCardBg: string;
+  colorColumnBg: string;
+  colorText: string;
+  colorAccent: string;
+  colorLink: string;
+  colorFamilySelf: string;
+  colorFamilyParent: string;
+  colorFamilySibling: string;
 }
 
 export function buildConfig(settings: KanbanSettings): KanbanConfig {
@@ -45,6 +55,17 @@ export function buildConfig(settings: KanbanSettings): KanbanConfig {
     normToday: normalizeTag(settings.todayColumn),
     normLater: normalizeTag(settings.laterColumn),
     allChildrenDoneColor: settings.allChildrenDoneColor,
+    columnColors: Object.fromEntries(
+      (settings.kanban || []).map((tag, i) => [normalizeTag(tag), (settings.columnColors || [])[i] || ""])
+    ),
+    colorCardBg: settings.colorCardBg || "",
+    colorColumnBg: settings.colorColumnBg || "",
+    colorText: settings.colorText || "",
+    colorAccent: settings.colorAccent || "",
+    colorLink: settings.colorLink || "",
+    colorFamilySelf: settings.colorFamilySelf || "#e03e3e",
+    colorFamilyParent: settings.colorFamilyParent || "#2db55d",
+    colorFamilySibling: settings.colorFamilySibling || "#4a90d9",
   };
 }
 
@@ -296,7 +317,7 @@ function linksToHtml(text: string, vaultName: string): string {
         .replace(/&/g, "&amp;")
         .replace(/</g, "&lt;")
         .replace(/>/g, "&gt;");
-      return `<a href="${href}" style="color:var(--text-accent);text-decoration:underline dotted;text-underline-offset:2px;">${label}</a>`;
+      return `<a href="${href}" style="color:var(--kb-link);text-decoration:underline dotted;text-underline-offset:2px;">${label}</a>`;
     }
   );
 
@@ -305,14 +326,14 @@ function linksToHtml(text: string, vaultName: string): string {
     /\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g,
     (_, label: string, url: string) => {
       const title = label.replace(/"/g, "&quot;");
-      return `<a href="${url}" target="_blank" rel="noopener" title="${title}" style="display:inline-block;padding:0 5px;border-radius:4px;border:1px solid var(--text-accent);color:var(--text-accent);text-decoration:none;font-size:.8em;line-height:1.6;vertical-align:middle;">🔗</a>`;
+      return `<a href="${url}" target="_blank" rel="noopener" title="${title}" style="display:inline-block;padding:0 5px;border-radius:4px;border:1px solid var(--kb-link);color:var(--kb-link);text-decoration:none;font-size:.8em;line-height:1.6;vertical-align:middle;">🔗</a>`;
     }
   );
 
   // 3. Bare URLs (not already inside href="…")
   text = text.replace(/(?<!href=")https?:\/\/[^\s<>"]+/g, (url) => {
     const title = url.replace(/"/g, "&quot;");
-    return `<a href="${url}" target="_blank" rel="noopener" title="${title}" style="display:inline-block;padding:0 5px;border-radius:4px;border:1px solid var(--text-accent);color:var(--text-accent);text-decoration:none;font-size:.8em;line-height:1.6;vertical-align:middle;">🔗</a>`;
+    return `<a href="${url}" target="_blank" rel="noopener" title="${title}" style="display:inline-block;padding:0 5px;border-radius:4px;border:1px solid var(--kb-link);color:var(--kb-link);text-decoration:none;font-size:.8em;line-height:1.6;vertical-align:middle;">🔗</a>`;
   });
 
   return text;
@@ -362,7 +383,7 @@ function renderCheckbox(
 
   const promoteHtml =
     enablePromotion && isSub && subLine && parentTag && parentOrder !== null
-      ? `<span class="promote-icon" style="margin-left:6px;font-size:1.2em;cursor:pointer;color:var(--interactive-accent);"
+      ? `<span class="promote-icon" style="margin-left:6px;font-size:1.2em;cursor:pointer;color:var(--kb-accent);"
            data-line="${subLine}" data-parent-tag="${parentTag}" data-parent-order="${parentOrder}">&#9655</span>`
       : "";
 
@@ -947,7 +968,7 @@ function inputStyle() {
 
 function buttonHtml(label: string, accent: boolean) {
   const bg = accent
-    ? "var(--interactive-accent)"
+    ? "var(--kb-accent)"
     : "var(--background-modifier-error)";
   const color = accent ? "var(--text-on-accent)" : "var(--text-normal)";
   return `<button style="padding:8px 16px;background:${bg};color:${color};border:none;border-radius:4px;cursor:pointer;">${label}</button>`;
@@ -1062,21 +1083,37 @@ function createCardHTML(
   const hasSubs = item.item.subs.length > 0;
   const isExpanded = item.state === "expanded";
 
-  // Returns true if any descendant has a non-done kanban column tag.
-  // Returns true if any node in the subtree has a non-done kanban column tag.
+  // Only checkbox items (- [ ] or - [x]) are tasks; plain bullet points are not.
+  function isCheckboxItem(s: any): boolean {
+    return /^[-*+]\s+\[[ xX]\]/.test((s.text ?? "").trim());
+  }
+
+  // Returns true if any checkbox descendant has a non-done kanban column tag.
   function hasActiveDescendant(subs: any[]): boolean {
     for (const s of subs ?? []) {
-      const tags: string[] = s.tags ?? [];
-      if (tags.some((t: string) => {
-        const norm = normalizeTag(t);
-        return config.normKanban.includes(norm) && norm !== config.normDone;
-      })) return true;
+      if (isCheckboxItem(s)) {
+        const tags: string[] = s.tags ?? [];
+        if (tags.some((t: string) => {
+          const norm = normalizeTag(t);
+          return config.normKanban.includes(norm) && norm !== config.normDone;
+        })) return true;
+      }
       if (s.subs?.length && hasActiveDescendant(s.subs)) return true;
     }
     return false;
   }
-  // Border when the card has children but none of them are in an active column.
-  const allChildrenDone = item.item.subs.length > 0 && !hasActiveDescendant(item.item.subs);
+
+  // Returns true if there is at least one checkbox task anywhere in the subtree.
+  function hasTaskDescendant(subs: any[]): boolean {
+    for (const s of subs ?? []) {
+      if (isCheckboxItem(s)) return true;
+      if (s.subs?.length && hasTaskDescendant(s.subs)) return true;
+    }
+    return false;
+  }
+
+  // Border when the card has checkbox task descendants but none are in an active column.
+  const allChildrenDone = hasTaskDescendant(item.item.subs) && !hasActiveDescendant(item.item.subs);
 
   function renderSub(sub: any, depth: number): string {
     const parentTag =
@@ -1116,7 +1153,7 @@ function createCardHTML(
          <div class="card-title" style="padding:6px 32px 6px 0;font-weight:600;cursor:pointer;"
               onclick="this.closest('.kanban-card').querySelector('details').toggleAttribute('open')">
            ${mainContent}
-           <span style="position:absolute;top:6px;right:8px;font-size:1.4em;color:var(--interactive-accent);user-select:none;">${isExpanded ? "▲" : "▼"}</span>
+           <span style="position:absolute;top:6px;right:8px;font-size:1.4em;color:var(--kb-accent);user-select:none;">${isExpanded ? "▲" : "▼"}</span>
          </div>
          <details ${isExpanded ? "open" : ""} style="margin:4px 0 0 0;">
            <summary style="display:none;"></summary>
@@ -1128,13 +1165,13 @@ function createCardHTML(
   const border = isMulti
     ? "background:var(--background-modifier-error-hover);border:1px solid var(--background-modifier-error);"
     : allChildrenDone
-      ? `border:2px solid ${config.allChildrenDoneColor};`
+      ? `border:2px solid var(--kb-children-done);background:color-mix(in srgb,var(--kb-children-done) 20%,var(--kb-card-bg));`
       : "border:1px solid var(--background-modifier-border);";
 
   const src = item.source.path.split("/").pop().replace(/\.md$/, "");
   const href = `obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(item.filePath)}`;
   const badge = `<div style="margin-top:8px;font-size:.8em;color:var(--text-muted);">
-    from: <a href="${href}" style="color:var(--text-accent);text-decoration:none;">${src}</a></div>`;
+    from: <a href="${href}" style="color:var(--kb-link);text-decoration:none;">${src}</a></div>`;
 
   return `<div draggable="true" class="kanban-card"
     data-file="${item.filePath}"
@@ -1146,15 +1183,48 @@ function createCardHTML(
     data-tags='${JSON.stringify(item.item.tags).replace(/'/g, "&#39;")}'
     data-subs='${JSON.stringify(item.item.subs.map((s: any) => ({ line: s.line, text: s.text, subs: s.subs || [] }))).replace(/'/g, "&#39;")}'
     data-is-promoted="${item.isPromoted || false}"
-    style="padding:10px 14px;margin:8px 0;border-radius:10px;background:var(--background-secondary);
+    style="padding:10px 14px;margin:8px 0;border-radius:10px;background:var(--kb-card-bg);color:var(--kb-text);
            box-shadow:0 2px 8px rgba(0,0,0,.12);${border};cursor:move;position:relative;">
-    ${item.indent > 0 ? '<span class="demote-btn" style="position:absolute;top:4px;left:6px;font-size:0.75em;color:var(--interactive-accent);line-height:1;cursor:pointer;">&#x25B6;</span>' : ''}
+    ${item.indent > 0 ? '<span class="demote-btn" style="position:absolute;top:4px;left:6px;font-size:0.75em;color:var(--kb-accent);line-height:1;cursor:pointer;">&#x25B6;</span>' : ''}
     ${bodyHTML}
     ${badge}
   </div>`;
 }
 
 // ─── BOARD BUILD ─────────────────────────────────────────────────────────────
+
+function buildColorCSS(config: KanbanConfig): string {
+  const cv = (val: string, fb: string) => (val && val.trim()) ? val.trim() : fb;
+  const perColRules = Object.entries(config.columnColors)
+    .filter(([, c]) => c)
+    .map(([norm, color]) => `
+      #kanban-wrapper [data-col-container="${norm}"]{background:${color};}
+      #kanban-wrapper [data-col-norm="${norm}"]{background:${color};color:var(--text-normal);}
+      #kanban-wrapper [data-col-norm="${norm}"][data-col-active="1"]{background:color-mix(in srgb,${color} 75%,black);color:var(--text-normal);}
+    `).join("");
+  return `
+    #kanban-wrapper{
+      --kb-card-bg:${cv(config.colorCardBg,"var(--background-secondary)")};
+      --kb-col-bg:${cv(config.colorColumnBg,"var(--background-secondary)")};
+      --kb-text:${cv(config.colorText,"var(--text-normal)")};
+      --kb-accent:${cv(config.colorAccent,"var(--interactive-accent)")};
+      --kb-link:${cv(config.colorLink,"var(--text-accent)")};
+      --kb-family-self:${config.colorFamilySelf};
+      --kb-family-parent:${config.colorFamilyParent};
+      --kb-family-sibling:${config.colorFamilySibling};
+      --kb-children-done:${config.allChildrenDoneColor};
+      color:var(--kb-text);
+    }
+    #kanban-wrapper [data-col-container]{background:var(--kb-col-bg);}
+    #kanban-wrapper [data-col-norm]{background:var(--kb-col-bg);color:var(--kb-text);}
+    #kanban-wrapper [data-col-norm][data-col-active="1"]{background:var(--kb-accent);color:var(--text-on-accent);font-weight:600;}
+    ${perColRules}`;
+}
+
+export function refreshColorVars(config: KanbanConfig): void {
+  const el = document.getElementById("kanban-color-vars") as HTMLStyleElement | null;
+  if (el) el.textContent = buildColorCSS(config);
+}
 
 export async function buildBoard(
   app: App,
@@ -1194,16 +1264,21 @@ export async function buildBoard(
   const columns = groupByColumns(items, config);
   await assignInitialOrders(app, columns, config);
 
-  // Inject CSS (always refresh so changes take effect without full reload)
+  // Color vars — updated live via refreshColorVars() without a full re-render
+  let _colorCss = document.getElementById("kanban-color-vars");
+  if (!_colorCss) { _colorCss = document.createElement("style"); _colorCss.id = "kanban-color-vars"; document.head.appendChild(_colorCss); }
+  (_colorCss as HTMLStyleElement).textContent = buildColorCSS(config);
+
+  // Static styles — updated only on board build
   let _css = document.getElementById("kanban-board-styles");
   if (!_css) { _css = document.createElement("style"); _css.id = "kanban-board-styles"; document.head.appendChild(_css); }
   (_css as HTMLStyleElement).textContent = `
       #kanban-scroll::-webkit-scrollbar{height:8px}
       .kanban-card{-webkit-user-select:none;user-select:none;touch-action:none;}
       .drop-zone{touch-action:none;}
-      .kanban-card.kh-self{outline:2px solid #e03e3e!important;background:rgba(224,62,62,0.08)!important;}
-      .kanban-card.kh-parent{outline:2px solid #2db55d!important;background:rgba(45,181,93,0.08)!important;}
-      .kanban-card.kh-sibling{outline:2px solid #4a90d9!important;background:rgba(74,144,217,0.08)!important;}
+      .kanban-card.kh-self{outline:4px solid var(--kb-family-self)!important;background:color-mix(in srgb,var(--kb-family-self) 20%,var(--kb-card-bg))!important;}
+      .kanban-card.kh-parent{outline:4px solid var(--kb-family-parent)!important;background:color-mix(in srgb,var(--kb-family-parent) 20%,var(--kb-card-bg))!important;}
+      .kanban-card.kh-sibling{outline:4px solid var(--kb-family-sibling)!important;background:color-mix(in srgb,var(--kb-family-sibling) 20%,var(--kb-card-bg))!important;}
       @media(max-width:700px){
         #kanban-scroll{flex-direction:column;overflow-x:hidden;}
         #kanban-scroll>div{flex:none!important;width:calc(100% - 16px)!important;max-width:none!important;margin:0 8px 16px!important;}
@@ -1247,9 +1322,7 @@ export async function buildBoard(
         attr: {
           style: `min-height:44px;padding:8px 18px;border-radius:22px;
             border:1px solid var(--background-modifier-border);
-            background:${isActive ? "var(--interactive-accent)" : "var(--background-secondary)"};
-            color:${isActive ? "var(--text-on-accent)" : "var(--text-normal)"};
-            font-size:.9em;cursor:pointer;font-weight:${isActive ? "600" : "400"};
+            font-size:.9em;cursor:pointer;
             transition:transform .1s,outline .1s;touch-action:none;`,
         },
       });
@@ -1265,16 +1338,16 @@ export async function buildBoard(
     if (!col) continue;
 
     const colStyle = isNarrow
-      ? "width:calc(100% - 16px);margin:0 8px 20px;padding:10px;background:var(--background-secondary);border-radius:8px;"
-      : "flex:1;min-width:260px;max-width:320px;background:var(--background-secondary);padding:10px 10px 10px 0;border-radius:4px;margin:0 10px 0 0;display:flex;flex-direction:column;";
-    const colDiv = scroll.createEl("div", { attr: { style: colStyle } });
+      ? `width:calc(100% - 16px);margin:0 8px 20px;padding:10px;border-radius:8px;`
+      : `flex:1;min-width:260px;max-width:320px;padding:10px 10px 10px 0;border-radius:4px;margin:0 10px 0 0;display:flex;flex-direction:column;`;
+    const colDiv = scroll.createEl("div", { attr: { style: colStyle, "data-col-container": norm } });
 
     const header = colDiv.createEl("div", {
       attr: { style: "display:flex;align-items:center;margin-bottom:10px;" },
     });
     header.createEl("h4", {
       text: col.rawTag.replace(/^#/, "").toUpperCase(),
-      attr: { style: "margin:0;flex-grow:1;font-weight:bold;" },
+      attr: { style: "margin:0;flex-grow:1;font-weight:bold;color:var(--kb-text);" },
     });
 
     if (norm !== config.normDone) {
@@ -1381,7 +1454,7 @@ export function attachListeners(
       (s) => (s.style.borderTopColor = "transparent")
     );
     if (nearest) {
-      (nearest as HTMLElement).style.borderTopColor = "var(--interactive-accent)";
+      (nearest as HTMLElement).style.borderTopColor = "var(--kb-accent)";
       currentInsertIndex = parseInt((nearest as HTMLElement).dataset.index!, 10);
     }
   };
@@ -1605,7 +1678,7 @@ export function attachListeners(
       width:100%;box-sizing:border-box;
       background:var(--background-primary);
       color:var(--text-normal);
-      border:none;border-bottom:2px solid var(--interactive-accent);
+      border:none;border-bottom:2px solid var(--kb-accent);
       outline:none;padding:2px 0;font-size:inherit;font-weight:600;
       font-family:inherit;border-radius:0;`;
 
@@ -1693,7 +1766,7 @@ export function attachListeners(
     const zone = (e.target as Element).closest(".drop-zone") as HTMLElement | null;
     if (!zone) return;
     e.dataTransfer!.dropEffect = "move";
-    zone.style.borderColor = "var(--interactive-accent)";
+    zone.style.borderColor = "var(--kb-accent)";
     highlightNearestSlot(zone, e.clientY);
   }
   function onDragLeave(e: DragEvent) {
@@ -1739,10 +1812,7 @@ export function attachListeners(
     boardEl.querySelectorAll<HTMLElement>("[data-col-norm]").forEach((t) => {
       t.style.outline = "";
       t.style.transform = "";
-      t.style.background =
-        t.dataset.colActive === "1"
-          ? "var(--interactive-accent)"
-          : "var(--background-secondary)";
+      t.style.background = "";  // clear inline; CSS rules take over
     });
   };
 
@@ -1825,13 +1895,16 @@ export function attachListeners(
       touchTimer = setTimeout(() => {
         if (!selectedCard) {
           selectedCard = card;
-          card.style.outline = "2px solid var(--interactive-accent)";
+          card.style.outline = "2px solid var(--kb-accent)";
           card.style.transform = "scale(1.02)";
           boardEl.querySelectorAll<HTMLElement>("[data-col-norm]").forEach((t) => {
-            if (t.dataset.colActive !== "1")
-              t.style.background =
-                "color-mix(in srgb, var(--interactive-accent) 15%, var(--background-secondary))";
-            t.style.outline = "1px dashed var(--interactive-accent)";
+            if (t.dataset.colActive !== "1") {
+              const cc = config.columnColors[t.dataset.colNorm || ""] || "";
+              t.style.background = cc
+                ? `color-mix(in srgb,${cc} 85%,var(--kb-accent))`
+                : `color-mix(in srgb,var(--kb-accent) 15%,var(--kb-col-bg))`;
+            }
+            t.style.outline = "1px dashed var(--kb-accent)";
           });
         }
       }, HOLD_DELAY);
@@ -1873,7 +1946,7 @@ export function attachListeners(
           (z) => (z.style.borderColor = "var(--background-modifier-border)")
         );
         if (zone) {
-          zone.style.borderColor = "var(--interactive-accent)";
+          zone.style.borderColor = "var(--kb-accent)";
           highlightNearestSlot(zone, clientY);
         }
         e.preventDefault();
@@ -1907,14 +1980,14 @@ export function attachListeners(
       t.style.transform = "";
     });
     if (zone) {
-      zone.style.borderColor = "var(--interactive-accent)";
+      zone.style.borderColor = "var(--kb-accent)";
       highlightNearestSlot(zone, clientY);
     } else if (tabNorm) {
       const tab = boardEl.querySelector<HTMLElement>(
         `[data-col-norm="${tabNorm}"]`
       );
       if (tab) {
-        tab.style.outline = "2px solid var(--interactive-accent)";
+        tab.style.outline = "2px solid var(--kb-accent)";
         tab.style.transform = "scale(1.08)";
       }
     }
@@ -2011,7 +2084,7 @@ export function attachListeners(
     if (!btn || btn.dataset.column !== config.normDone) return;
 
     const zone = btn
-      .closest("div[style*='background:var(--background-secondary)']")
+      .closest("[data-col-container]")
       ?.querySelector(".drop-zone") as HTMLElement | null;
     if (!zone) return;
 
