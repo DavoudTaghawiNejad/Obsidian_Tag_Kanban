@@ -1225,6 +1225,7 @@ function createCardHTML(
     const parentTag =
       item.item.tags.find((t: string) => normalizeTag(t) === currentNorm) || "";
     const hasCheckbox = /^- \[[ xX]\] /.test(sub.text);
+    const isChecked = /^- \[[xX]\] /.test(sub.text);
     const alreadyTagged = extractTags(sub.text).some((t: string) =>
       config.normKanban.includes(normalizeTag(t))
     );
@@ -1241,7 +1242,7 @@ function createCardHTML(
       isSub: true,
       showCheckbox: hasCheckbox,
       vaultName,
-      enablePromotion: hasCheckbox && !alreadyTagged,
+      enablePromotion: hasCheckbox && !isChecked && !alreadyTagged,
       subLine: sub.line,
       parentTag,
       parentOrder: item.order,

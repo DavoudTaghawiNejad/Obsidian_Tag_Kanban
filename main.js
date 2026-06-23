@@ -916,6 +916,7 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
   function renderSub(sub, depth) {
     const parentTag = item.item.tags.find((t) => normalizeTag(t) === currentNorm) || "";
     const hasCheckbox = /^- \[[ xX]\] /.test(sub.text);
+    const isChecked = /^- \[[xX]\] /.test(sub.text);
     const alreadyTagged = extractTags(sub.text).some(
       (t) => config.normKanban.includes(normalizeTag(t))
     );
@@ -925,7 +926,7 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
       isSub: true,
       showCheckbox: hasCheckbox,
       vaultName,
-      enablePromotion: hasCheckbox && !alreadyTagged,
+      enablePromotion: hasCheckbox && !isChecked && !alreadyTagged,
       subLine: sub.line,
       parentTag,
       parentOrder: item.order
