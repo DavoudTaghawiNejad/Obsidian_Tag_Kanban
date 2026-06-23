@@ -115,6 +115,11 @@ function parseTaskLine(raw) {
   if (dm)
     date = dm[2];
   rest = rest.replace(/\s*(?:^|\s)@\d{4}-\d{2}-\d{2}\b/g, "").trim();
+  let doneDate = null;
+  const ddm = rest.match(/✅(\d{4}-\d{2}-\d{2})/);
+  if (ddm)
+    doneDate = ddm[1];
+  rest = rest.replace(/\s*✅\d{4}-\d{2}-\d{2}/, "").trim();
   let bullet = "";
   let checked = null;
   const cbm = rest.match(/^([-*+])\s+\[([^\]]*)\]\s*/);
@@ -131,7 +136,7 @@ function parseTaskLine(raw) {
   }
   const tags = rest.match(/(?<!\w)#\w+/g) || [];
   const text = rest.replace(/\s*(?<!\w)#\w+/g, "").trim();
-  return { indent, bullet, checked, text, tags, date, orderDigits, orderState };
+  return { indent, bullet, checked, text, tags, date, doneDate, orderDigits, orderState };
 }
 function serializeTaskLine(t) {
   const parts = [];
@@ -143,6 +148,8 @@ function serializeTaskLine(t) {
   parts.push(...t.tags);
   if (t.date)
     parts.push(t.date);
+  if (t.doneDate)
+    parts.push(`\u2705${t.doneDate}`);
   if (t.orderDigits && t.orderState !== null) {
     parts.push(`%% @${t.orderDigits}${t.orderState === "expanded" ? "x" : "c"} %%`);
   }
@@ -332,6 +339,12 @@ async function moveToColumn(app, filePath, lineNum, originalTags, targetTag, isD
       parsed.checked = isDone;
     if (dateStrToAppend)
       parsed.date = dateStrToAppend;
+    if (isDone) {
+      const n = new Date();
+      parsed.doneDate = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
+    } else {
+      parsed.doneDate = null;
+    }
     if (newDigits !== null) {
       parsed.orderDigits = newDigits;
       parsed.orderState = newState ?? ([config.normDone, config.normLater].includes(normalizeTag(targetTag)) ? "collapsed" : "expanded");

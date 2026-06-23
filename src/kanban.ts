@@ -144,6 +144,7 @@ interface TaskLine {
   text: string;                                // bare content without tags/date/order
   tags: string[];                              // all #tags in original order
   date: string | null;                         // "@YYYY-MM-DD" or null
+  doneDate: string | null;                     // "%% YYYY-MM-DD %%" comment
   orderDigits: string | null;
   orderState: "expanded" | "collapsed" | null;
 }
@@ -168,6 +169,12 @@ function parseTaskLine(raw: string): TaskLine {
   if (dm) date = dm[2];
   rest = rest.replace(/\s*(?:^|\s)@\d{4}-\d{2}-\d{2}\b/g, "").trim();
 
+  // Done date (✅YYYY-MM-DD)
+  let doneDate: string | null = null;
+  const ddm = rest.match(/✅(\d{4}-\d{2}-\d{2})/);
+  if (ddm) doneDate = ddm[1];
+  rest = rest.replace(/\s*✅\d{4}-\d{2}-\d{2}/, "").trim();
+
   // Bullet + optional checkbox
   let bullet = "";
   let checked: boolean | null = null;
@@ -187,7 +194,7 @@ function parseTaskLine(raw: string): TaskLine {
   const tags = (rest.match(/(?<!\w)#\w+/g) || []);
   const text = rest.replace(/\s*(?<!\w)#\w+/g, "").trim();
 
-  return { indent, bullet, checked, text, tags, date, orderDigits, orderState };
+  return { indent, bullet, checked, text, tags, date, doneDate, orderDigits, orderState };
 }
 
 function serializeTaskLine(t: TaskLine): string {
@@ -199,6 +206,7 @@ function serializeTaskLine(t: TaskLine): string {
   if (t.text) parts.push(t.text);
   parts.push(...t.tags);
   if (t.date) parts.push(t.date);
+  if (t.doneDate) parts.push(`✅${t.doneDate}`);
   if (t.orderDigits && t.orderState !== null) {
     parts.push(`%% @${t.orderDigits}${t.orderState === "expanded" ? "x" : "c"} %%`);
   }
@@ -482,6 +490,12 @@ async function moveToColumn(
 
     if (parsed.checked !== null) parsed.checked = isDone;
     if (dateStrToAppend) parsed.date = dateStrToAppend;
+    if (isDone) {
+      const n = new Date();
+      parsed.doneDate = `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,"0")}-${String(n.getDate()).padStart(2,"0")}`;
+    } else {
+      parsed.doneDate = null;
+    }
 
     if (newDigits !== null) {
       parsed.orderDigits = newDigits;
