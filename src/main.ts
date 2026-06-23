@@ -4,7 +4,7 @@ import { KanbanView, VIEW_TYPE_KANBAN } from "./KanbanView";
 export interface KanbanSettings {
   kanban: string[];
   doneColumn: string;
-  defaultColumn: string;
+  todayColumn: string;
   laterColumn: string;
   newTaskInsert: string;
   parentPages: string[];
@@ -14,7 +14,7 @@ export interface KanbanSettings {
 export const DEFAULT_SETTINGS: KanbanSettings = {
   kanban: ["#todo", "#inprogress", "#later", "#done"],
   doneColumn: "#done",
-  defaultColumn: "#todo",
+  todayColumn: "#today",
   laterColumn: "#later",
   newTaskInsert: "Tasks",
   parentPages: [],
@@ -110,14 +110,14 @@ class KanbanSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Default column")
-      .setDesc("Tag for the default column (where scheduled tasks return when past due)")
+      .setName("Today column")
+      .setDesc("Tag for the column where past-due and undated #later tasks are moved to (e.g. #today)")
       .addText((text) =>
         text
-          .setPlaceholder("#todo")
-          .setValue(this.plugin.settings.defaultColumn)
+          .setPlaceholder("#today")
+          .setValue(this.plugin.settings.todayColumn)
           .onChange(async (value) => {
-            this.plugin.settings.defaultColumn = value.trim();
+            this.plugin.settings.todayColumn = value.trim();
             await this.plugin.saveSettings();
           })
       );

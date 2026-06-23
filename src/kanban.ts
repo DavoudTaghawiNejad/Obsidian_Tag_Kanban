@@ -20,12 +20,12 @@ export interface KanbanConfig {
   parentPages: string[];
   allVaultNotes: boolean;
   doneColumn: string;
-  defaultColumn: string;
+  todayColumn: string;
   laterColumn: string;
   newTaskInsert: string;
   normKanban: string[];
   normDone: string;
-  normDefault: string;
+  normToday: string;
   normLater: string;
 }
 
@@ -36,12 +36,12 @@ export function buildConfig(settings: KanbanSettings): KanbanConfig {
     parentPages: settings.parentPages,
     allVaultNotes: settings.allVaultNotes,
     doneColumn: settings.doneColumn,
-    defaultColumn: settings.defaultColumn,
+    todayColumn: settings.todayColumn,
     laterColumn: settings.laterColumn,
     newTaskInsert: settings.newTaskInsert,
     normKanban,
     normDone: normalizeTag(settings.doneColumn),
-    normDefault: normalizeTag(settings.defaultColumn),
+    normToday: normalizeTag(settings.todayColumn),
     normLater: normalizeTag(settings.laterColumn),
   };
 }
@@ -49,18 +49,18 @@ export function buildConfig(settings: KanbanSettings): KanbanConfig {
 export function validateConfig(settings: KanbanSettings): string | null {
   const normKanban = settings.kanban.map(normalizeTag);
   const normDone = normalizeTag(settings.doneColumn);
-  const normDefault = normalizeTag(settings.defaultColumn);
+  const normToday = normalizeTag(settings.todayColumn);
   const normLater = normalizeTag(settings.laterColumn);
 
   if (!settings.kanban.length) return "Missing/empty 'Kanban columns' setting.";
   if (!settings.doneColumn || !normKanban.includes(normDone))
     return "'Done column' must match one of the Kanban columns.";
-  if (!settings.defaultColumn || !normKanban.includes(normDefault))
-    return "'Default column' must match one of the Kanban columns.";
+  if (!settings.todayColumn || !normKanban.includes(normToday))
+    return "'Today column' must match one of the Kanban columns.";
   if (!settings.laterColumn || !normKanban.includes(normLater))
     return "'Later column' must match one of the Kanban columns.";
-  if (normDefault === normLater)
-    return "'Default column' and 'Later column' must be different.";
+  if (normToday === normLater)
+    return "'Today column' and 'Later column' must be different.";
   if (!settings.allVaultNotes && !settings.parentPages.length)
     return "Add at least one 'Parent page', or enable 'Scan all vault notes'.";
   if (!settings.newTaskInsert)
@@ -1164,7 +1164,7 @@ export async function buildBoard(
         item.filePath,
         item.item.line,
         item.item.tags,
-        config.defaultColumn,
+        config.todayColumn,
         false,
         config
       );
@@ -1210,7 +1210,7 @@ export async function buildBoard(
   wrapper.dataset.narrow = isNarrow ? "1" : "0";
 
   const allNorms = Object.keys(columns);
-  let activeNorm = (savedActiveCol && allNorms.includes(savedActiveCol)) ? savedActiveCol : config.normDefault;
+  let activeNorm = (savedActiveCol && allNorms.includes(savedActiveCol)) ? savedActiveCol : config.normToday;
 
   if (isNarrow) {
     const tabBar = scroll.createEl("div", {

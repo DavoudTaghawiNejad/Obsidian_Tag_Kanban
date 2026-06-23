@@ -37,30 +37,30 @@ function buildConfig(settings) {
     parentPages: settings.parentPages,
     allVaultNotes: settings.allVaultNotes,
     doneColumn: settings.doneColumn,
-    defaultColumn: settings.defaultColumn,
+    todayColumn: settings.todayColumn,
     laterColumn: settings.laterColumn,
     newTaskInsert: settings.newTaskInsert,
     normKanban,
     normDone: normalizeTag(settings.doneColumn),
-    normDefault: normalizeTag(settings.defaultColumn),
+    normToday: normalizeTag(settings.todayColumn),
     normLater: normalizeTag(settings.laterColumn)
   };
 }
 function validateConfig(settings) {
   const normKanban = settings.kanban.map(normalizeTag);
   const normDone = normalizeTag(settings.doneColumn);
-  const normDefault = normalizeTag(settings.defaultColumn);
+  const normToday = normalizeTag(settings.todayColumn);
   const normLater = normalizeTag(settings.laterColumn);
   if (!settings.kanban.length)
     return "Missing/empty 'Kanban columns' setting.";
   if (!settings.doneColumn || !normKanban.includes(normDone))
     return "'Done column' must match one of the Kanban columns.";
-  if (!settings.defaultColumn || !normKanban.includes(normDefault))
-    return "'Default column' must match one of the Kanban columns.";
+  if (!settings.todayColumn || !normKanban.includes(normToday))
+    return "'Today column' must match one of the Kanban columns.";
   if (!settings.laterColumn || !normKanban.includes(normLater))
     return "'Later column' must match one of the Kanban columns.";
-  if (normDefault === normLater)
-    return "'Default column' and 'Later column' must be different.";
+  if (normToday === normLater)
+    return "'Today column' and 'Later column' must be different.";
   if (!settings.allVaultNotes && !settings.parentPages.length)
     return "Add at least one 'Parent page', or enable 'Scan all vault notes'.";
   if (!settings.newTaskInsert)
@@ -850,7 +850,7 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
         item.filePath,
         item.item.line,
         item.item.tags,
-        config.defaultColumn,
+        config.todayColumn,
         false,
         config
       );
@@ -888,7 +888,7 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
   const isNarrow = isPhone || (wrapper.clientWidth > 0 ? wrapper.clientWidth < 700 : window.innerWidth < 700);
   wrapper.dataset.narrow = isNarrow ? "1" : "0";
   const allNorms = Object.keys(columns);
-  let activeNorm = savedActiveCol && allNorms.includes(savedActiveCol) ? savedActiveCol : config.normDefault;
+  let activeNorm = savedActiveCol && allNorms.includes(savedActiveCol) ? savedActiveCol : config.normToday;
   if (isNarrow) {
     const tabBar = scroll.createEl("div", {
       attr: {
@@ -1664,6 +1664,7 @@ var KanbanView = class extends import_obsidian2.ItemView {
     super(leaf);
     this.isRefreshing = false;
     this.debounceTimer = null;
+    this.midnightTimer = null;
     this.listenerCleanup = null;
     this.plugin = plugin;
   }
@@ -1677,20 +1678,35 @@ var KanbanView = class extends import_obsidian2.ItemView {
     return "layout-kanban";
   }
   async onOpen() {
-    const schedule = () => this.scheduleRefresh(1500);
-    this.registerEvent(this.app.vault.on("modify", schedule));
-    this.registerEvent(this.app.vault.on("create", schedule));
-    this.registerEvent(this.app.vault.on("delete", schedule));
+    this.registerEvent(
+      this.app.workspace.on("active-leaf-change", (leaf) => {
+        if (leaf === this.leaf)
+          this.scheduleRefresh(100);
+      })
+    );
+    this.scheduleMidnightRefresh();
     await this.renderBoard();
   }
   async onClose() {
     if (this.debounceTimer)
       clearTimeout(this.debounceTimer);
+    if (this.midnightTimer)
+      clearTimeout(this.midnightTimer);
     this.listenerCleanup?.();
   }
-  // Called from outside (e.g. settings tab) to force an immediate re-render.
+  // Called from action handlers (promote, demote, archive, drop) to force an immediate re-render.
   async refresh() {
     await this.renderBoard();
+  }
+  scheduleMidnightRefresh() {
+    if (this.midnightTimer)
+      clearTimeout(this.midnightTimer);
+    const now = new Date();
+    const next = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 5);
+    this.midnightTimer = setTimeout(() => {
+      this.renderBoard();
+      this.scheduleMidnightRefresh();
+    }, next.getTime() - now.getTime());
   }
   scheduleRefresh(delay) {
     if (this.isRefreshing)
@@ -1734,9 +1750,7 @@ var KanbanView = class extends import_obsidian2.ItemView {
       console.error("Kanban render error:", e);
       this.renderError(container, e.message ?? String(e));
     } finally {
-      setTimeout(() => {
-        this.isRefreshing = false;
-      }, 1500);
+      this.isRefreshing = false;
     }
   }
   renderError(container, message) {
@@ -1760,7 +1774,7 @@ var KanbanView = class extends import_obsidian2.ItemView {
 var DEFAULT_SETTINGS = {
   kanban: ["#todo", "#inprogress", "#later", "#done"],
   doneColumn: "#done",
-  defaultColumn: "#todo",
+  todayColumn: "#today",
   laterColumn: "#later",
   newTaskInsert: "Tasks",
   parentPages: [],
@@ -1824,9 +1838,9 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Default column").setDesc("Tag for the default column (where scheduled tasks return when past due)").addText(
-      (text) => text.setPlaceholder("#todo").setValue(this.plugin.settings.defaultColumn).onChange(async (value) => {
-        this.plugin.settings.defaultColumn = value.trim();
+    new import_obsidian3.Setting(containerEl).setName("Today column").setDesc("Tag for the column where past-due and undated #later tasks are moved to (e.g. #today)").addText(
+      (text) => text.setPlaceholder("#today").setValue(this.plugin.settings.todayColumn).onChange(async (value) => {
+        this.plugin.settings.todayColumn = value.trim();
         await this.plugin.saveSettings();
       })
     );

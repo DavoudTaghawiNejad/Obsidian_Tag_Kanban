@@ -8,6 +8,7 @@ export class KanbanView extends ItemView {
   plugin: KanbanPlugin;
   private isRefreshing = false;
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  private midnightTimer: ReturnType<typeof setTimeout> | null = null;
   private listenerCleanup: (() => void) | null = null;
 
   constructor(leaf: WorkspaceLeaf, plugin: KanbanPlugin) {
@@ -28,29 +29,43 @@ export class KanbanView extends ItemView {
   }
 
   async onOpen() {
-    // Vault events → debounced re-render
-    // Delay is 1500 ms so a sequence of vault.modify calls (from assignInitialOrders)
-    // collapses into one refresh instead of causing a blink loop.
-    const schedule = () => this.scheduleRefresh(1500);
-    this.registerEvent(this.app.vault.on("modify", schedule));
-    this.registerEvent(this.app.vault.on("create", schedule));
-    this.registerEvent(this.app.vault.on("delete", schedule));
+    // Refresh when this leaf becomes the active view
+    this.registerEvent(
+      this.app.workspace.on("active-leaf-change", (leaf) => {
+        if (leaf === this.leaf) this.scheduleRefresh(100);
+      })
+    );
+
+    // Refresh just past midnight so past-due #later cards auto-move
+    this.scheduleMidnightRefresh();
 
     await this.renderBoard();
   }
 
   async onClose() {
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
+    if (this.midnightTimer) clearTimeout(this.midnightTimer);
     this.listenerCleanup?.();
   }
 
-  // Called from outside (e.g. settings tab) to force an immediate re-render.
+  // Called from action handlers (promote, demote, archive, drop) to force an immediate re-render.
   async refresh() {
     await this.renderBoard();
   }
 
+  private scheduleMidnightRefresh() {
+    if (this.midnightTimer) clearTimeout(this.midnightTimer);
+    const now = new Date();
+    // 5 seconds past the next midnight
+    const next = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 5);
+    this.midnightTimer = setTimeout(() => {
+      this.renderBoard();
+      this.scheduleMidnightRefresh();
+    }, next.getTime() - now.getTime());
+  }
+
   private scheduleRefresh(delay: number) {
-    if (this.isRefreshing) return; // already in flight — let it finish
+    if (this.isRefreshing) return;
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
     this.debounceTimer = setTimeout(() => this.renderBoard(), delay);
   }
@@ -101,11 +116,7 @@ export class KanbanView extends ItemView {
       console.error("Kanban render error:", e);
       this.renderError(container, e.message ?? String(e));
     } finally {
-      // Hold the flag for 1500 ms to absorb any vault.modify events that our own
-      // order-comment writes fire, preventing an infinite refresh loop.
-      setTimeout(() => {
-        this.isRefreshing = false;
-      }, 1500);
+      this.isRefreshing = false;
     }
   }
 
