@@ -1166,7 +1166,7 @@ function createCardHTML(
       .filter((w: string) => w !== tagToRemove)
       .join(" ")
       .trim();
-  display = display.replace(/%% @\d+\w %%/g, "").trim();
+  display = display.replace(/%% @\d+\w %%/g, "").replace(/\s*✅\d{4}-\d{2}-\d{2}/, "").trim();
 
   const rawText = display
     .replace(/^- \[[ xX]\] /, "")
@@ -1230,6 +1230,7 @@ function createCardHTML(
     );
     let subText = sub.text
       .replace(/%% @\d+\w %%/g, "")
+      .replace(/\s*✅\d{4}-\d{2}-\d{2}/, "")
       .trim()
       .split(/\s+/)
       .filter((w: string) => !config.normKanban.includes(normalizeTag(w)))

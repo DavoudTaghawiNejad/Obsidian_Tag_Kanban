@@ -866,7 +866,7 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
   );
   if (tagToRemove)
     display = display.split(/\s+/).filter((w) => w !== tagToRemove).join(" ").trim();
-  display = display.replace(/%% @\d+\w %%/g, "").trim();
+  display = display.replace(/%% @\d+\w %%/g, "").replace(/\s*✅\d{4}-\d{2}-\d{2}/, "").trim();
   const rawText = display.replace(/^- \[[ xX]\] /, "").replace(/^[-*+]\s+/, "").trim();
   const mainContent = linksToHtml(rawText, vaultName);
   const hasSubs = item.item.subs.length > 0;
@@ -919,7 +919,7 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
     const alreadyTagged = extractTags(sub.text).some(
       (t) => config.normKanban.includes(normalizeTag(t))
     );
-    let subText = sub.text.replace(/%% @\d+\w %%/g, "").trim().split(/\s+/).filter((w) => !config.normKanban.includes(normalizeTag(w))).join(" ").trim();
+    let subText = sub.text.replace(/%% @\d+\w %%/g, "").replace(/\s*✅\d{4}-\d{2}-\d{2}/, "").trim().split(/\s+/).filter((w) => !config.normKanban.includes(normalizeTag(w))).join(" ").trim();
     const indent = "&nbsp;".repeat(depth * 3);
     const rendered = renderCheckbox(subText, {
       isSub: true,
