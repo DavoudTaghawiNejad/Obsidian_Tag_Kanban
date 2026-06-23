@@ -617,6 +617,57 @@ async function addNewItem(
   }
 }
 
+async function moveCardToNewDoc(
+  app: App,
+  filePath: string,
+  lineNum: number,
+  plainTitle: string,
+  targetTag: string,
+  config: KanbanConfig
+) {
+  const safeTitle = plainTitle.replace(/[\\/:*?"<>|#\[\]]/g, " ").replace(/\s+/g, " ").trim();
+  const docPath = `${safeTitle}.md`;
+
+  const { tFile, lines } = await readFileLines(app, filePath);
+
+  // Build task line for new document with target tag, strip ordering
+  const parsed = parseTaskLine(lines[lineNum - 1]);
+  parsed.tags = parsed.tags.filter((t) => !config.normKanban.includes(normalizeTag(t)));
+  parsed.tags.push(targetTag);
+  parsed.orderDigits = null;
+  parsed.orderState = null;
+  const newTaskLine = serializeTaskLine(parsed);
+
+  // Create or update the project document
+  let projFile = app.vault.getAbstractFileByPath(docPath) as TFile | null;
+  const isNew = !projFile;
+  if (!projFile) projFile = await app.vault.create(docPath, "");
+  const projLines = (await app.vault.read(projFile)).split("\n");
+  projLines.splice(afterFrontMatter(projLines), 0, newTaskLine);
+  await app.vault.modify(projFile, projLines.join("\n"));
+
+  // Remove card line from source, insert [[link]] in its place
+  const nd = new Date();
+  const movedDate = `${nd.getFullYear()}-${String(nd.getMonth()+1).padStart(2,"0")}-${String(nd.getDate()).padStart(2,"0")}`;
+  lines.splice(lineNum - 1, 1, `[[${safeTitle}]] (moved: ${movedDate})`);
+  await writeFileLines(app, tFile, lines);
+
+  // Add [[link]] to master document
+  const masterDocName = config.projectsDocument.trim();
+  if (masterDocName) {
+    const masterPath = masterDocName.endsWith(".md") ? masterDocName : `${masterDocName}.md`;
+    let masterFile = app.vault.getAbstractFileByPath(masterPath) as TFile | null;
+    if (!masterFile) {
+      masterFile = await app.vault.create(masterPath, `# ${masterDocName}\n`);
+    }
+    const masterLines = (await app.vault.read(masterFile)).split("\n");
+    masterLines.splice(afterFrontMatter(masterLines), 0, `[[${safeTitle}]]`);
+    await app.vault.modify(masterFile, masterLines.join("\n"));
+  }
+
+  new Notice(isNew ? `Created "${safeTitle}.md" and moved task.` : `Moved task to existing "${safeTitle}.md".`);
+}
+
 async function archiveToSection(
   app: App,
   filePath: string,
@@ -871,7 +922,7 @@ export async function collectItems(
         state: parsed?.state ?? "collapsed",
         digits: parsed?.digits ?? null,
         len: parsed?.len ?? null,
-        isPromoted: ownTags.some((t: string) =>
+        isPromoted: stack.length > 0 && ownTags.some((t: string) =>
           matchesKanbanTag(t, config.normKanban)
         ),
         indent,
@@ -947,7 +998,7 @@ export function groupByColumns(items: any[], config: KanbanConfig) {
 async function assignInitialOrders(
   app: App,
   columns: Record<string, { rawTag: string; cards: any[] }>,
-  config: KanbanConfig
+  _config: KanbanConfig
 ) {
   const multiKeys = new Set<string>();
   for (const col of Object.values(columns)) {
@@ -1043,6 +1094,18 @@ function afterFrontMatter(lines: string[]): number {
     }
   }
   return 0;
+}
+
+function showConfirmDialog(message: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const { dialog, close } = makeOverlay("kanban-confirm-dialog");
+    dialog.innerHTML = `
+      <p style="margin:0 0 16px;font-size:.95em;">${message}</p>
+      <div style="display:flex;gap:10px;justify-content:center;">${buttonHtml("Yes", true)}${buttonHtml("No", false)}</div>`;
+    const [yesBtn, noBtn] = dialog.querySelectorAll("button");
+    yesBtn.onclick = () => { close(); resolve(true); };
+    noBtn.onclick = () => { close(); resolve(false); };
+  });
 }
 
 function showInfoDialog(message: string) {
@@ -1524,7 +1587,6 @@ export function attachListeners(
   app: App,
   refresh: () => void
 ): () => void {
-  const vaultName = app.vault.getName();
   let draggedCard: any = null;
   let currentInsertIndex = -1;
 
@@ -1539,6 +1601,8 @@ export function attachListeners(
       order: parseFloat(c.dataset.order!) || null,
       state: c.dataset.state!,
       isPromoted: c.dataset.isPromoted === "true",
+      subs: c.dataset.subs ? JSON.parse(c.dataset.subs) as any[] : [],
+      rawText: c.dataset.raw || "",
     };
   };
 
@@ -1666,6 +1730,17 @@ export function attachListeners(
       (t) => normalizeTag(t) === targetNorm
     );
     if (!targetTag) return;
+
+    if (config.normProject.includes(targetNorm) && card.subs.length === 0 && !card.isPromoted) {
+      const plainTitle = card.rawText.replace(/#[\w-]+/g, "").replace(/\s+/g, " ").trim();
+      const confirmed = await showConfirmDialog(`Create a project document for "${plainTitle}"?`);
+      if (confirmed) {
+        await moveCardToNewDoc(app, card.filePath, card.lineNum, plainTitle, targetTag, config);
+        requestAnimationFrame(() => setTimeout(refresh, 50));
+        currentInsertIndex = -1;
+        return;
+      }
+    }
 
     const isDone = targetNorm === config.normDone;
     const newState: "expanded" | "collapsed" = [

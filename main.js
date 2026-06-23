@@ -440,6 +440,41 @@ async function addNewItem(app, rawInsertTarget, columnTag, userText, dateStr, co
     return false;
   }
 }
+async function moveCardToNewDoc(app, filePath, lineNum, plainTitle, targetTag, config) {
+  const safeTitle = plainTitle.replace(/[\\/:*?"<>|#\[\]]/g, " ").replace(/\s+/g, " ").trim();
+  const docPath = `${safeTitle}.md`;
+  const { tFile, lines } = await readFileLines(app, filePath);
+  const parsed = parseTaskLine(lines[lineNum - 1]);
+  parsed.tags = parsed.tags.filter((t) => !config.normKanban.includes(normalizeTag(t)));
+  parsed.tags.push(targetTag);
+  parsed.orderDigits = null;
+  parsed.orderState = null;
+  const newTaskLine = serializeTaskLine(parsed);
+  let projFile = app.vault.getAbstractFileByPath(docPath);
+  const isNew = !projFile;
+  if (!projFile)
+    projFile = await app.vault.create(docPath, "");
+  const projLines = (await app.vault.read(projFile)).split("\n");
+  projLines.splice(afterFrontMatter(projLines), 0, newTaskLine);
+  await app.vault.modify(projFile, projLines.join("\n"));
+  const nd = new Date();
+  const movedDate = `${nd.getFullYear()}-${String(nd.getMonth() + 1).padStart(2, "0")}-${String(nd.getDate()).padStart(2, "0")}`;
+  lines.splice(lineNum - 1, 1, `[[${safeTitle}]] (moved: ${movedDate})`);
+  await writeFileLines(app, tFile, lines);
+  const masterDocName = config.projectsDocument.trim();
+  if (masterDocName) {
+    const masterPath = masterDocName.endsWith(".md") ? masterDocName : `${masterDocName}.md`;
+    let masterFile = app.vault.getAbstractFileByPath(masterPath);
+    if (!masterFile) {
+      masterFile = await app.vault.create(masterPath, `# ${masterDocName}
+`);
+    }
+    const masterLines = (await app.vault.read(masterFile)).split("\n");
+    masterLines.splice(afterFrontMatter(masterLines), 0, `[[${safeTitle}]]`);
+    await app.vault.modify(masterFile, masterLines.join("\n"));
+  }
+  new import_obsidian.Notice(isNew ? `Created "${safeTitle}.md" and moved task.` : `Moved task to existing "${safeTitle}.md".`);
+}
 async function archiveToSection(app, filePath, mainLineNum, subLines, config, _isTopLevel = true) {
   try {
     let archiveLine = function(idx, tickBox) {
@@ -632,7 +667,7 @@ async function collectItems(app, targetFilePaths, config) {
         state: parsed?.state ?? "collapsed",
         digits: parsed?.digits ?? null,
         len: parsed?.len ?? null,
-        isPromoted: ownTags.some(
+        isPromoted: stack.length > 0 && ownTags.some(
           (t) => matchesKanbanTag(t, config.normKanban)
         ),
         indent,
@@ -683,7 +718,7 @@ function groupByColumns(items, config) {
   Object.values(columns).forEach((col) => col.cards.sort(cmp));
   return columns;
 }
-async function assignInitialOrders(app, columns, config) {
+async function assignInitialOrders(app, columns, _config) {
   const multiKeys = /* @__PURE__ */ new Set();
   for (const col of Object.values(columns)) {
     for (const card of col.cards) {
@@ -764,6 +799,23 @@ function afterFrontMatter(lines) {
     }
   }
   return 0;
+}
+function showConfirmDialog(message) {
+  return new Promise((resolve) => {
+    const { dialog, close } = makeOverlay("kanban-confirm-dialog");
+    dialog.innerHTML = `
+      <p style="margin:0 0 16px;font-size:.95em;">${message}</p>
+      <div style="display:flex;gap:10px;justify-content:center;">${buttonHtml("Yes", true)}${buttonHtml("No", false)}</div>`;
+    const [yesBtn, noBtn] = dialog.querySelectorAll("button");
+    yesBtn.onclick = () => {
+      close();
+      resolve(true);
+    };
+    noBtn.onclick = () => {
+      close();
+      resolve(false);
+    };
+  });
 }
 function showInfoDialog(message) {
   const { dialog, close } = makeOverlay("kanban-info-dialog");
@@ -1150,7 +1202,6 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
   });
 }
 function attachListeners(boardEl, config, app, refresh) {
-  const vaultName = app.vault.getName();
   let draggedCard = null;
   let currentInsertIndex = -1;
   const cardDataFrom = (el) => {
@@ -1163,7 +1214,9 @@ function attachListeners(boardEl, config, app, refresh) {
       originalTags: JSON.parse(c.dataset.tags),
       order: parseFloat(c.dataset.order) || null,
       state: c.dataset.state,
-      isPromoted: c.dataset.isPromoted === "true"
+      isPromoted: c.dataset.isPromoted === "true",
+      subs: c.dataset.subs ? JSON.parse(c.dataset.subs) : [],
+      rawText: c.dataset.raw || ""
     };
   };
   const siblingDataFrom = (zone) => Array.from(zone.querySelectorAll(".kanban-card")).map((c) => {
@@ -1272,6 +1325,16 @@ function attachListeners(boardEl, config, app, refresh) {
     );
     if (!targetTag)
       return;
+    if (config.normProject.includes(targetNorm) && card.subs.length === 0 && !card.isPromoted) {
+      const plainTitle = card.rawText.replace(/#[\w-]+/g, "").replace(/\s+/g, " ").trim();
+      const confirmed = await showConfirmDialog(`Create a project document for "${plainTitle}"?`);
+      if (confirmed) {
+        await moveCardToNewDoc(app, card.filePath, card.lineNum, plainTitle, targetTag, config);
+        requestAnimationFrame(() => setTimeout(refresh, 50));
+        currentInsertIndex = -1;
+        return;
+      }
+    }
     const isDone = targetNorm === config.normDone;
     const newState = [
       config.normDone,
