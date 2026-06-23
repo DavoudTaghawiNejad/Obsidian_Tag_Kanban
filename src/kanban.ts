@@ -384,9 +384,13 @@ function renderCheckbox(
   if (/^- \[[ xX]\] /.test(content)) {
     const checked = content[3] !== " ";
     content = content.slice(6);
-    cbHtml = showCheckbox
-      ? `<input type="checkbox" disabled${checked ? " checked" : ""} style="margin-right:5px;">`
-      : "";
+    if (showCheckbox) {
+      if (isSub && subLine != null) {
+        cbHtml = `<input type="checkbox" class="kb-sub-check" data-sub-line="${subLine}"${checked ? " checked" : ""} style="margin-right:5px;cursor:pointer;">`;
+      } else {
+        cbHtml = `<input type="checkbox" disabled${checked ? " checked" : ""} style="margin-right:5px;">`;
+      }
+    }
   } else if (/^[-*+]\s+/.test(content)) {
     content = content.replace(/^[-*+]\s+/, "");
     cbHtml = showCheckbox
@@ -1727,6 +1731,32 @@ export function attachListeners(
     currentInsertIndex = -1;
   }
 
+  // ── Sub-item checkbox toggle ──
+  async function onSubCheckClick(e: Event) {
+    const cb = (e.target as Element).closest(".kb-sub-check") as HTMLInputElement | null;
+    if (!cb) return;
+    e.stopPropagation();
+    const card = cb.closest(".kanban-card") as HTMLElement | null;
+    if (!card) return;
+    const filePath = card.dataset.file!;
+    const subLineNum = parseInt(cb.dataset.subLine!, 10);
+    if (!filePath || isNaN(subLineNum) || subLineNum < 1) return;
+    const { tFile, lines } = await readFileLines(app, filePath);
+    if (subLineNum > lines.length) return;
+    const parsed = parseTaskLine(lines[subLineNum - 1]);
+    if (parsed.checked === null) return;
+    parsed.checked = !parsed.checked;
+    if (parsed.checked) {
+      const n = new Date();
+      parsed.doneDate = `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,"0")}-${String(n.getDate()).padStart(2,"0")}`;
+    } else {
+      parsed.doneDate = null;
+    }
+    lines[subLineNum - 1] = serializeTaskLine(parsed);
+    await writeFileLines(app, tFile, lines);
+    refresh();
+  }
+
   // ── Promote icon ──
   async function onPromoteClick(e: Event) {
     const icon = (e.target as Element).closest(".promote-icon") as HTMLElement | null;
@@ -2215,6 +2245,7 @@ export function attachListeners(
   // Attach all listeners
   boardEl.addEventListener("mouseover", onMouseOver);
   boardEl.addEventListener("mouseout", onMouseOut);
+  boardEl.addEventListener("click", onSubCheckClick);
   boardEl.addEventListener("click", onCardClick);
   boardEl.addEventListener("click", onPromoteClick);
   boardEl.addEventListener("click", onDemoteClick);
@@ -2236,6 +2267,7 @@ export function attachListeners(
   return () => {
     boardEl.removeEventListener("mouseover", onMouseOver);
     boardEl.removeEventListener("mouseout", onMouseOut);
+    boardEl.removeEventListener("click", onSubCheckClick);
     boardEl.removeEventListener("click", onCardClick);
     boardEl.removeEventListener("click", onPromoteClick);
     boardEl.removeEventListener("click", onDemoteClick);
