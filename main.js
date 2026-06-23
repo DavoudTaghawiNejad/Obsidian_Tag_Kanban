@@ -47,6 +47,7 @@ function buildConfig(settings) {
     normProject: (settings.projectColumns || []).map(normalizeTag),
     projectsDocument: settings.projectsDocument || "",
     allChildrenDoneColor: settings.allChildrenDoneColor,
+    allCheckedColor: settings.allCheckedColor || "#2db55d",
     columnColors: Object.fromEntries(
       (settings.kanban || []).map((tag, i) => [normalizeTag(tag), (settings.columnColors || [])[i] || ""])
     ),
@@ -854,9 +855,30 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
   function isCheckboxItem(s) {
     return /^[-*+]\s+\[[ xX]\]/.test((s.text ?? "").trim());
   }
-  function hasActiveDescendant(subs) {
+  function isCheckedItem(s) {
+    return /^[-*+]\s+\[[xX]\]/.test((s.text ?? "").trim());
+  }
+  function hasAnyCheckbox(subs) {
     for (const s of subs ?? []) {
-      if (isCheckboxItem(s)) {
+      if (isCheckboxItem(s))
+        return true;
+      if (s.subs?.length && hasAnyCheckbox(s.subs))
+        return true;
+    }
+    return false;
+  }
+  function hasUnchecked(subs) {
+    for (const s of subs ?? []) {
+      if (isCheckboxItem(s) && !isCheckedItem(s))
+        return true;
+      if (s.subs?.length && hasUnchecked(s.subs))
+        return true;
+    }
+    return false;
+  }
+  function hasActiveKanban(subs) {
+    for (const s of subs ?? []) {
+      if (isCheckboxItem(s) && !isCheckedItem(s)) {
         const tags = s.tags ?? [];
         if (tags.some((t) => {
           const norm = normalizeTag(t);
@@ -864,21 +886,14 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
         }))
           return true;
       }
-      if (s.subs?.length && hasActiveDescendant(s.subs))
+      if (s.subs?.length && hasActiveKanban(s.subs))
         return true;
     }
     return false;
   }
-  function hasTaskDescendant(subs) {
-    for (const s of subs ?? []) {
-      if (isCheckboxItem(s))
-        return true;
-      if (s.subs?.length && hasTaskDescendant(s.subs))
-        return true;
-    }
-    return false;
-  }
-  const allChildrenDone = hasTaskDescendant(item.item.subs) && !hasActiveDescendant(item.item.subs);
+  const hasCheckboxSubs = hasAnyCheckbox(item.item.subs);
+  const allSubsChecked = hasCheckboxSubs && !hasUnchecked(item.item.subs);
+  const hasUnmanagedWork = hasCheckboxSubs && hasUnchecked(item.item.subs) && !hasActiveKanban(item.item.subs);
   function renderSub(sub, depth) {
     const parentTag = item.item.tags.find((t) => normalizeTag(t) === currentNorm) || "";
     const hasCheckbox = /^- \[[ xX]\] /.test(sub.text);
@@ -912,7 +927,7 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
            <div style="padding-left:8px;">${renderSubTree(item.item.subs)}</div>
          </details>
        </div>` : `<div class="card-title" style="padding:6px 0;font-weight:600;color:var(--kb-text);">${mainContent}</div>`;
-  const border = isMulti ? "background:var(--background-modifier-error-hover);border:1px solid var(--background-modifier-error);" : allChildrenDone ? `border:2px solid var(--kb-children-done);background:color-mix(in srgb,var(--kb-children-done) 20%,var(--kb-card-bg));` : "border:1px solid var(--background-modifier-border);";
+  const border = isMulti ? "background:var(--background-modifier-error-hover);border:1px solid var(--background-modifier-error);" : hasUnmanagedWork ? `border:2px solid var(--kb-children-done);background:color-mix(in srgb,var(--kb-children-done) 20%,var(--kb-card-bg));` : allSubsChecked ? `border:2px solid var(--kb-all-checked);background:color-mix(in srgb,var(--kb-all-checked) 20%,var(--kb-card-bg));` : "border:1px solid var(--background-modifier-border);";
   const src = item.source.path.split("/").pop().replace(/\.md$/, "");
   const href = `obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(item.filePath)}`;
   const badge = `<div style="margin-top:8px;font-size:.8em;color:var(--kb-text);">
@@ -952,6 +967,7 @@ function buildColorCSS(config) {
       --kb-family-parent:${config.colorFamilyParent};
       --kb-family-sibling:${config.colorFamilySibling};
       --kb-children-done:${config.allChildrenDoneColor};
+          --kb-all-checked:${config.allCheckedColor};
       color:var(--kb-text);
     }
     #kanban-wrapper [data-col-container]{background:var(--kb-col-bg);}
@@ -1927,6 +1943,7 @@ var DEFAULT_SETTINGS = {
   parentPages: [],
   allVaultNotes: true,
   allChildrenDoneColor: "#e03e3e",
+  allCheckedColor: "#2db55d",
   projectColumns: [],
   projectsDocument: "",
   columnColors: [],
@@ -2152,11 +2169,19 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
       }
     );
     fixedColor(
-      "All children done \u2014 highlight",
-      "Border color for cards whose child tasks are all done or have no task children.",
+      "Unmanaged work \u2014 highlight",
+      "Border color for cards that have unchecked sub-tasks not tracked as kanban cards.",
       () => this.plugin.settings.allChildrenDoneColor,
       (v) => {
         this.plugin.settings.allChildrenDoneColor = v;
+      }
+    );
+    fixedColor(
+      "All sub-tasks checked \u2014 highlight",
+      "Border color for cards where every checkbox descendant is checked.",
+      () => this.plugin.settings.allCheckedColor,
+      (v) => {
+        this.plugin.settings.allCheckedColor = v;
       }
     );
     containerEl.createEl("h4", { text: "Per-column colors" });

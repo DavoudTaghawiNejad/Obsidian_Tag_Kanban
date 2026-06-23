@@ -30,6 +30,7 @@ export interface KanbanConfig {
   normProject: string[];
   projectsDocument: string;
   allChildrenDoneColor: string;
+  allCheckedColor: string;
   // Colors (empty string → fall back to Obsidian theme variable)
   columnColors: Record<string, string>;
   colorCardBg: string;
@@ -59,6 +60,7 @@ export function buildConfig(settings: KanbanSettings): KanbanConfig {
     normProject: (settings.projectColumns || []).map(normalizeTag),
     projectsDocument: settings.projectsDocument || "",
     allChildrenDoneColor: settings.allChildrenDoneColor,
+    allCheckedColor: settings.allCheckedColor || "#2db55d",
     columnColors: Object.fromEntries(
       (settings.kanban || []).map((tag, i) => [normalizeTag(tag), (settings.columnColors || [])[i] || ""])
     ),
@@ -1154,40 +1156,52 @@ function createCardHTML(
     .trim();
   const mainContent = linksToHtml(rawText, vaultName);
 
-  const hasSubs = item.item.subs.length > 0;
+  const hasSubs = item.item.subs.length > 0; // structural (any subs at all, for expand/collapse)
   const isExpanded = item.state === "expanded";
 
   // Only checkbox items (- [ ] or - [x]) are tasks; plain bullet points are not.
   function isCheckboxItem(s: any): boolean {
     return /^[-*+]\s+\[[ xX]\]/.test((s.text ?? "").trim());
   }
-
-  // Returns true if any checkbox descendant has a non-done kanban column tag.
-  function hasActiveDescendant(subs: any[]): boolean {
+  function isCheckedItem(s: any): boolean {
+    return /^[-*+]\s+\[[xX]\]/.test((s.text ?? "").trim());
+  }
+  // Any checkbox descendant (checked or unchecked).
+  function hasAnyCheckbox(subs: any[]): boolean {
     for (const s of subs ?? []) {
-      if (isCheckboxItem(s)) {
+      if (isCheckboxItem(s)) return true;
+      if (s.subs?.length && hasAnyCheckbox(s.subs)) return true;
+    }
+    return false;
+  }
+  // Any unchecked checkbox descendant.
+  function hasUnchecked(subs: any[]): boolean {
+    for (const s of subs ?? []) {
+      if (isCheckboxItem(s) && !isCheckedItem(s)) return true;
+      if (s.subs?.length && hasUnchecked(s.subs)) return true;
+    }
+    return false;
+  }
+  // Any unchecked descendant that has an active (non-done) kanban tag.
+  function hasActiveKanban(subs: any[]): boolean {
+    for (const s of subs ?? []) {
+      if (isCheckboxItem(s) && !isCheckedItem(s)) {
         const tags: string[] = s.tags ?? [];
         if (tags.some((t: string) => {
           const norm = normalizeTag(t);
           return config.normKanban.includes(norm) && norm !== config.normDone;
         })) return true;
       }
-      if (s.subs?.length && hasActiveDescendant(s.subs)) return true;
+      if (s.subs?.length && hasActiveKanban(s.subs)) return true;
     }
     return false;
   }
 
-  // Returns true if there is at least one checkbox task anywhere in the subtree.
-  function hasTaskDescendant(subs: any[]): boolean {
-    for (const s of subs ?? []) {
-      if (isCheckboxItem(s)) return true;
-      if (s.subs?.length && hasTaskDescendant(s.subs)) return true;
-    }
-    return false;
-  }
-
-  // Border when the card has checkbox task descendants but none are in an active column.
-  const allChildrenDone = hasTaskDescendant(item.item.subs) && !hasActiveDescendant(item.item.subs);
+  const hasCheckboxSubs = hasAnyCheckbox(item.item.subs);
+  // Green: has checkboxes and all are checked.
+  const allSubsChecked   = hasCheckboxSubs && !hasUnchecked(item.item.subs);
+  // Red: has unchecked checkboxes but none are tracked as a kanban card.
+  const hasUnmanagedWork = hasCheckboxSubs && hasUnchecked(item.item.subs) && !hasActiveKanban(item.item.subs);
 
   function renderSub(sub: any, depth: number): string {
     const parentTag =
@@ -1238,9 +1252,11 @@ function createCardHTML(
 
   const border = isMulti
     ? "background:var(--background-modifier-error-hover);border:1px solid var(--background-modifier-error);"
-    : allChildrenDone
+    : hasUnmanagedWork
       ? `border:2px solid var(--kb-children-done);background:color-mix(in srgb,var(--kb-children-done) 20%,var(--kb-card-bg));`
-      : "border:1px solid var(--background-modifier-border);";
+      : allSubsChecked
+        ? `border:2px solid var(--kb-all-checked);background:color-mix(in srgb,var(--kb-all-checked) 20%,var(--kb-card-bg));`
+        : "border:1px solid var(--background-modifier-border);";
 
   const src = item.source.path.split("/").pop().replace(/\.md$/, "");
   const href = `obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(item.filePath)}`;
@@ -1287,6 +1303,7 @@ function buildColorCSS(config: KanbanConfig): string {
       --kb-family-parent:${config.colorFamilyParent};
       --kb-family-sibling:${config.colorFamilySibling};
       --kb-children-done:${config.allChildrenDoneColor};
+          --kb-all-checked:${config.allCheckedColor};
       color:var(--kb-text);
     }
     #kanban-wrapper [data-col-container]{background:var(--kb-col-bg);}
