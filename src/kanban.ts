@@ -1150,7 +1150,7 @@ function createCardHTML(
 
   const bodyHTML = hasSubs
     ? `<div style="position:relative;">
-         <div class="card-title" style="padding:6px 32px 6px 0;font-weight:600;cursor:pointer;"
+         <div class="card-title" style="padding:6px 32px 6px 0;font-weight:600;cursor:pointer;color:var(--kb-text);"
               onclick="this.closest('.kanban-card').querySelector('details').toggleAttribute('open')">
            ${mainContent}
            <span style="position:absolute;top:6px;right:8px;font-size:1.4em;color:var(--kb-accent);user-select:none;">${isExpanded ? "▲" : "▼"}</span>
@@ -1160,7 +1160,7 @@ function createCardHTML(
            <div style="padding-left:8px;">${renderSubTree(item.item.subs)}</div>
          </details>
        </div>`
-    : `<div class="card-title" style="padding:6px 0;font-weight:600;">${mainContent}</div>`;
+    : `<div class="card-title" style="padding:6px 0;font-weight:600;color:var(--kb-text);">${mainContent}</div>`;
 
   const border = isMulti
     ? "background:var(--background-modifier-error-hover);border:1px solid var(--background-modifier-error);"
@@ -1170,7 +1170,7 @@ function createCardHTML(
 
   const src = item.source.path.split("/").pop().replace(/\.md$/, "");
   const href = `obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(item.filePath)}`;
-  const badge = `<div style="margin-top:8px;font-size:.8em;color:var(--text-muted);">
+  const badge = `<div style="margin-top:8px;font-size:.8em;color:var(--kb-text);">
     from: <a href="${href}" style="color:var(--kb-link);text-decoration:none;">${src}</a></div>`;
 
   return `<div draggable="true" class="kanban-card"
@@ -1218,6 +1218,7 @@ function buildColorCSS(config: KanbanConfig): string {
     #kanban-wrapper [data-col-container]{background:var(--kb-col-bg);}
     #kanban-wrapper [data-col-norm]{background:var(--kb-col-bg);color:var(--kb-text);}
     #kanban-wrapper [data-col-norm][data-col-active="1"]{background:var(--kb-accent);color:var(--text-on-accent);font-weight:600;}
+    #kanban-wrapper .kanban-card,.card-title{color:var(--kb-text);}
     ${perColRules}`;
 }
 
@@ -1276,6 +1277,7 @@ export async function buildBoard(
       #kanban-scroll::-webkit-scrollbar{height:8px}
       .kanban-card{-webkit-user-select:none;user-select:none;touch-action:none;}
       .drop-zone{touch-action:none;}
+      #kanban-wrapper [data-col-container]:last-child .drop-zone{border-right:2px dashed var(--background-modifier-border);}
       .kanban-card.kh-self{outline:4px solid var(--kb-family-self)!important;background:color-mix(in srgb,var(--kb-family-self) 20%,var(--kb-card-bg))!important;}
       .kanban-card.kh-parent{outline:4px solid var(--kb-family-parent)!important;background:color-mix(in srgb,var(--kb-family-parent) 20%,var(--kb-card-bg))!important;}
       .kanban-card.kh-sibling{outline:4px solid var(--kb-family-sibling)!important;background:color-mix(in srgb,var(--kb-family-sibling) 20%,var(--kb-card-bg))!important;}
@@ -1292,7 +1294,7 @@ export async function buildBoard(
     attr: {
       id: "kanban-scroll",
       style:
-        "display:flex;overflow-x:auto;gap:12px;padding:12px 0;-webkit-overflow-scrolling:touch;",
+        "display:flex;overflow-x:auto;gap:0;padding:12px 0;-webkit-overflow-scrolling:touch;",
     },
   });
 
@@ -1338,12 +1340,12 @@ export async function buildBoard(
     if (!col) continue;
 
     const colStyle = isNarrow
-      ? `width:calc(100% - 16px);margin:0 8px 20px;padding:10px;border-radius:8px;`
-      : `flex:1;min-width:260px;max-width:320px;padding:10px 10px 10px 0;border-radius:4px;margin:0 10px 0 0;display:flex;flex-direction:column;`;
+      ? `width:calc(100% - 16px);margin:0 8px 20px;padding:10px;`
+      : `flex:1;min-width:200px;max-width:260px;padding:10px 0 10px 0;margin:0;display:flex;flex-direction:column;`;
     const colDiv = scroll.createEl("div", { attr: { style: colStyle, "data-col-container": norm } });
 
     const header = colDiv.createEl("div", {
-      attr: { style: "display:flex;align-items:center;margin-bottom:10px;" },
+      attr: { style: "display:flex;align-items:center;margin-bottom:10px;padding:0 4px;" },
     });
     header.createEl("h4", {
       text: col.rawTag.replace(/^#/, "").toUpperCase(),
@@ -1363,7 +1365,7 @@ export async function buildBoard(
     } else {
       const btn = header.createEl("button", {
         text: "Archive",
-        attr: { style: "background:none;border:none;cursor:pointer;" },
+        attr: { style: "background:none;border:none;cursor:pointer;color:var(--kb-text);" },
       });
       (btn as HTMLButtonElement).dataset.column = norm;
     }
@@ -1372,7 +1374,7 @@ export async function buildBoard(
       attr: {
         class: `drop-zone drop-zone-${norm}`,
         style:
-          "min-height:200px;border:2px dashed var(--background-modifier-border);border-radius:4px;padding:5px;flex-grow:1;display:flex;flex-direction:column;",
+          "min-height:200px;border:2px dashed var(--background-modifier-border);border-right:none;border-radius:0;padding:5px;flex-grow:1;display:flex;flex-direction:column;",
       },
     });
 

@@ -839,7 +839,7 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
     return (subs || []).map((sub) => renderSub(sub, depth) + renderSubTree(sub.subs, depth + 1)).join("");
   }
   const bodyHTML = hasSubs ? `<div style="position:relative;">
-         <div class="card-title" style="padding:6px 32px 6px 0;font-weight:600;cursor:pointer;"
+         <div class="card-title" style="padding:6px 32px 6px 0;font-weight:600;cursor:pointer;color:var(--kb-text);"
               onclick="this.closest('.kanban-card').querySelector('details').toggleAttribute('open')">
            ${mainContent}
            <span style="position:absolute;top:6px;right:8px;font-size:1.4em;color:var(--kb-accent);user-select:none;">${isExpanded ? "\u25B2" : "\u25BC"}</span>
@@ -848,11 +848,11 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
            <summary style="display:none;"></summary>
            <div style="padding-left:8px;">${renderSubTree(item.item.subs)}</div>
          </details>
-       </div>` : `<div class="card-title" style="padding:6px 0;font-weight:600;">${mainContent}</div>`;
+       </div>` : `<div class="card-title" style="padding:6px 0;font-weight:600;color:var(--kb-text);">${mainContent}</div>`;
   const border = isMulti ? "background:var(--background-modifier-error-hover);border:1px solid var(--background-modifier-error);" : allChildrenDone ? `border:2px solid var(--kb-children-done);background:color-mix(in srgb,var(--kb-children-done) 20%,var(--kb-card-bg));` : "border:1px solid var(--background-modifier-border);";
   const src = item.source.path.split("/").pop().replace(/\.md$/, "");
   const href = `obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(item.filePath)}`;
-  const badge = `<div style="margin-top:8px;font-size:.8em;color:var(--text-muted);">
+  const badge = `<div style="margin-top:8px;font-size:.8em;color:var(--kb-text);">
     from: <a href="${href}" style="color:var(--kb-link);text-decoration:none;">${src}</a></div>`;
   return `<div draggable="true" class="kanban-card"
     data-file="${item.filePath}"
@@ -894,6 +894,7 @@ function buildColorCSS(config) {
     #kanban-wrapper [data-col-container]{background:var(--kb-col-bg);}
     #kanban-wrapper [data-col-norm]{background:var(--kb-col-bg);color:var(--kb-text);}
     #kanban-wrapper [data-col-norm][data-col-active="1"]{background:var(--kb-accent);color:var(--text-on-accent);font-weight:600;}
+    #kanban-wrapper .kanban-card,.card-title{color:var(--kb-text);}
     ${perColRules}`;
 }
 function refreshColorVars(config) {
@@ -958,7 +959,7 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
   const scroll = wrapper.createEl("div", {
     attr: {
       id: "kanban-scroll",
-      style: "display:flex;overflow-x:auto;gap:12px;padding:12px 0;-webkit-overflow-scrolling:touch;"
+      style: "display:flex;overflow-x:auto;gap:0;padding:12px 0;-webkit-overflow-scrolling:touch;"
     }
   });
   const isPhone = /iPhone|iPod|(Android.*Mobile)/i.test(navigator.userAgent);
@@ -993,7 +994,7 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
     const col = columns[norm];
     if (!col)
       continue;
-    const colStyle = isNarrow ? `width:calc(100% - 16px);margin:0 8px 20px;padding:10px;border-radius:8px;` : `flex:1;min-width:260px;max-width:320px;padding:10px 10px 10px 0;border-radius:4px;margin:0 10px 0 0;display:flex;flex-direction:column;`;
+    const colStyle = isNarrow ? `width:calc(100% - 16px);margin:0 8px 20px;padding:10px;` : `flex:1;min-width:200px;max-width:260px;padding:10px 4px 10px 0;margin:0;display:flex;flex-direction:column;`;
     const colDiv = scroll.createEl("div", { attr: { style: colStyle, "data-col-container": norm } });
     const header = colDiv.createEl("div", {
       attr: { style: "display:flex;align-items:center;margin-bottom:10px;" }
@@ -1014,7 +1015,7 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
     } else {
       const btn = header.createEl("button", {
         text: "Archive",
-        attr: { style: "background:none;border:none;cursor:pointer;" }
+        attr: { style: "background:none;border:none;cursor:pointer;color:var(--kb-text);" }
       });
       btn.dataset.column = norm;
     }
