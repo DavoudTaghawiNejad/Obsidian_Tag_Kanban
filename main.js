@@ -44,6 +44,7 @@ function buildConfig(settings) {
     normDone: normalizeTag(settings.doneColumn),
     normToday: normalizeTag(settings.todayColumn),
     normLater: normalizeTag(settings.laterColumn),
+    normProject: (settings.projectColumns || []).map(normalizeTag),
     allChildrenDoneColor: settings.allChildrenDoneColor,
     columnColors: Object.fromEntries(
       (settings.kanban || []).map((tag, i) => [normalizeTag(tag), (settings.columnColors || [])[i] || ""])
@@ -341,10 +342,29 @@ async function moveToColumn(app, filePath, lineNum, originalTags, targetTag, isD
     return false;
   }
 }
-async function addNewItem(app, rawInsertTarget, columnTag, userText, dateStr, config) {
+async function addNewItem(app, rawInsertTarget, columnTag, userText, dateStr, config, createDoc = false) {
   try {
     if (!userText?.trim())
       return false;
+    let cardText = userText.trim();
+    if (createDoc) {
+      const safeTitle = cardText.replace(/[\\/:*?"<>|#\[\]]/g, " ").replace(/\s+/g, " ").trim();
+      const docPath = `${safeTitle}.md`;
+      let newLine2 = `- [ ] ${cardText} ${columnTag}`;
+      if (dateStr)
+        newLine2 += ` ${dateStr}`;
+      const existing = app.vault.getAbstractFileByPath(docPath);
+      if (existing) {
+        showErrorDialog(`"${safeTitle}.md" already exists \u2014 task was added to the beginning of the existing note.`);
+        const existingLines = (await app.vault.read(existing)).split("\n");
+        existingLines.splice(0, 0, newLine2);
+        await app.vault.modify(existing, existingLines.join("\n"));
+      } else {
+        await app.vault.create(docPath, newLine2 + "\n");
+      }
+      new import_obsidian.Notice(`Added "${userText}" to ${columnTag.replace(/^#/, "").toUpperCase()}.`);
+      return true;
+    }
     let [notePath, heading = ""] = rawInsertTarget.trim().split("#");
     if (!notePath.endsWith(".md"))
       notePath += ".md";
@@ -374,7 +394,7 @@ async function addNewItem(app, rawInsertTarget, columnTag, userText, dateStr, co
         insertIdx = hi + 1;
       }
     }
-    let newLine = `- [ ] ${userText.trim()} ${columnTag}`;
+    let newLine = `- [ ] ${cardText} ${columnTag}`;
     if (dateStr)
       newLine += ` ${dateStr}`;
     lines.splice(insertIdx, 0, newLine);
@@ -703,18 +723,33 @@ function buttonHtml(label, accent) {
   const color = accent ? "var(--text-on-accent)" : "var(--text-normal)";
   return `<button style="padding:8px 16px;background:${bg};color:${color};border:none;border-radius:4px;cursor:pointer;">${label}</button>`;
 }
-function showInputDialog(title, onSubmit) {
+function showErrorDialog(message) {
+  const { dialog, close } = makeOverlay("kanban-error-dialog");
+  dialog.innerHTML = `
+    <h3 style="margin:0 0 10px;font-size:1.1em;">Error</h3>
+    <p style="margin:0 0 16px;font-size:.95em;">${message}</p>
+    <div style="text-align:center;">${buttonHtml("OK", false)}</div>`;
+  const [okBtn] = dialog.querySelectorAll("button");
+  okBtn.onclick = close;
+}
+function showInputDialog(title, defaultCreateDoc, onSubmit) {
   const { dialog, close } = makeOverlay("kanban-input-dialog");
+  const chk = defaultCreateDoc ? "checked" : "";
   dialog.innerHTML = `<h3 style="margin:0 0 10px;font-size:1.1em;">${title}</h3>
     <input id="k-text" type="text" placeholder="Enter new item text..." style="${inputStyle()}" autofocus>
+    <label style="display:flex;align-items:center;gap:8px;margin-bottom:12px;cursor:pointer;font-size:.9em;">
+      <input id="k-doc" type="checkbox" ${chk}> Create new document
+    </label>
     <div style="display:flex;gap:10px;justify-content:center;">${buttonHtml("Add", true)}${buttonHtml("Cancel", false)}</div>`;
   const [addBtn, cancelBtn] = dialog.querySelectorAll("button");
   const input = dialog.querySelector("#k-text");
+  const docCheck = dialog.querySelector("#k-doc");
   const submit = () => {
     const v = input.value.trim();
+    const createDoc = docCheck.checked;
     close();
     if (v)
-      onSubmit(v);
+      onSubmit(v, createDoc);
   };
   addBtn.onclick = submit;
   cancelBtn.onclick = close;
@@ -749,21 +784,27 @@ function showDateDialog(title, defaultDate, onSubmit) {
   };
   dateInput.focus();
 }
-function showLaterAddDialog(title, onSubmit) {
+function showLaterAddDialog(title, defaultCreateDoc, onSubmit) {
   const { dialog, close } = makeOverlay("kanban-later-add-dialog");
   const defDate = getDefaultDate().toISOString().split("T")[0];
+  const chk = defaultCreateDoc ? "checked" : "";
   dialog.innerHTML = `<h3 style="margin:0 0 10px;font-size:1.1em;">${title}</h3>
     <input id="k-text" type="text" placeholder="Enter new item text..." style="${inputStyle()}" autofocus>
     <input id="k-date" type="date" value="${defDate}" style="${inputStyle()}">
+    <label style="display:flex;align-items:center;gap:8px;margin-bottom:12px;cursor:pointer;font-size:.9em;">
+      <input id="k-doc" type="checkbox" ${chk}> Create new document
+    </label>
     <div style="display:flex;gap:10px;justify-content:center;">${buttonHtml("Add", true)}${buttonHtml("Cancel", false)}</div>`;
   const [addBtn, cancelBtn] = dialog.querySelectorAll("button");
   const textInput = dialog.querySelector("#k-text");
   const dateInput = dialog.querySelector("#k-date");
+  const docCheck = dialog.querySelector("#k-doc");
   const submit = () => {
     const t = textInput.value.trim(), d = dateInput.value;
+    const createDoc = docCheck.checked;
     close();
     if (t && d)
-      onSubmit(t, "@" + d);
+      onSubmit(t, "@" + d, createDoc);
   };
   addBtn.onclick = submit;
   cancelBtn.onclick = close;
@@ -1653,14 +1694,15 @@ function attachListeners(boardEl, config, app, refresh) {
     const tag = btn.dataset.tag;
     const norm = btn.dataset.column;
     const title = `Add to ${tag.replace(/^#/, "").toUpperCase()} Column`;
+    const isProject = config.normProject.includes(norm);
     if (norm === config.normLater) {
-      showLaterAddDialog(title, async (text, dateStr) => {
-        if (await addNewItem(app, config.newTaskInsert, tag, text, dateStr, config))
+      showLaterAddDialog(title, isProject, async (text, dateStr, createDoc) => {
+        if (await addNewItem(app, config.newTaskInsert, tag, text, dateStr, config, createDoc))
           requestAnimationFrame(() => setTimeout(refresh, 50));
       });
     } else {
-      showInputDialog(title, async (text) => {
-        if (await addNewItem(app, config.newTaskInsert, tag, text, null, config))
+      showInputDialog(title, isProject, async (text, createDoc) => {
+        if (await addNewItem(app, config.newTaskInsert, tag, text, null, config, createDoc))
           requestAnimationFrame(() => setTimeout(refresh, 50));
       });
     }
@@ -1864,6 +1906,7 @@ var DEFAULT_SETTINGS = {
   parentPages: [],
   allVaultNotes: true,
   allChildrenDoneColor: "#e03e3e",
+  projectColumns: [],
   columnColors: [],
   colorCardBg: "",
   colorColumnBg: "",
@@ -1944,6 +1987,14 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
     new import_obsidian3.Setting(containerEl).setName("Later column").setDesc("Tag for the scheduled / later column \u2014 shows a date picker on drop").addText(
       (text) => text.setPlaceholder("#later").setValue(this.plugin.settings.laterColumn).onChange(async (value) => {
         this.plugin.settings.laterColumn = value.trim();
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian3.Setting(containerEl).setName("Project columns").setDesc(
+      "Comma-separated tags for columns where adding a new card automatically offers to create a linked Obsidian note. When a card is added in one of these columns, the 'Create new document' checkbox in the add dialog is pre-checked. The new note is created in the vault root and the card text becomes a wiki link [[Note Title]] pointing to it."
+    ).addText(
+      (text) => text.setPlaceholder("#todo, #inprogress").setValue((this.plugin.settings.projectColumns || []).join(", ")).onChange(async (value) => {
+        this.plugin.settings.projectColumns = value.split(",").map((t) => t.trim()).filter(Boolean);
         await this.plugin.saveSettings();
       })
     );

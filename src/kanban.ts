@@ -27,6 +27,7 @@ export interface KanbanConfig {
   normDone: string;
   normToday: string;
   normLater: string;
+  normProject: string[];
   allChildrenDoneColor: string;
   // Colors (empty string → fall back to Obsidian theme variable)
   columnColors: Record<string, string>;
@@ -54,6 +55,7 @@ export function buildConfig(settings: KanbanSettings): KanbanConfig {
     normDone: normalizeTag(settings.doneColumn),
     normToday: normalizeTag(settings.todayColumn),
     normLater: normalizeTag(settings.laterColumn),
+    normProject: (settings.projectColumns || []).map(normalizeTag),
     allChildrenDoneColor: settings.allChildrenDoneColor,
     columnColors: Object.fromEntries(
       (settings.kanban || []).map((tag, i) => [normalizeTag(tag), (settings.columnColors || [])[i] || ""])
@@ -501,10 +503,34 @@ async function addNewItem(
   columnTag: string,
   userText: string,
   dateStr: string | null,
-  config: KanbanConfig
+  config: KanbanConfig,
+  createDoc = false
 ): Promise<boolean> {
   try {
     if (!userText?.trim()) return false;
+
+    let cardText = userText.trim();
+
+    if (createDoc) {
+      const safeTitle = cardText.replace(/[\\/:*?"<>|#\[\]]/g, " ").replace(/\s+/g, " ").trim();
+      const docPath = `${safeTitle}.md`;
+      let newLine = `- [ ] ${cardText} ${columnTag}`;
+      if (dateStr) newLine += ` ${dateStr}`;
+
+      const existing = app.vault.getAbstractFileByPath(docPath) as TFile | null;
+      if (existing) {
+        // Insert at beginning of existing document, but warn the user
+        showErrorDialog(`"${safeTitle}.md" already exists — task was added to the beginning of the existing note.`);
+        const existingLines = (await app.vault.read(existing)).split("\n");
+        existingLines.splice(0, 0, newLine);
+        await app.vault.modify(existing, existingLines.join("\n"));
+      } else {
+        await app.vault.create(docPath, newLine + "\n");
+      }
+      new Notice(`Added "${userText}" to ${columnTag.replace(/^#/, "").toUpperCase()}.`);
+      return true;
+    }
+
     let [notePath, heading = ""] = rawInsertTarget.trim().split("#");
     if (!notePath.endsWith(".md")) notePath += ".md";
 
@@ -540,7 +566,7 @@ async function addNewItem(
       }
     }
 
-    let newLine = `- [ ] ${userText.trim()} ${columnTag}`;
+    let newLine = `- [ ] ${cardText} ${columnTag}`;
     if (dateStr) newLine += ` ${dateStr}`;
     lines.splice(insertIdx, 0, newLine);
 
@@ -975,18 +1001,34 @@ function buttonHtml(label: string, accent: boolean) {
   return `<button style="padding:8px 16px;background:${bg};color:${color};border:none;border-radius:4px;cursor:pointer;">${label}</button>`;
 }
 
-function showInputDialog(title: string, onSubmit: (v: string) => void) {
+function showErrorDialog(message: string) {
+  const { dialog, close } = makeOverlay("kanban-error-dialog");
+  dialog.innerHTML = `
+    <h3 style="margin:0 0 10px;font-size:1.1em;">Error</h3>
+    <p style="margin:0 0 16px;font-size:.95em;">${message}</p>
+    <div style="text-align:center;">${buttonHtml("OK", false)}</div>`;
+  const [okBtn] = dialog.querySelectorAll("button");
+  okBtn.onclick = close;
+}
+
+function showInputDialog(title: string, defaultCreateDoc: boolean, onSubmit: (v: string, createDoc: boolean) => void) {
   const { dialog, close } = makeOverlay("kanban-input-dialog");
+  const chk = defaultCreateDoc ? "checked" : "";
   dialog.innerHTML = `<h3 style="margin:0 0 10px;font-size:1.1em;">${title}</h3>
     <input id="k-text" type="text" placeholder="Enter new item text..." style="${inputStyle()}" autofocus>
+    <label style="display:flex;align-items:center;gap:8px;margin-bottom:12px;cursor:pointer;font-size:.9em;">
+      <input id="k-doc" type="checkbox" ${chk}> Create new document
+    </label>
     <div style="display:flex;gap:10px;justify-content:center;">${buttonHtml("Add", true)}${buttonHtml("Cancel", false)}</div>`;
 
   const [addBtn, cancelBtn] = dialog.querySelectorAll("button");
   const input = dialog.querySelector("#k-text") as HTMLInputElement;
+  const docCheck = dialog.querySelector("#k-doc") as HTMLInputElement;
   const submit = () => {
     const v = input.value.trim();
+    const createDoc = docCheck.checked;
     close();
-    if (v) onSubmit(v);
+    if (v) onSubmit(v, createDoc);
   };
   addBtn.onclick = submit;
   cancelBtn.onclick = close;
@@ -1025,23 +1067,30 @@ function showDateDialog(
 
 function showLaterAddDialog(
   title: string,
-  onSubmit: (text: string, dateStr: string) => void
+  defaultCreateDoc: boolean,
+  onSubmit: (text: string, dateStr: string, createDoc: boolean) => void
 ) {
   const { dialog, close } = makeOverlay("kanban-later-add-dialog");
   const defDate = getDefaultDate().toISOString().split("T")[0];
+  const chk = defaultCreateDoc ? "checked" : "";
   dialog.innerHTML = `<h3 style="margin:0 0 10px;font-size:1.1em;">${title}</h3>
     <input id="k-text" type="text" placeholder="Enter new item text..." style="${inputStyle()}" autofocus>
     <input id="k-date" type="date" value="${defDate}" style="${inputStyle()}">
+    <label style="display:flex;align-items:center;gap:8px;margin-bottom:12px;cursor:pointer;font-size:.9em;">
+      <input id="k-doc" type="checkbox" ${chk}> Create new document
+    </label>
     <div style="display:flex;gap:10px;justify-content:center;">${buttonHtml("Add", true)}${buttonHtml("Cancel", false)}</div>`;
 
   const [addBtn, cancelBtn] = dialog.querySelectorAll("button");
   const textInput = dialog.querySelector("#k-text") as HTMLInputElement;
   const dateInput = dialog.querySelector("#k-date") as HTMLInputElement;
+  const docCheck = dialog.querySelector("#k-doc") as HTMLInputElement;
   const submit = () => {
     const t = textInput.value.trim(),
       d = dateInput.value;
+    const createDoc = docCheck.checked;
     close();
-    if (t && d) onSubmit(t, "@" + d);
+    if (t && d) onSubmit(t, "@" + d, createDoc);
   };
   addBtn.onclick = submit;
   cancelBtn.onclick = close;
@@ -2063,19 +2112,16 @@ export function attachListeners(
     const tag = btn.dataset.tag!;
     const norm = btn.dataset.column!;
     const title = `Add to ${tag.replace(/^#/, "").toUpperCase()} Column`;
+    const isProject = config.normProject.includes(norm);
 
     if (norm === config.normLater) {
-      showLaterAddDialog(title, async (text, dateStr) => {
-        if (
-          await addNewItem(app, config.newTaskInsert, tag, text, dateStr, config)
-        )
+      showLaterAddDialog(title, isProject, async (text: string, dateStr: string, createDoc: boolean) => {
+        if (await addNewItem(app, config.newTaskInsert, tag, text, dateStr, config, createDoc))
           requestAnimationFrame(() => setTimeout(refresh, 50));
       });
     } else {
-      showInputDialog(title, async (text) => {
-        if (
-          await addNewItem(app, config.newTaskInsert, tag, text, null, config)
-        )
+      showInputDialog(title, isProject, async (text: string, createDoc: boolean) => {
+        if (await addNewItem(app, config.newTaskInsert, tag, text, null, config, createDoc))
           requestAnimationFrame(() => setTimeout(refresh, 50));
       });
     }

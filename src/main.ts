@@ -10,6 +10,7 @@ export interface KanbanSettings {
   parentPages: string[];
   allVaultNotes: boolean;
   allChildrenDoneColor: string;
+  projectColumns: string[];
   // Colors — empty string means "use Obsidian theme default"
   columnColors: string[];
   colorCardBg: string;
@@ -31,6 +32,7 @@ export const DEFAULT_SETTINGS: KanbanSettings = {
   parentPages: [],
   allVaultNotes: true,
   allChildrenDoneColor: "#e03e3e",
+  projectColumns: [],
   columnColors: [],
   colorCardBg: "",
   colorColumnBg: "",
@@ -155,6 +157,26 @@ class KanbanSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.laterColumn)
           .onChange(async (value) => {
             this.plugin.settings.laterColumn = value.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Project columns")
+      .setDesc(
+        "Comma-separated tags for columns where adding a new card automatically offers to create a linked Obsidian note. " +
+        "When a card is added in one of these columns, the 'Create new document' checkbox in the add dialog is pre-checked. " +
+        "The new note is created in the vault root and the card text becomes a wiki link [[Note Title]] pointing to it."
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("#todo, #inprogress")
+          .setValue((this.plugin.settings.projectColumns || []).join(", "))
+          .onChange(async (value) => {
+            this.plugin.settings.projectColumns = value
+              .split(",")
+              .map((t) => t.trim())
+              .filter(Boolean);
             await this.plugin.saveSettings();
           })
       );
