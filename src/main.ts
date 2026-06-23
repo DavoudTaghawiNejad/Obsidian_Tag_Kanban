@@ -11,6 +11,7 @@ export interface KanbanSettings {
   allVaultNotes: boolean;
   allChildrenDoneColor: string;
   projectColumns: string[];
+  projectsDocument: string;
   // Colors — empty string means "use Obsidian theme default"
   columnColors: string[];
   colorCardBg: string;
@@ -33,6 +34,7 @@ export const DEFAULT_SETTINGS: KanbanSettings = {
   allVaultNotes: true,
   allChildrenDoneColor: "#e03e3e",
   projectColumns: [],
+  projectsDocument: "",
   columnColors: [],
   colorCardBg: "",
   colorColumnBg: "",
@@ -182,9 +184,25 @@ class KanbanSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("New task insert location")
+      .setName("Project master document")
       .setDesc(
-        'Note name (and optional heading) where the + button inserts new tasks, e.g. "Tasks" or "Tasks#Inbox"'
+        "Note where [[Project name]] links are collected when adding a card with 'Create new document' checked. " +
+        "Each new project link is prepended here (newest on top). Leave blank to disable."
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("Projects")
+          .setValue(this.plugin.settings.projectsDocument)
+          .onChange(async (value) => {
+            this.plugin.settings.projectsDocument = value.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("New task insert document")
+      .setDesc(
+        'Note (and optional heading) where the + button inserts new tasks, e.g. "Tasks" or "Tasks#Inbox"'
       )
       .addText((text) =>
         text

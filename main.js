@@ -45,6 +45,7 @@ function buildConfig(settings) {
     normToday: normalizeTag(settings.todayColumn),
     normLater: normalizeTag(settings.laterColumn),
     normProject: (settings.projectColumns || []).map(normalizeTag),
+    projectsDocument: settings.projectsDocument || "",
     allChildrenDoneColor: settings.allChildrenDoneColor,
     columnColors: Object.fromEntries(
       (settings.kanban || []).map((tag, i) => [normalizeTag(tag), (settings.columnColors || [])[i] || ""])
@@ -350,55 +351,67 @@ async function addNewItem(app, rawInsertTarget, columnTag, userText, dateStr, co
     if (createDoc) {
       const safeTitle = cardText.replace(/[\\/:*?"<>|#\[\]]/g, " ").replace(/\s+/g, " ").trim();
       const docPath = `${safeTitle}.md`;
+      let projFile = app.vault.getAbstractFileByPath(docPath);
+      if (!projFile) {
+        projFile = await app.vault.create(docPath, "");
+        showInfoDialog(`Created new note "${safeTitle}.md".`);
+      }
       let newLine2 = `- [ ] ${cardText} ${columnTag}`;
       if (dateStr)
         newLine2 += ` ${dateStr}`;
-      const existing = app.vault.getAbstractFileByPath(docPath);
-      if (existing) {
-        showErrorDialog(`"${safeTitle}.md" already exists \u2014 task was added to the beginning of the existing note.`);
-        const existingLines = (await app.vault.read(existing)).split("\n");
-        existingLines.splice(0, 0, newLine2);
-        await app.vault.modify(existing, existingLines.join("\n"));
-      } else {
-        await app.vault.create(docPath, newLine2 + "\n");
+      const projLines = (await app.vault.read(projFile)).split("\n");
+      projLines.splice(afterFrontMatter(projLines), 0, newLine2);
+      await app.vault.modify(projFile, projLines.join("\n"));
+      const masterDocName = config.projectsDocument.trim();
+      if (masterDocName) {
+        const masterPath = masterDocName.endsWith(".md") ? masterDocName : `${masterDocName}.md`;
+        let masterFile = app.vault.getAbstractFileByPath(masterPath);
+        if (!masterFile) {
+          masterFile = await app.vault.create(masterPath, `# ${masterDocName}
+`);
+        }
+        const masterLines = (await app.vault.read(masterFile)).split("\n");
+        masterLines.splice(afterFrontMatter(masterLines), 0, `[[${safeTitle}]]`);
+        await app.vault.modify(masterFile, masterLines.join("\n"));
       }
-      new import_obsidian.Notice(`Added "${userText}" to ${columnTag.replace(/^#/, "").toUpperCase()}.`);
+      new import_obsidian.Notice(`Added "${userText}" to ${safeTitle}.`);
       return true;
     }
-    let [notePath, heading = ""] = rawInsertTarget.trim().split("#");
-    if (!notePath.endsWith(".md"))
-      notePath += ".md";
-    let tFile = app.vault.getAbstractFileByPath(notePath);
-    if (!tFile) {
-      tFile = await app.vault.create(notePath, "");
+    const baseName = rawInsertTarget.trim().split("#")[0].replace(/\.md$/, "").trim();
+    const dirPath = baseName;
+    const now = new Date();
+    const monthStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+    const monthlyFileName = `${baseName}-${monthStr}`;
+    const monthlyPath = `${dirPath}/${monthlyFileName}.md`;
+    const indexPath = `${dirPath}/${baseName}.md`;
+    if (!(app.vault.getAbstractFileByPath(dirPath) instanceof import_obsidian.TFolder)) {
+      await app.vault.createFolder(dirPath);
     }
-    const lines = (await app.vault.read(tFile)).split("\n");
-    let yamlEnd = 0;
-    if (lines[0]?.trim() === "---") {
-      for (let i = 1; i < lines.length; i++) {
-        if (lines[i]?.trim() === "---") {
-          yamlEnd = i + 1;
-          break;
-        }
-      }
+    let monthlyFile = app.vault.getAbstractFileByPath(monthlyPath);
+    if (!monthlyFile) {
+      monthlyFile = await app.vault.create(monthlyPath, `# ${monthlyFileName}
+`);
     }
-    let insertIdx = yamlEnd;
-    if (heading) {
-      const hi = lines.findIndex(
-        (l, i) => i >= yamlEnd && l.trim().startsWith("#") && l.replace(/^#{1,6}\s+/, "") === heading
-      );
-      if (hi === -1) {
-        lines.splice(insertIdx, 0, `## ${heading}`);
-        insertIdx++;
-      } else {
-        insertIdx = hi + 1;
+    const linkLine = `[[${monthlyFileName}]]`;
+    let indexFile = app.vault.getAbstractFileByPath(indexPath);
+    if (!indexFile) {
+      await app.vault.create(indexPath, linkLine + "\n");
+    } else {
+      const idxLines = (await app.vault.read(indexFile)).split("\n");
+      if (!idxLines.some((l) => l.trim() === linkLine)) {
+        idxLines.splice(afterFrontMatter(idxLines), 0, linkLine);
+        await app.vault.modify(indexFile, idxLines.join("\n"));
       }
     }
     let newLine = `- [ ] ${cardText} ${columnTag}`;
     if (dateStr)
       newLine += ` ${dateStr}`;
-    lines.splice(insertIdx, 0, newLine);
-    await app.vault.modify(tFile, lines.join("\n"));
+    const monthlyLines = (await app.vault.read(monthlyFile)).split("\n");
+    let insertAt = afterFrontMatter(monthlyLines);
+    if (monthlyLines[insertAt]?.match(/^#\s/))
+      insertAt++;
+    monthlyLines.splice(insertAt, 0, newLine);
+    await app.vault.modify(monthlyFile, monthlyLines.join("\n"));
     new import_obsidian.Notice(`Added "${userText}" to ${columnTag.replace(/^#/, "").toUpperCase()}.`);
     return true;
   } catch (e) {
@@ -723,10 +736,18 @@ function buttonHtml(label, accent) {
   const color = accent ? "var(--text-on-accent)" : "var(--text-normal)";
   return `<button style="padding:8px 16px;background:${bg};color:${color};border:none;border-radius:4px;cursor:pointer;">${label}</button>`;
 }
-function showErrorDialog(message) {
-  const { dialog, close } = makeOverlay("kanban-error-dialog");
+function afterFrontMatter(lines) {
+  if (lines[0]?.trim() === "---") {
+    for (let i = 1; i < lines.length; i++) {
+      if (lines[i]?.trim() === "---")
+        return i + 1;
+    }
+  }
+  return 0;
+}
+function showInfoDialog(message) {
+  const { dialog, close } = makeOverlay("kanban-info-dialog");
   dialog.innerHTML = `
-    <h3 style="margin:0 0 10px;font-size:1.1em;">Error</h3>
     <p style="margin:0 0 16px;font-size:.95em;">${message}</p>
     <div style="text-align:center;">${buttonHtml("OK", false)}</div>`;
   const [okBtn] = dialog.querySelectorAll("button");
@@ -1907,6 +1928,7 @@ var DEFAULT_SETTINGS = {
   allVaultNotes: true,
   allChildrenDoneColor: "#e03e3e",
   projectColumns: [],
+  projectsDocument: "",
   columnColors: [],
   colorCardBg: "",
   colorColumnBg: "",
@@ -1998,8 +2020,16 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("New task insert location").setDesc(
-      'Note name (and optional heading) where the + button inserts new tasks, e.g. "Tasks" or "Tasks#Inbox"'
+    new import_obsidian3.Setting(containerEl).setName("Project master document").setDesc(
+      "Note where [[Project name]] links are collected when adding a card with 'Create new document' checked. Each new project link is prepended here (newest on top). Leave blank to disable."
+    ).addText(
+      (text) => text.setPlaceholder("Projects").setValue(this.plugin.settings.projectsDocument).onChange(async (value) => {
+        this.plugin.settings.projectsDocument = value.trim();
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian3.Setting(containerEl).setName("New task insert document").setDesc(
+      'Note (and optional heading) where the + button inserts new tasks, e.g. "Tasks" or "Tasks#Inbox"'
     ).addText(
       (text) => text.setPlaceholder("Tasks").setValue(this.plugin.settings.newTaskInsert).onChange(async (value) => {
         this.plugin.settings.newTaskInsert = value.trim();
