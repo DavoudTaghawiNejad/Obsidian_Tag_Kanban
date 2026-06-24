@@ -1004,7 +1004,7 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
   const href = `obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(item.filePath)}`;
   const badge = `<div style="margin-top:8px;font-size:.8em;color:var(--kb-text);">
     from: <a href="${href}" style="color:var(--kb-link);text-decoration:none;">${src}</a></div>`;
-  return `<div draggable="true" class="kanban-card"
+  return `<div class="kanban-card"
     data-file="${item.filePath}"
     data-line="${item.item.line}"
     data-raw="${rawText.replace(/"/g, "&quot;")}"
@@ -1341,7 +1341,7 @@ function attachListeners(boardEl, config, app, refresh) {
       config.normLater
     ].includes(targetNorm) ? "collapsed" : "expanded";
     const siblings = zone ? siblingDataFrom(zone) : [];
-    const insertIdx = zone ? currentInsertIndex : siblings.length;
+    const insertIdx = zone && currentInsertIndex >= 0 ? currentInsertIndex : siblings.length;
     const isMulti = card.originalTags.map(normalizeTag).filter((t) => config.normKanban.includes(t)).length > 1;
     const newCalc = calcInsertOrder(siblings, insertIdx, isMulti);
     const colTitle = targetTag.replace(/^#/, "").replace(/\b\w/g, (l) => l.toUpperCase());
@@ -1480,7 +1480,6 @@ function attachListeners(boardEl, config, app, refresh) {
       border:none;border-bottom:2px solid var(--kb-accent);
       outline:none;padding:2px 0;font-size:inherit;font-weight:600;
       font-family:inherit;border-radius:0;`;
-    card.setAttribute("draggable", "false");
     const arrow = titleDiv.querySelector("span[style*='position:absolute']");
     titleDiv.innerHTML = "";
     titleDiv.appendChild(input);
@@ -1491,7 +1490,6 @@ function attachListeners(boardEl, config, app, refresh) {
       if (!titleDiv.contains(input))
         return;
       const newText = input.value.trim();
-      card.setAttribute("draggable", "true");
       if (card.querySelector("details")) {
         titleDiv.onclick = function() {
           this.closest(".kanban-card")?.querySelector("details")?.toggleAttribute("open");
@@ -1536,53 +1534,6 @@ function attachListeners(boardEl, config, app, refresh) {
       newState
     );
     card.dataset.state = newState;
-  }
-  function onDragStart(e) {
-    const card = e.target.closest(".kanban-card");
-    if (!card)
-      return;
-    draggedCard = cardDataFrom(card);
-    card.style.opacity = ".5";
-    e.dataTransfer.effectAllowed = "move";
-    applyHighlights(card);
-  }
-  function onDragEnd(e) {
-    draggedCard = null;
-    const card = e.target.closest(".kanban-card");
-    if (card)
-      card.style.opacity = "1";
-    document.querySelectorAll(".insert-slot").forEach(
-      (s) => s.style.borderTopColor = "transparent"
-    );
-    clearHighlights();
-  }
-  function onDragOver(e) {
-    e.preventDefault();
-    const zone = e.target.closest(".drop-zone");
-    if (!zone)
-      return;
-    e.dataTransfer.dropEffect = "move";
-    zone.style.borderColor = "var(--kb-accent)";
-    highlightNearestSlot(zone, e.clientY);
-  }
-  function onDragLeave(e) {
-    const zone = e.target.closest(".drop-zone");
-    if (zone)
-      zone.style.borderColor = "var(--background-modifier-border)";
-    document.querySelectorAll(".insert-slot").forEach(
-      (s) => s.style.borderTopColor = "transparent"
-    );
-  }
-  async function onDrop(e) {
-    e.preventDefault();
-    if (!draggedCard)
-      return;
-    const zone = e.target.closest(".drop-zone");
-    if (!zone)
-      return;
-    const norm = resolveTargetNorm(zone);
-    if (norm)
-      await doMove(draggedCard, norm, zone);
   }
   let touchCard = null;
   let ghost = null;
@@ -1813,15 +1764,115 @@ function attachListeners(boardEl, config, app, refresh) {
     }
     const { zone, tabNorm } = targetFromPoint(clientX, clientY);
     const savedCard = draggedCard;
+    const savedInsertIdx = currentInsertIndex;
     clearTouch();
     if (zone) {
       const norm = resolveTargetNorm(zone);
-      if (norm)
+      if (norm) {
+        currentInsertIndex = savedInsertIdx;
         await doMove(savedCard, norm, zone);
+        currentInsertIndex = -1;
+      }
     } else if (tabNorm) {
       await doMove(savedCard, tabNorm, null);
     }
     e.preventDefault();
+  }
+  let mouseCard = null;
+  let isMouseDrag = false;
+  let mouseStartX = 0, mouseStartY = 0;
+  const clearMouseDrag = () => {
+    isMouseDrag = false;
+    if (ghost) {
+      ghost.remove();
+      ghost = null;
+    }
+    if (mouseCard) {
+      mouseCard.style.opacity = "1";
+      mouseCard = null;
+    }
+    draggedCard = null;
+    document.body.style.userSelect = "";
+    boardEl.querySelectorAll(".drop-zone").forEach(
+      (z) => z.style.borderColor = "var(--background-modifier-border)"
+    );
+    boardEl.querySelectorAll(".insert-slot").forEach(
+      (s) => s.style.borderTopColor = "transparent"
+    );
+    currentInsertIndex = -1;
+    document.removeEventListener("mousemove", onMouseMove);
+    document.removeEventListener("mouseup", onMouseUp);
+  };
+  function onMouseDown(e) {
+    if (e.button !== 0)
+      return;
+    if (e.target.closest("button,a,input,.promote-icon,.demote-btn"))
+      return;
+    const card = e.target.closest(".kanban-card");
+    if (!card)
+      return;
+    mouseCard = card;
+    draggedCard = cardDataFrom(card);
+    mouseStartX = e.clientX;
+    mouseStartY = e.clientY;
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+  }
+  function onMouseMove(e) {
+    if (!mouseCard)
+      return;
+    const dx = Math.abs(e.clientX - mouseStartX);
+    const dy = Math.abs(e.clientY - mouseStartY);
+    if (!isMouseDrag) {
+      if (dx < MOVE_THRESHOLD && dy < MOVE_THRESHOLD)
+        return;
+      isMouseDrag = true;
+      ghost = makeGhost(mouseCard);
+      mouseCard.style.opacity = ".35";
+      document.body.style.userSelect = "none";
+    }
+    ghost.style.left = e.clientX - ghost.offsetWidth / 2 + "px";
+    ghost.style.top = e.clientY - ghost.offsetHeight / 2 - 20 + "px";
+    const { zone, tabNorm } = targetFromPoint(e.clientX, e.clientY);
+    boardEl.querySelectorAll(".drop-zone").forEach(
+      (z) => z.style.borderColor = "var(--background-modifier-border)"
+    );
+    boardEl.querySelectorAll("[data-col-norm]").forEach((t) => {
+      t.style.outline = "";
+      t.style.transform = "";
+    });
+    if (zone) {
+      zone.style.borderColor = "var(--kb-accent)";
+      highlightNearestSlot(zone, e.clientY);
+    } else if (tabNorm) {
+      const tab = boardEl.querySelector(`[data-col-norm="${tabNorm}"]`);
+      if (tab) {
+        tab.style.outline = "2px solid var(--kb-accent)";
+        tab.style.transform = "scale(1.08)";
+      }
+    }
+  }
+  async function onMouseUp(e) {
+    document.removeEventListener("mousemove", onMouseMove);
+    document.removeEventListener("mouseup", onMouseUp);
+    if (!isMouseDrag || !draggedCard) {
+      clearMouseDrag();
+      return;
+    }
+    const { zone, tabNorm } = targetFromPoint(e.clientX, e.clientY);
+    const savedCard = draggedCard;
+    const savedInsertIdx = currentInsertIndex;
+    clearMouseDrag();
+    if (zone) {
+      const norm = resolveTargetNorm(zone);
+      if (norm) {
+        currentInsertIndex = savedInsertIdx;
+        await doMove(savedCard, norm, zone);
+        currentInsertIndex = -1;
+      }
+    } else if (tabNorm) {
+      await doMove(savedCard, tabNorm, null);
+    }
   }
   function onTabClick(e) {
     if (selectedCard)
@@ -1886,6 +1937,7 @@ function attachListeners(boardEl, config, app, refresh) {
       requestAnimationFrame(() => setTimeout(refresh, 50));
     }
   }
+  boardEl.addEventListener("mousedown", onMouseDown);
   boardEl.addEventListener("mouseover", onMouseOver);
   boardEl.addEventListener("mouseout", onMouseOut);
   boardEl.addEventListener("click", onSubCheckClick);
@@ -1897,16 +1949,14 @@ function attachListeners(boardEl, config, app, refresh) {
   boardEl.addEventListener("click", onArchiveClick);
   boardEl.addEventListener("dblclick", onDblClick);
   boardEl.addEventListener("toggle", onToggle, true);
-  boardEl.addEventListener("dragstart", onDragStart);
-  boardEl.addEventListener("dragend", onDragEnd);
-  boardEl.addEventListener("dragover", onDragOver);
-  boardEl.addEventListener("dragleave", onDragLeave);
-  boardEl.addEventListener("drop", onDrop);
   boardEl.addEventListener("touchstart", onTouchStart, { passive: true });
   boardEl.addEventListener("touchmove", onTouchMove, { passive: false });
   boardEl.addEventListener("touchend", onTouchEnd, { passive: false });
   boardEl.addEventListener("touchcancel", clearTouch, { passive: true });
   return () => {
+    boardEl.removeEventListener("mousedown", onMouseDown);
+    document.removeEventListener("mousemove", onMouseMove);
+    document.removeEventListener("mouseup", onMouseUp);
     boardEl.removeEventListener("mouseover", onMouseOver);
     boardEl.removeEventListener("mouseout", onMouseOut);
     boardEl.removeEventListener("click", onSubCheckClick);
@@ -1918,11 +1968,6 @@ function attachListeners(boardEl, config, app, refresh) {
     boardEl.removeEventListener("click", onArchiveClick);
     boardEl.removeEventListener("dblclick", onDblClick);
     boardEl.removeEventListener("toggle", onToggle, true);
-    boardEl.removeEventListener("dragstart", onDragStart);
-    boardEl.removeEventListener("dragend", onDragEnd);
-    boardEl.removeEventListener("dragover", onDragOver);
-    boardEl.removeEventListener("dragleave", onDragLeave);
-    boardEl.removeEventListener("drop", onDrop);
     boardEl.removeEventListener("touchstart", onTouchStart);
     boardEl.removeEventListener("touchmove", onTouchMove);
     boardEl.removeEventListener("touchend", onTouchEnd);
