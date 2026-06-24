@@ -2129,7 +2129,29 @@ var KanbanPlugin = class extends import_obsidian3.Plugin {
       name: "Open Kanban Board",
       callback: () => this.activateView()
     });
+    this.registerObsidianProtocolHandler(
+      "open-kanban",
+      () => this.activateView()
+    );
+    this.registerEvent(
+      this.app.workspace.on("layout-change", () => this.injectNewTabButton())
+    );
+    this.app.workspace.onLayoutReady(() => this.injectNewTabButton());
     this.addSettingTab(new KanbanSettingTab(this.app, this));
+  }
+  injectNewTabButton() {
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      if (leaf.getViewState().type !== "empty")
+        return;
+      const container = leaf.view.containerEl.querySelector(".empty-state-container");
+      if (!container || container.querySelector(".kanban-new-tab-btn"))
+        return;
+      const btn = container.createEl("button", {
+        text: "Open Kanban Board",
+        cls: "empty-state-action kanban-new-tab-btn"
+      });
+      btn.addEventListener("click", () => this.activateView());
+    });
   }
   onunload() {
     this.app.workspace.detachLeavesOfType(VIEW_TYPE_KANBAN);

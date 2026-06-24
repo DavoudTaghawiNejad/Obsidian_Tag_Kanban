@@ -66,7 +66,32 @@ export default class KanbanPlugin extends Plugin {
       callback: () => this.activateView(),
     });
 
+    // Protocol handler: obsidian://open-kanban opens the board from text links
+    this.registerObsidianProtocolHandler("open-kanban", () =>
+      this.activateView()
+    );
+
+    // Inject "Open Kanban Board" button into new-tab empty views
+    this.registerEvent(
+      this.app.workspace.on("layout-change", () => this.injectNewTabButton())
+    );
+    // Run once in case a tab is already open when the plugin loads
+    this.app.workspace.onLayoutReady(() => this.injectNewTabButton());
+
     this.addSettingTab(new KanbanSettingTab(this.app, this));
+  }
+
+  private injectNewTabButton() {
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      if (leaf.getViewState().type !== "empty") return;
+      const container = leaf.view.containerEl.querySelector(".empty-state-container");
+      if (!container || container.querySelector(".kanban-new-tab-btn")) return;
+      const btn = container.createEl("button", {
+        text: "Open Kanban Board",
+        cls: "empty-state-action kanban-new-tab-btn",
+      });
+      btn.addEventListener("click", () => this.activateView());
+    });
   }
 
   onunload() {
