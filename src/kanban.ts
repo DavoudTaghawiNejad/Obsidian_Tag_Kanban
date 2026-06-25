@@ -1263,14 +1263,14 @@ function createCardHTML(
     }
     return false;
   }
-  // Any unchecked descendant that has an active (non-done) kanban tag.
+  // Any unchecked descendant that has an active (non-done, non-project) kanban tag.
   function hasActiveKanban(subs: any[]): boolean {
     for (const s of subs ?? []) {
       if (isCheckboxItem(s) && !isCheckedItem(s)) {
         const tags: string[] = s.tags ?? [];
         if (tags.some((t: string) => {
           const norm = normalizeTag(t);
-          return config.normKanban.includes(norm) && norm !== config.normDone;
+          return config.normKanban.includes(norm) && norm !== config.normDone && !config.normProject.includes(norm);
         })) return true;
       }
       if (s.subs?.length && hasActiveKanban(s.subs)) return true;
@@ -1281,8 +1281,9 @@ function createCardHTML(
   const hasCheckboxSubs = hasAnyCheckbox(item.item.subs);
   // Green: has checkboxes and all are checked.
   const allSubsChecked   = hasCheckboxSubs && !hasUnchecked(item.item.subs);
-  // Red: has unchecked checkboxes but none are tracked as a kanban card.
-  const hasUnmanagedWork = hasCheckboxSubs && hasUnchecked(item.item.subs) && !hasActiveKanban(item.item.subs);
+  // Red: only in project columns — has unchecked checkboxes but none are tracked as a non-done, non-project kanban card.
+  const isProjectColumn  = config.normProject.includes(currentNorm);
+  const hasUnmanagedWork = isProjectColumn && hasCheckboxSubs && hasUnchecked(item.item.subs) && !hasActiveKanban(item.item.subs);
 
   function renderSub(sub: any, depth: number): string {
     const parentTag =

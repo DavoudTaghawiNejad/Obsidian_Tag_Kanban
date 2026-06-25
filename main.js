@@ -953,7 +953,7 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
         const tags = s.tags ?? [];
         if (tags.some((t) => {
           const norm = normalizeTag(t);
-          return config.normKanban.includes(norm) && norm !== config.normDone;
+          return config.normKanban.includes(norm) && norm !== config.normDone && !config.normProject.includes(norm);
         }))
           return true;
       }
@@ -964,7 +964,8 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
   }
   const hasCheckboxSubs = hasAnyCheckbox(item.item.subs);
   const allSubsChecked = hasCheckboxSubs && !hasUnchecked(item.item.subs);
-  const hasUnmanagedWork = hasCheckboxSubs && hasUnchecked(item.item.subs) && !hasActiveKanban(item.item.subs);
+  const isProjectColumn = config.normProject.includes(currentNorm);
+  const hasUnmanagedWork = isProjectColumn && hasCheckboxSubs && hasUnchecked(item.item.subs) && !hasActiveKanban(item.item.subs);
   function renderSub(sub, depth) {
     const parentTag = item.item.tags.find((t) => normalizeTag(t) === currentNorm) || "";
     const hasCheckbox = /^- \[[ xX]\] /.test(sub.text);
