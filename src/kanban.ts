@@ -41,6 +41,8 @@ export interface KanbanConfig {
   colorFamilySelf: string;
   colorFamilyParent: string;
   colorFamilySibling: string;
+  colorDate: string;
+  fontDate: string;
 }
 
 export function buildConfig(settings: KanbanSettings): KanbanConfig {
@@ -72,6 +74,8 @@ export function buildConfig(settings: KanbanSettings): KanbanConfig {
     colorFamilySelf: settings.colorFamilySelf || "#e03e3e",
     colorFamilyParent: settings.colorFamilyParent || "#2db55d",
     colorFamilySibling: settings.colorFamilySibling || "#4a90d9",
+    colorDate: settings.colorDate || "#7ab8e8",
+    fontDate: settings.fontDate || "monospace",
   };
 }
 
@@ -312,6 +316,29 @@ function getDefaultDate(existing: Date | null = null): Date {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   return c <= today ? getNextMonday() : c;
+}
+
+// ─── DATE FORMATTING ─────────────────────────────────────────────────────────
+
+function formatCardDateAnnotation(text: string): string {
+  return text.replace(/@(\d{4})-(\d{2})-(\d{2})\b/g, (_, y, m, d) => {
+    const dateVal = new Date(Number(y), Number(m) - 1, Number(d));
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const diffDays = Math.round((dateVal.getTime() - today.getTime()) / 86400000);
+
+    let label: string;
+    if (diffDays === 0) label = "today";
+    else if (diffDays === 1) label = "tomorrow";
+    else if (diffDays > 1 && diffDays <= 7) {
+      const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+      label = `next ${days[dateVal.getDay()]}`;
+    } else {
+      const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+      label = `${months[Number(m) - 1]} ${Number(d)}`;
+    }
+    return `<span style="display:block;font-size:.8em;color:var(--kb-date-color);font-family:var(--kb-date-font);">${label}</span>`;
+  });
 }
 
 // ─── LINK CONVERSION ─────────────────────────────────────────────────────────
@@ -1235,7 +1262,7 @@ function createCardHTML(
     .replace(/^- \[[ xX]\] /, "")
     .replace(/^[-*+]\s+/, "")
     .trim();
-  const mainContent = linksToHtml(rawText, vaultName);
+  const mainContent = linksToHtml(formatCardDateAnnotation(rawText), vaultName);
 
   const hasSubs = item.item.subs.length > 0; // structural (any subs at all, for expand/collapse)
   const isExpanded = item.state === "expanded";
@@ -1301,6 +1328,7 @@ function createCardHTML(
       .filter((w: string) => !config.normKanban.includes(normalizeTag(w)))
       .join(" ")
       .trim();
+    subText = formatCardDateAnnotation(subText);
     const indent = "&nbsp;".repeat(depth * 3);
     const rendered = renderCheckbox(subText, {
       isSub: true,
@@ -1388,6 +1416,8 @@ function buildColorCSS(config: KanbanConfig): string {
       --kb-family-sibling:${config.colorFamilySibling};
       --kb-children-done:${config.allChildrenDoneColor};
           --kb-all-checked:${config.allCheckedColor};
+      --kb-date-color:${config.colorDate};
+      --kb-date-font:${config.fontDate};
       color:var(--kb-text);
     }
     #kanban-wrapper [data-col-container]{background:var(--kb-col-bg);}

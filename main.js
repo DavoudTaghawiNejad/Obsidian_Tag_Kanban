@@ -58,7 +58,9 @@ function buildConfig(settings) {
     colorLink: settings.colorLink || "",
     colorFamilySelf: settings.colorFamilySelf || "#e03e3e",
     colorFamilyParent: settings.colorFamilyParent || "#2db55d",
-    colorFamilySibling: settings.colorFamilySibling || "#4a90d9"
+    colorFamilySibling: settings.colorFamilySibling || "#4a90d9",
+    colorDate: settings.colorDate || "#7ab8e8",
+    fontDate: settings.fontDate || "monospace"
   };
 }
 function validateConfig(settings) {
@@ -224,6 +226,27 @@ function getDefaultDate(existing = null) {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   return c <= today ? getNextMonday() : c;
+}
+function formatCardDateAnnotation(text) {
+  return text.replace(/@(\d{4})-(\d{2})-(\d{2})\b/g, (_, y, m, d) => {
+    const dateVal = new Date(Number(y), Number(m) - 1, Number(d));
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const diffDays = Math.round((dateVal.getTime() - today.getTime()) / 864e5);
+    let label;
+    if (diffDays === 0)
+      label = "today";
+    else if (diffDays === 1)
+      label = "tomorrow";
+    else if (diffDays > 1 && diffDays <= 7) {
+      const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+      label = `next ${days[dateVal.getDay()]}`;
+    } else {
+      const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+      label = `${months[Number(m) - 1]} ${Number(d)}`;
+    }
+    return `<span style="display:block;font-size:.8em;color:var(--kb-date-color);font-family:var(--kb-date-font);">${label}</span>`;
+  });
 }
 function linksToHtml(text, vaultName) {
   text = text.replace(
@@ -920,7 +943,7 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
     display = display.split(/\s+/).filter((w) => w !== tagToRemove).join(" ").trim();
   display = display.replace(/%% @\d+\w %%/g, "").replace(/\s*✅\d{4}-\d{2}-\d{2}/, "").trim();
   const rawText = display.replace(/^- \[[ xX]\] /, "").replace(/^[-*+]\s+/, "").trim();
-  const mainContent = linksToHtml(rawText, vaultName);
+  const mainContent = linksToHtml(formatCardDateAnnotation(rawText), vaultName);
   const hasSubs = item.item.subs.length > 0;
   const isExpanded = item.state === "expanded";
   function isCheckboxItem(s) {
@@ -974,6 +997,7 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
       (t) => config.normKanban.includes(normalizeTag(t))
     );
     let subText = sub.text.replace(/%% @\d+\w %%/g, "").replace(/\s*✅\d{4}-\d{2}-\d{2}/, "").trim().split(/\s+/).filter((w) => !config.normKanban.includes(normalizeTag(w))).join(" ").trim();
+    subText = formatCardDateAnnotation(subText);
     const indent = "&nbsp;".repeat(depth * 3);
     const rendered = renderCheckbox(subText, {
       isSub: true,
@@ -1041,6 +1065,8 @@ function buildColorCSS(config) {
       --kb-family-sibling:${config.colorFamilySibling};
       --kb-children-done:${config.allChildrenDoneColor};
           --kb-all-checked:${config.allCheckedColor};
+      --kb-date-color:${config.colorDate};
+      --kb-date-font:${config.fontDate};
       color:var(--kb-text);
     }
     #kanban-wrapper [data-col-container]{background:var(--kb-col-bg);}
@@ -2228,7 +2254,9 @@ var DEFAULT_SETTINGS = {
   colorLink: "",
   colorFamilySelf: "#e03e3e",
   colorFamilyParent: "#2db55d",
-  colorFamilySibling: "#4a90d9"
+  colorFamilySibling: "#4a90d9",
+  colorDate: "",
+  fontDate: ""
 };
 var KanbanPlugin = class extends import_obsidian3.Plugin {
   async onload() {
@@ -2439,6 +2467,21 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
         this.plugin.settings.colorLink = v;
       },
       "#7f6df2"
+    );
+    themeColor(
+      "Date color",
+      "Color for date annotations on cards (e.g. 'Jun 24', 'next Mon').",
+      () => this.plugin.settings.colorDate,
+      (v) => {
+        this.plugin.settings.colorDate = v;
+      },
+      "#7ab8e8"
+    );
+    new import_obsidian3.Setting(containerEl).setName("Date font").setDesc("Font family for date annotations. Default: monospace.").addText(
+      (t) => t.setPlaceholder("monospace").setValue(this.plugin.settings.fontDate || "").onChange(async (v) => {
+        this.plugin.settings.fontDate = v;
+        await this.plugin.saveSettings();
+      })
     );
     fixedColor(
       "Family highlight \u2014 self",

@@ -23,6 +23,8 @@ export interface KanbanSettings {
   colorFamilySelf: string;
   colorFamilyParent: string;
   colorFamilySibling: string;
+  colorDate: string;
+  fontDate: string;
 }
 
 export const DEFAULT_SETTINGS: KanbanSettings = {
@@ -46,6 +48,8 @@ export const DEFAULT_SETTINGS: KanbanSettings = {
   colorFamilySelf: "#e03e3e",
   colorFamilyParent: "#2db55d",
   colorFamilySibling: "#4a90d9",
+  colorDate: "",
+  fontDate: "",
 };
 
 export default class KanbanPlugin extends Plugin {
@@ -374,6 +378,27 @@ class KanbanSettingTab extends PluginSettingTab {
       (v) => { this.plugin.settings.colorLink = v; },
       "#7f6df2"
     );
+
+    themeColor(
+      "Date color",
+      "Color for date annotations on cards (e.g. 'Jun 24', 'next Mon').",
+      () => this.plugin.settings.colorDate,
+      (v) => { this.plugin.settings.colorDate = v; },
+      "#7ab8e8"
+    );
+
+    new Setting(containerEl)
+      .setName("Date font")
+      .setDesc("Font family for date annotations. Default: monospace.")
+      .addText((t) =>
+        t
+          .setPlaceholder("monospace")
+          .setValue(this.plugin.settings.fontDate || "")
+          .onChange(async (v) => {
+            this.plugin.settings.fontDate = v;
+            await this.plugin.saveSettings();
+          })
+      );
 
     fixedColor(
       "Family highlight — self",
