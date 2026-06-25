@@ -1926,17 +1926,23 @@ export function attachListeners(
 
     const savedHTML = titleDiv.innerHTML;
 
-    const input = document.createElement("input");
-    input.type = "text";
+    const input = document.createElement("textarea");
     input.value = raw;
     input.className = "card-edit-input";
+    input.rows = 1;
     input.style.cssText = `
       width:100%;box-sizing:border-box;
       background:var(--background-primary);
       color:var(--text-normal);
       border:none;border-bottom:2px solid var(--kb-accent);
       outline:none;padding:2px 0;font-size:inherit;font-weight:600;
-      font-family:inherit;border-radius:0;`;
+      font-family:inherit;border-radius:0;
+      resize:none;overflow:hidden;line-height:inherit;display:block;`;
+
+    const autoResize = () => {
+      input.style.height = "0px";
+      input.style.height = input.scrollHeight + "px";
+    };
 
     const arrow = titleDiv.querySelector<HTMLElement>("span[style*='position:absolute']");
     titleDiv.innerHTML = "";
@@ -1970,12 +1976,14 @@ export function attachListeners(
       }
       if (e.key === "Escape") await finishEdit(false);
     });
+    input.addEventListener("input", autoResize);
     input.addEventListener("blur", () => finishEdit(true));
     input.addEventListener("dblclick", (e) => e.stopPropagation());
-    requestAnimationFrame(() => {
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      autoResize();
       input.focus();
       input.select();
-    });
+    }));
   }
 
   // ── Details toggle → save state ──

@@ -1107,6 +1107,20 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
   }
   const columns = groupByColumns(items, config);
   await assignInitialOrders(app, columns, config);
+  const laterColData = columns[config.normLater];
+  if (laterColData) {
+    laterColData.cards.sort((a, b) => {
+      const da = parseCardDate(a.item.text);
+      const db = parseCardDate(b.item.text);
+      if (!da && !db)
+        return 0;
+      if (!da)
+        return 1;
+      if (!db)
+        return -1;
+      return da.getTime() - db.getTime();
+    });
+  }
   let _colorCss = document.getElementById("kanban-color-vars");
   if (!_colorCss) {
     _colorCss = document.createElement("style");
@@ -1495,17 +1509,22 @@ function attachListeners(boardEl, config, app, refresh) {
     const filePath = card.dataset.file;
     const lineNum = parseInt(card.dataset.line, 10);
     const savedHTML = titleDiv.innerHTML;
-    const input = document.createElement("input");
-    input.type = "text";
+    const input = document.createElement("textarea");
     input.value = raw;
     input.className = "card-edit-input";
+    input.rows = 1;
     input.style.cssText = `
       width:100%;box-sizing:border-box;
       background:var(--background-primary);
       color:var(--text-normal);
       border:none;border-bottom:2px solid var(--kb-accent);
       outline:none;padding:2px 0;font-size:inherit;font-weight:600;
-      font-family:inherit;border-radius:0;`;
+      font-family:inherit;border-radius:0;
+      resize:none;overflow:hidden;line-height:inherit;display:block;`;
+    const autoResize = () => {
+      input.style.height = "0px";
+      input.style.height = input.scrollHeight + "px";
+    };
     const arrow = titleDiv.querySelector("span[style*='position:absolute']");
     titleDiv.innerHTML = "";
     titleDiv.appendChild(input);
@@ -1537,12 +1556,14 @@ function attachListeners(boardEl, config, app, refresh) {
       if (e2.key === "Escape")
         await finishEdit(false);
     });
+    input.addEventListener("input", autoResize);
     input.addEventListener("blur", () => finishEdit(true));
     input.addEventListener("dblclick", (e2) => e2.stopPropagation());
-    requestAnimationFrame(() => {
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      autoResize();
       input.focus();
       input.select();
-    });
+    }));
   }
   async function onToggle(e) {
     const details = e.target;
