@@ -1744,12 +1744,7 @@ export function attachListeners(
     }
 
     const isDone = targetNorm === config.normDone;
-    const newState: "expanded" | "collapsed" = [
-      config.normDone,
-      config.normLater,
-    ].includes(targetNorm)
-      ? "collapsed"
-      : "expanded";
+    const newState: "expanded" | "collapsed" = "collapsed";
     const siblings = zone ? siblingDataFrom(zone) : [];
     const insertIdx = (zone && currentInsertIndex >= 0) ? currentInsertIndex : siblings.length;
     const isMulti = card.originalTags
@@ -2085,9 +2080,16 @@ export function attachListeners(
     currentInsertIndex = -1;
   };
 
+  const collapseCardEl = (el: HTMLElement) => {
+    el.querySelector("details")?.removeAttribute("open");
+    const titleSpan = el.querySelector<HTMLElement>(".card-title span");
+    if (titleSpan) titleSpan.textContent = "▼";
+  };
+
   const makeGhost = (card: HTMLElement) => {
     const rect = card.getBoundingClientRect();
     const g = card.cloneNode(true) as HTMLElement;
+    collapseCardEl(g);
     Object.assign(g.style, {
       position: "fixed",
       left: rect.left + "px",
@@ -2164,6 +2166,7 @@ export function attachListeners(
         if (!isTouchDrag) {
           isTouchDrag = true;
           ghost = makeGhost(card);
+          collapseCardEl(card);
           card.style.opacity = ".35";
         }
       }, DRAG_DELAY);
@@ -2220,6 +2223,7 @@ export function attachListeners(
         if (touchTimer) clearTimeout(touchTimer);
         isTouchDrag = true;
         if (!ghost) ghost = makeGhost(touchCard);
+        collapseCardEl(touchCard);
         touchCard.style.opacity = ".35";
       }
     }
@@ -2337,6 +2341,7 @@ export function attachListeners(
       if (dx < MOVE_THRESHOLD && dy < MOVE_THRESHOLD) return;
       isMouseDrag = true;
       ghost = makeGhost(mouseCard);
+      collapseCardEl(mouseCard);
       mouseCard.style.opacity = ".35";
       document.body.style.userSelect = "none";
     }

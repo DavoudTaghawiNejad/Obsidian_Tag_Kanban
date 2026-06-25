@@ -1337,10 +1337,7 @@ function attachListeners(boardEl, config, app, refresh) {
       }
     }
     const isDone = targetNorm === config.normDone;
-    const newState = [
-      config.normDone,
-      config.normLater
-    ].includes(targetNorm) ? "collapsed" : "expanded";
+    const newState = "collapsed";
     const siblings = zone ? siblingDataFrom(zone) : [];
     const insertIdx = zone && currentInsertIndex >= 0 ? currentInsertIndex : siblings.length;
     const isMulti = card.originalTags.map(normalizeTag).filter((t) => config.normKanban.includes(t)).length > 1;
@@ -1643,9 +1640,16 @@ function attachListeners(boardEl, config, app, refresh) {
     draggedCard = null;
     currentInsertIndex = -1;
   };
+  const collapseCardEl = (el) => {
+    el.querySelector("details")?.removeAttribute("open");
+    const titleSpan = el.querySelector(".card-title span");
+    if (titleSpan)
+      titleSpan.textContent = "\u25BC";
+  };
   const makeGhost = (card) => {
     const rect = card.getBoundingClientRect();
     const g = card.cloneNode(true);
+    collapseCardEl(g);
     Object.assign(g.style, {
       position: "fixed",
       left: rect.left + "px",
@@ -1720,6 +1724,7 @@ function attachListeners(boardEl, config, app, refresh) {
         if (!isTouchDrag) {
           isTouchDrag = true;
           ghost = makeGhost(card);
+          collapseCardEl(card);
           card.style.opacity = ".35";
         }
       }, DRAG_DELAY);
@@ -1778,6 +1783,7 @@ function attachListeners(boardEl, config, app, refresh) {
         isTouchDrag = true;
         if (!ghost)
           ghost = makeGhost(touchCard);
+        collapseCardEl(touchCard);
         touchCard.style.opacity = ".35";
       }
     }
@@ -1893,6 +1899,7 @@ function attachListeners(boardEl, config, app, refresh) {
         return;
       isMouseDrag = true;
       ghost = makeGhost(mouseCard);
+      collapseCardEl(mouseCard);
       mouseCard.style.opacity = ".35";
       document.body.style.userSelect = "none";
     }
