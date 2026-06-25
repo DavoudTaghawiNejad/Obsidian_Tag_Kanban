@@ -1470,6 +1470,19 @@ export async function buildBoard(
   const columns = groupByColumns(items, config);
   await assignInitialOrders(app, columns, config);
 
+  // Date columns (later) sort by date: most recent first, undated cards last
+  const laterColData = columns[config.normLater];
+  if (laterColData) {
+    laterColData.cards.sort((a: any, b: any) => {
+      const da = parseCardDate(a.item.text);
+      const db = parseCardDate(b.item.text);
+      if (!da && !db) return 0;
+      if (!da) return 1;
+      if (!db) return -1;
+      return da.getTime() - db.getTime();
+    });
+  }
+
   // Color vars — updated live via refreshColorVars() without a full re-render
   let _colorCss = document.getElementById("kanban-color-vars");
   if (!_colorCss) { _colorCss = document.createElement("style"); _colorCss.id = "kanban-color-vars"; document.head.appendChild(_colorCss); }
