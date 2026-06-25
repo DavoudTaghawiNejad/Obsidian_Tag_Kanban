@@ -1938,6 +1938,43 @@ function attachListeners(boardEl, config, app, refresh) {
       await doMove(savedCard, tabNorm, null);
     }
   }
+  let isMidPan = false;
+  let midPanStartX = 0;
+  let midPanStartY = 0;
+  let midPanScrollLeft = 0;
+  let midPanScrollTop = 0;
+  function onMidMouseDown(e) {
+    if (e.button !== 1)
+      return;
+    e.preventDefault();
+    isMidPan = true;
+    midPanStartX = e.clientX;
+    midPanStartY = e.clientY;
+    const scrollEl = document.getElementById("kanban-scroll");
+    midPanScrollLeft = scrollEl ? scrollEl.scrollLeft : 0;
+    const vertEl = boardEl.closest(".view-content") ?? document.documentElement;
+    midPanScrollTop = vertEl.scrollTop;
+    document.body.style.cursor = "grabbing";
+    document.addEventListener("mousemove", onMidMouseMove);
+    document.addEventListener("mouseup", onMidMouseUp);
+  }
+  function onMidMouseMove(e) {
+    if (!isMidPan)
+      return;
+    const scrollEl = document.getElementById("kanban-scroll");
+    if (scrollEl)
+      scrollEl.scrollLeft = midPanScrollLeft - (e.clientX - midPanStartX);
+    const vertEl = boardEl.closest(".view-content") ?? document.documentElement;
+    vertEl.scrollTop = midPanScrollTop - (e.clientY - midPanStartY);
+  }
+  function onMidMouseUp(e) {
+    if (e.button !== 1)
+      return;
+    isMidPan = false;
+    document.body.style.cursor = "";
+    document.removeEventListener("mousemove", onMidMouseMove);
+    document.removeEventListener("mouseup", onMidMouseUp);
+  }
   function onTabClick(e) {
     if (selectedCard)
       return;
@@ -2002,6 +2039,7 @@ function attachListeners(boardEl, config, app, refresh) {
     }
   }
   boardEl.addEventListener("mousedown", onMouseDown);
+  boardEl.addEventListener("mousedown", onMidMouseDown);
   boardEl.addEventListener("mouseover", onMouseOver);
   boardEl.addEventListener("mouseout", onMouseOut);
   boardEl.addEventListener("click", onSubCheckClick);
@@ -2019,8 +2057,11 @@ function attachListeners(boardEl, config, app, refresh) {
   boardEl.addEventListener("touchcancel", clearTouch, { passive: true });
   return () => {
     boardEl.removeEventListener("mousedown", onMouseDown);
+    boardEl.removeEventListener("mousedown", onMidMouseDown);
     document.removeEventListener("mousemove", onMouseMove);
     document.removeEventListener("mouseup", onMouseUp);
+    document.removeEventListener("mousemove", onMidMouseMove);
+    document.removeEventListener("mouseup", onMidMouseUp);
     boardEl.removeEventListener("mouseover", onMouseOver);
     boardEl.removeEventListener("mouseout", onMouseOut);
     boardEl.removeEventListener("click", onSubCheckClick);
