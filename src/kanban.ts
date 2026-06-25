@@ -1967,6 +1967,11 @@ export function attachListeners(
     MOVE_THRESHOLD = 8;
   let touchStartX = 0,
     touchStartY = 0;
+  let isPanning = false;
+  let panStartX = 0;
+  let panStartY = 0;
+  let panScrollStart = 0;
+  let panScrollTopStart = 0;
 
   const isNarrowNow = () => {
     const w = document.getElementById("kanban-wrapper");
@@ -2059,6 +2064,7 @@ export function attachListeners(
   const clearTouch = () => {
     if (touchTimer) clearTimeout(touchTimer);
     isTouchDrag = false;
+    isPanning = false;
     if (ghost) {
       ghost.remove();
       ghost = null;
@@ -2141,7 +2147,16 @@ export function attachListeners(
         }
       }, HOLD_DELAY);
     } else {
-      if (!card) return;
+      if (!card) {
+        isPanning = true;
+        panStartX = e.touches[0].clientX;
+        panStartY = e.touches[0].clientY;
+        const scrollEl = document.getElementById("kanban-scroll");
+        panScrollStart = scrollEl ? scrollEl.scrollLeft : 0;
+        const vertEl = boardEl.closest<HTMLElement>(".view-content") ?? document.documentElement;
+        panScrollTopStart = vertEl.scrollTop;
+        return;
+      }
       touchCard = card;
       draggedCard = cardDataFrom(card);
       touchTimer = setTimeout(() => {
@@ -2155,6 +2170,15 @@ export function attachListeners(
   }
 
   function onTouchMove(e: TouchEvent) {
+    if (isPanning && e.touches.length === 1) {
+      const t = e.touches[0];
+      const scrollEl = document.getElementById("kanban-scroll");
+      if (scrollEl) scrollEl.scrollLeft = panScrollStart - (t.clientX - panStartX);
+      const vertEl = boardEl.closest<HTMLElement>(".view-content") ?? document.documentElement;
+      vertEl.scrollTop = panScrollTopStart - (t.clientY - panStartY);
+      e.preventDefault();
+      return;
+    }
     if (!touchCard || e.touches.length !== 1) return;
     const { clientX, clientY } = e.touches[0];
     const dx = Math.abs(clientX - touchStartX);
@@ -2228,6 +2252,12 @@ export function attachListeners(
 
   async function onTouchEnd(e: TouchEvent) {
     if (touchTimer) clearTimeout(touchTimer);
+
+    if (isPanning) {
+      isPanning = false;
+      return;
+    }
+
     const { clientX, clientY } = e.changedTouches[0];
 
     if (isNarrowNow()) {
