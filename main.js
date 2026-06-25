@@ -1540,13 +1540,19 @@ function attachListeners(boardEl, config, app, refresh) {
   let isTouchDrag = false;
   let touchTimer = null;
   let selectedCard = null;
+  let colPickerOverlay = null;
   const HOLD_DELAY = 450, DRAG_DELAY = 450, MOVE_THRESHOLD = 8;
   let touchStartX = 0, touchStartY = 0;
   const isNarrowNow = () => {
     const w = document.getElementById("kanban-wrapper");
     return w ? w.dataset.narrow === "1" : false;
   };
+  const closeColPicker = () => {
+    colPickerOverlay?.remove();
+    colPickerOverlay = null;
+  };
   const clearSelection = () => {
+    closeColPicker();
     if (selectedCard) {
       selectedCard.style.outline = "";
       selectedCard.style.transform = "";
@@ -1557,6 +1563,55 @@ function attachListeners(boardEl, config, app, refresh) {
       t.style.outline = "";
       t.style.transform = "";
       t.style.background = "";
+    });
+  };
+  const showColumnPicker = (savedCard) => {
+    closeColPicker();
+    const overlay = document.createElement("div");
+    overlay.id = "kanban-col-picker";
+    overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.5);z-index:10000;display:flex;align-items:flex-end;justify-content:center;";
+    document.body.appendChild(overlay);
+    colPickerOverlay = overlay;
+    const sheet = document.createElement("div");
+    sheet.style.cssText = "background:var(--background-primary);color:var(--text-normal);padding:16px 16px 32px;border-radius:16px 16px 0 0;width:100%;max-width:480px;box-shadow:0 -4px 24px rgba(0,0,0,.2);";
+    overlay.appendChild(sheet);
+    const title = document.createElement("p");
+    title.textContent = "Move to column";
+    title.style.cssText = "margin:0 0 14px;font-size:.9em;font-weight:600;text-align:center;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;";
+    sheet.appendChild(title);
+    const list = document.createElement("div");
+    list.style.cssText = "display:flex;flex-direction:column;gap:8px;";
+    sheet.appendChild(list);
+    const tabs = Array.from(boardEl.querySelectorAll("[data-col-norm]"));
+    for (const tab of tabs) {
+      const norm = tab.dataset.colNorm;
+      const label = tab.textContent || norm.toUpperCase();
+      const cc = config.columnColors?.[norm] || "";
+      const btn = document.createElement("button");
+      btn.textContent = label;
+      btn.style.cssText = `padding:14px 16px;border-radius:10px;border:1px solid var(--background-modifier-border);background:${cc ? `color-mix(in srgb,${cc} 20%,var(--background-secondary))` : "var(--background-secondary)"};color:var(--text-normal);font-size:1em;cursor:pointer;text-align:left;font-weight:500;`;
+      btn.addEventListener("click", async () => {
+        closeColPicker();
+        clearSelection();
+        touchCard = null;
+        currentInsertIndex = -1;
+        await doMove(savedCard, norm, null);
+      });
+      list.appendChild(btn);
+    }
+    const cancelBtn = document.createElement("button");
+    cancelBtn.textContent = "Cancel";
+    cancelBtn.style.cssText = "margin-top:12px;padding:14px;border-radius:10px;border:1px solid var(--background-modifier-border);background:none;color:var(--text-muted);width:100%;cursor:pointer;font-size:1em;";
+    cancelBtn.addEventListener("click", () => {
+      clearSelection();
+      touchCard = null;
+    });
+    sheet.appendChild(cancelBtn);
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) {
+        clearSelection();
+        touchCard = null;
+      }
     });
   };
   const clearTouch = () => {
@@ -1638,13 +1693,7 @@ function attachListeners(boardEl, config, app, refresh) {
           selectedCard = card;
           card.style.outline = "2px solid var(--kb-accent)";
           card.style.transform = "scale(1.02)";
-          boardEl.querySelectorAll("[data-col-norm]").forEach((t) => {
-            if (t.dataset.colActive !== "1") {
-              const cc = config.columnColors[t.dataset.colNorm || ""] || "";
-              t.style.background = cc ? `color-mix(in srgb,${cc} 85%,var(--kb-accent))` : `color-mix(in srgb,var(--kb-accent) 15%,var(--kb-col-bg))`;
-            }
-            t.style.outline = "1px dashed var(--kb-accent)";
-          });
+          showColumnPicker(draggedCard);
         }
       }, HOLD_DELAY);
     } else {
@@ -1738,21 +1787,8 @@ function attachListeners(boardEl, config, app, refresh) {
       clearTimeout(touchTimer);
     const { clientX, clientY } = e.changedTouches[0];
     if (isNarrowNow()) {
-      const tappedTab = document.elementFromPoint(clientX, clientY)?.closest("[data-col-norm]");
-      if (selectedCard && tappedTab) {
-        const tabNorm2 = tappedTab.dataset.colNorm;
-        const savedCard2 = draggedCard;
-        clearSelection();
+      if (colPickerOverlay) {
         touchCard = null;
-        currentInsertIndex = -1;
-        await doMove(savedCard2, tabNorm2, null);
-        e.preventDefault();
-        return;
-      }
-      if (selectedCard && !tappedTab) {
-        clearSelection();
-        touchCard = null;
-        e.preventDefault();
         return;
       }
       touchCard = null;
