@@ -1540,7 +1540,10 @@ export async function buildBoard(
     } else {
       const btn = header.createEl("button", {
         text: "Archive",
-        attr: { style: "background:none;border:none;cursor:pointer;color:var(--kb-text);" },
+        attr: {
+          style:
+            "height:24px;padding:0 8px;border-radius:12px;border:1px solid var(--background-modifier-border);background:none;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:0.75em;color:var(--kb-text);",
+        },
       });
       (btn as HTMLButtonElement).dataset.column = norm;
     }
