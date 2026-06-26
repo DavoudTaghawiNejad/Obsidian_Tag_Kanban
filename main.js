@@ -1096,44 +1096,56 @@ function showRecurrentTriggerDialog(onSubmit, existingTriggers = []) {
   const MO_KEYS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
   const MO_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   const activeWD = new Set(existingTriggers.filter((t) => WD_KEYS.includes(t)));
-  const existingDay = existingTriggers.find((t) => /^\d{1,2}$/.test(t)) ?? "";
-  const existingMonth = existingTriggers.find((t) => MO_KEYS.includes(t)) ?? "";
+  const selectedDays = existingTriggers.filter((t) => /^\d{1,2}$/.test(t));
+  const selectedMonths = existingTriggers.filter((t) => MO_KEYS.includes(t));
   const wdStyle = (active) => `height:24px;padding:0 8px;border-radius:12px;border:1px solid var(--background-modifier-border);cursor:pointer;font-size:.75em;display:inline-flex;align-items:center;justify-content:center;` + (active ? `background:var(--interactive-accent);color:var(--text-on-accent);` : `background:none;color:inherit;`);
+  const selectedChipStyle = wdStyle(true);
   const wdBtns = WD_KEYS.map(
     (d, i) => `<button type="button" class="kb-wd-btn" data-day="${d}" style="${wdStyle(activeWD.has(d))}">${WD_LABELS[i]}</button>`
   ).join("");
-  const dayOpts = `<option value="">\u2014</option>` + Array.from(
-    { length: 30 },
-    (_, i) => `<option value="${i + 1}"${existingDay === String(i + 1) ? " selected" : ""}>${i + 1}</option>`
-  ).join("") + `<option value="last_day" disabled>Last day</option>`;
-  const moOpts = `<option value="">\u2014</option>` + MO_KEYS.map(
-    (m, i) => `<option value="${m}"${existingMonth === m ? " selected" : ""}>${MO_LABELS[i]}</option>`
-  ).join("");
-  const selStyle = `width:100%;padding:6px 8px;border:1px solid var(--background-modifier-border);border-radius:4px;background:var(--background-secondary);color:inherit;box-sizing:border-box;`;
-  const lblStyle = `font-size:.8em;color:inherit;opacity:.75;display:block;margin-bottom:4px;`;
+  const dayOpts = `<option value="">Add day\u2026</option>` + Array.from({ length: 30 }, (_, i) => `<option value="${i + 1}">${i + 1}</option>`).join("") + `<option value="last_day" disabled>Last day</option>`;
+  const moOpts = `<option value="">Add month\u2026</option>` + MO_KEYS.map((m, i) => `<option value="${m}">${MO_LABELS[i]}</option>`).join("");
+  const selStyle = `padding:4px 8px;border:1px solid var(--background-modifier-border);border-radius:4px;background:var(--background-secondary);color:inherit;font-size:.8em;`;
+  const lblStyle = `font-size:.8em;color:inherit;opacity:.75;`;
   dialog.innerHTML = `
     <h3 style="margin:0 0 12px;font-size:1.1em;">Set recurrence trigger</h3>
     <div style="margin-bottom:12px;">
-      <span style="${lblStyle}">Weekday</span>
+      <span style="${lblStyle}display:block;margin-bottom:4px;">Weekday</span>
       <div id="k-wd-wrap" style="display:flex;gap:4px;flex-wrap:wrap;">${wdBtns}</div>
     </div>
-    <div style="display:flex;gap:10px;margin-bottom:12px;">
-      <div style="flex:1;">
-        <label style="${lblStyle}" for="k-dom">Day of month</label>
+    <div style="display:flex;gap:10px;margin-bottom:6px;">
+      <div style="display:flex;align-items:center;gap:6px;">
+        <span style="${lblStyle}white-space:nowrap;">Day of month</span>
         <select id="k-dom" style="${selStyle}">${dayOpts}</select>
       </div>
-      <div style="flex:1;">
-        <label style="${lblStyle}" for="k-month">Month</label>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <span style="${lblStyle}white-space:nowrap;">Month</span>
         <select id="k-month" style="${selStyle}">${moOpts}</select>
       </div>
     </div>
+    <div id="k-dom-rows" style="display:flex;flex-wrap:wrap;gap:4px;min-height:4px;margin-bottom:10px;"></div>
+    <div id="k-month-rows" style="display:flex;flex-wrap:wrap;gap:4px;min-height:4px;margin-bottom:10px;"></div>
     <p id="k-trigger-err" style="margin:2px 0 8px;font-size:.82em;color:#e03e3e;min-height:1.2em;"></p>
     <div id="k-recur-actions" style="display:flex;gap:10px;justify-content:center;">${buttonHtml("Set", true)}${buttonHtml("Cancel", false)}</div>`;
   const wdWrap = dialog.querySelector("#k-wd-wrap");
   const domSel = dialog.querySelector("#k-dom");
   const moSel = dialog.querySelector("#k-month");
+  const domRows = dialog.querySelector("#k-dom-rows");
+  const moRows = dialog.querySelector("#k-month-rows");
   const errEl = dialog.querySelector("#k-trigger-err");
   const [setBtn, cancelBtn] = dialog.querySelectorAll("#k-recur-actions button");
+  const renderDomRows = () => {
+    domRows.innerHTML = selectedDays.map(
+      (d, i) => `<button type="button" class="kb-rm-day" data-idx="${i}" style="${selectedChipStyle}">${d}</button>`
+    ).join("");
+  };
+  const renderMoRows = () => {
+    moRows.innerHTML = selectedMonths.map(
+      (m, i) => `<button type="button" class="kb-rm-month" data-idx="${i}" style="${selectedChipStyle}">${MO_LABELS[MO_KEYS.indexOf(m)]}</button>`
+    ).join("");
+  };
+  renderDomRows();
+  renderMoRows();
   wdWrap.addEventListener("click", (e) => {
     const btn = e.target.closest(".kb-wd-btn");
     if (!btn)
@@ -1147,14 +1159,40 @@ function showRecurrentTriggerDialog(onSubmit, existingTriggers = []) {
       btn.style.cssText = wdStyle(true);
     }
   });
+  domSel.addEventListener("change", () => {
+    const val = domSel.value;
+    domSel.value = "";
+    if (!val || val === "last_day" || selectedDays.includes(val))
+      return;
+    selectedDays.push(val);
+    selectedDays.sort((a, b) => parseInt(a) - parseInt(b));
+    renderDomRows();
+  });
+  moSel.addEventListener("change", () => {
+    const val = moSel.value;
+    moSel.value = "";
+    if (!val || selectedMonths.includes(val))
+      return;
+    selectedMonths.push(val);
+    selectedMonths.sort((a, b) => MO_KEYS.indexOf(a) - MO_KEYS.indexOf(b));
+    renderMoRows();
+  });
+  domRows.addEventListener("click", (e) => {
+    const btn = e.target.closest(".kb-rm-day");
+    if (!btn)
+      return;
+    selectedDays.splice(parseInt(btn.dataset.idx, 10), 1);
+    renderDomRows();
+  });
+  moRows.addEventListener("click", (e) => {
+    const btn = e.target.closest(".kb-rm-month");
+    if (!btn)
+      return;
+    selectedMonths.splice(parseInt(btn.dataset.idx, 10), 1);
+    renderMoRows();
+  });
   const submit = () => {
-    const tokens = [...activeWD];
-    const day = domSel.value;
-    if (day && day !== "last_day")
-      tokens.push(day);
-    const mo = moSel.value;
-    if (mo)
-      tokens.push(mo);
+    const tokens = [...activeWD, ...selectedDays, ...selectedMonths];
     if (!tokens.length) {
       errEl.textContent = "Select at least one trigger.";
       return;
