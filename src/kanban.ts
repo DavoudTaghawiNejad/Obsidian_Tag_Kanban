@@ -316,11 +316,16 @@ function hasRecurrentAnnotation(text: string, normRecurrent: string): boolean {
 }
 
 // Extracts @word and @1-2-digit-number annotations, skipping @YYYY-MM-DD and @recurrent itself.
+// Supports underscores in words (e.g. @last_day).
 function extractTriggerAnnotations(text: string, normRecurrent: string): string[] {
-  const matches = text.match(/@([a-zA-Z]+|\d{1,2})\b/g) || [];
+  const matches = text.match(/@([a-zA-Z][a-zA-Z_]*|\d{1,2})\b/g) || [];
   return matches
     .map((m: string) => m.slice(1).toLowerCase())
     .filter((m: string) => m !== normRecurrent);
+}
+
+function lastDayOfMonth(date: Date): number {
+  return new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
 }
 
 function matchesTriggerAnnotations(triggers: string[], today: Date): boolean {
@@ -328,8 +333,11 @@ function matchesTriggerAnnotations(triggers: string[], today: Date): boolean {
   const todayWeekday = today.getDay();
   const todayDate    = today.getDate();
   const todayMonth   = today.getMonth();
+  const lastDay      = lastDayOfMonth(today);
 
   for (const t of triggers) {
+    if (t === 'last_day') { if (todayDate === lastDay) return true; continue; }
+
     const wdShort = TRIGGER_WEEKDAYS_SHORT.indexOf(t);
     if (wdShort !== -1) { if (wdShort === todayWeekday) return true; continue; }
 
@@ -342,16 +350,20 @@ function matchesTriggerAnnotations(triggers: string[], today: Date): boolean {
     const mFull = TRIGGER_MONTHS_FULL.indexOf(t);
     if (mFull !== -1) { if (mFull === todayMonth && todayDate === 1) return true; continue; }
 
-    // Day-of-month: only match if the string is purely numeric (no letters)
+    // Day-of-month: clamp to last day of month when the day doesn't exist this month
     if (/^\d{1,2}$/.test(t)) {
       const dayNum = parseInt(t, 10);
-      if (dayNum >= 1 && dayNum <= 31 && dayNum === todayDate) return true;
+      if (dayNum >= 1 && dayNum <= 31) {
+        const effectiveDay = Math.min(dayNum, lastDay);
+        if (effectiveDay === todayDate) return true;
+      }
     }
   }
   return false;
 }
 
 function isValidTriggerToken(t: string): boolean {
+  if (t === 'last_day') return true;
   return TRIGGER_WEEKDAYS_SHORT.includes(t) ||
     TRIGGER_WEEKDAYS_FULL.includes(t) ||
     TRIGGER_MONTHS_SHORT.includes(t) ||
@@ -402,9 +414,9 @@ function formatTriggerAnnotations(text: string, normRecurrent: string): string {
   const triggers: string[] = [];
 
   text = text.replace(new RegExp(`@${normRecurrent}\\b`, 'gi'), () => { hasRecurrent = true; return ''; });
-  text = text.replace(/@([a-zA-Z]+|\d{1,2})\b/g, (match, token) => {
+  text = text.replace(/@([a-zA-Z][a-zA-Z_]*|\d{1,2})\b/g, (match, token) => {
     const t = token.toLowerCase();
-    if (isValidTriggerToken(t)) { triggers.push(t); return ''; }
+    if (isValidTriggerToken(t)) { triggers.push(t === 'last_day' ? 'last day' : t); return ''; }
     return match;
   });
   text = text.replace(/\s{2,}/g, ' ').trim();
@@ -1357,8 +1369,8 @@ function showRecurrentTriggerDialog(onSubmit: (trigger: string) => void) {
   const { dialog, close } = makeOverlay("kanban-recurrent-trigger-dialog");
   dialog.innerHTML = `
     <h3 style="margin:0 0 6px;font-size:1.1em;">Set recurrence trigger</h3>
-    <p style="margin:0 0 10px;font-size:.85em;color:var(--text-muted);">Weekday (mon–sun), day of month (1–31), or month (jan–dec). Multiple allowed.</p>
-    <input id="k-trigger" type="text" placeholder="e.g. mon, 15, jan" style="${inputStyle()}" autofocus>
+    <p style="margin:0 0 10px;font-size:.85em;color:var(--text-muted);">Weekday (mon–sun), day of month (1–31), month (jan–dec), or last_day. Multiple allowed.</p>
+    <input id="k-trigger" type="text" placeholder="e.g. mon, 15, jan, last_day" style="${inputStyle()}" autofocus>
     <p id="k-trigger-err" style="margin:2px 0 8px;font-size:.82em;color:#e03e3e;min-height:1.2em;"></p>
     <div style="display:flex;gap:10px;justify-content:center;">${buttonHtml("Set", true)}${buttonHtml("Cancel", false)}</div>`;
 
