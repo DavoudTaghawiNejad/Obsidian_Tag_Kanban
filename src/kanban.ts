@@ -734,7 +734,12 @@ async function addNewItem(
     if (createDoc) {
       // ── "Create new document" path ───────────────────────────────────────────
       // Task goes into the new project doc; a [[link]] is added to the master doc.
-      const safeTitle = cardText.replace(/[\\/:*?"<>|#\[\]]/g, " ").replace(/\s+/g, " ").trim();
+      const safeTitle = cardText
+        .replace(/\s*%%[\s\S]*?%%/g, "")
+        .replace(/@\S+/g, "")
+        .replace(/[\\/:*?"<>|#\[\]]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
       const docPath = `${safeTitle}.md`;
 
       let projFile = app.vault.getAbstractFileByPath(docPath) as TFile | null;
