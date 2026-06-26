@@ -375,6 +375,16 @@ function hasValidTriggers(text: string, normRecurrent: string): boolean {
   return extractTriggerAnnotations(text, normRecurrent).some(isValidTriggerToken);
 }
 
+function extractSkipDate(rawLine: string): string | null {
+  const m = rawLine.match(/%% @skip:(\d{4}-\d{2}-\d{2}) %%/);
+  return m ? m[1] : null;
+}
+
+function setSkipDate(line: string, dateStr: string): string {
+  const cleaned = line.replace(/\s*%% @skip:\d{4}-\d{2}-\d{2} %%/g, "").trimEnd();
+  return `${cleaned} %% @skip:${dateStr} %%`;
+}
+
 // For #later: full-date ≤ today, OR trigger fires, OR undated+untriggered (move immediately).
 function isLaterDueToday(text: string, today: Date, normRecurrent: string): boolean {
   const d = parseCardDate(text);
@@ -589,6 +599,9 @@ async function updateCardTriggers(
     if (!new RegExp(`@${key}\\b`, 'i').test(parsed.text)) parsed.text = parsed.text.trimEnd() + ' ' + tok;
   }
   lines[lineNum - 1] = serializeTaskLine(parsed);
+  const n = new Date();
+  const skipStr = `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;
+  lines[lineNum - 1] = setSkipDate(lines[lineNum - 1], skipStr);
   await writeFileLines(app, tFile, lines);
 }
 
@@ -691,6 +704,11 @@ async function moveToColumn(
     }
 
     lines[idx] = serializeTaskLine(parsed);
+    if (config.normRecurrent && normalizeTag(targetTag) === config.normRecurrent) {
+      const n = new Date();
+      const skipStr = `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;
+      lines[idx] = setSkipDate(lines[idx], skipStr);
+    }
     await writeFileLines(app, tFile, lines);
     return true;
   } catch (e: any) {
@@ -1551,7 +1569,7 @@ function createCardHTML(
       .filter((w: string) => w !== tagToRemove)
       .join(" ")
       .trim();
-  display = display.replace(/%% @\d+\w %%/g, "").replace(/\s*✅\d{4}-\d{2}-\d{2}/, "").trim();
+  display = display.replace(/\s*%%[\s\S]*?%%/g, "").replace(/\s*✅\d{4}-\d{2}-\d{2}/, "").trim();
 
   const rawText = display
     .replace(/^- \[[ xX]\] /, "")
@@ -1616,7 +1634,7 @@ function createCardHTML(
       config.normKanban.includes(normalizeTag(t))
     );
     let subText = sub.text
-      .replace(/%% @\d+\w %%/g, "")
+      .replace(/\s*%%[\s\S]*?%%/g, "")
       .replace(/\s*✅\d{4}-\d{2}-\d{2}/, "")
       .trim()
       .split(/\s+/)
@@ -1750,9 +1768,6 @@ export function refreshColorVars(config: KanbanConfig): void {
   if (el) el.textContent = buildColorCSS(config);
 }
 
-// Set to true when a card is explicitly placed into #recurrent by user action;
-// causes the very next buildBoard to skip Step B so the card isn't immediately re-triggered.
-let _skipNextRecurrentTrigger = false;
 
 export async function buildBoard(
   app: App,
@@ -1787,20 +1802,18 @@ export async function buildBoard(
 
   // Step B: move triggered #recurrent cards → today column
   if (config.normRecurrent) {
-    if (_skipNextRecurrentTrigger) {
-      _skipNextRecurrentTrigger = false;
-    } else {
-      const recurrentToMove = items.filter(
-        (i) =>
-          i.item.tags.some((t: string) => normalizeTag(t) === config.normRecurrent) &&
-          hasRecurrentAnnotation(i.item.text, config.normRecurrent) &&
-          matchesTriggerAnnotations(extractTriggerAnnotations(i.item.text, config.normRecurrent), today)
-      );
-      if (recurrentToMove.length) {
-        for (const item of recurrentToMove)
-          await moveToColumn(app, item.filePath, item.item.line, item.item.tags, config.todayColumn, false, config);
-        items = await collectItems(app, paths, config);
-      }
+    const todayStr = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}`;
+    const recurrentToMove = items.filter(
+      (i) =>
+        i.item.tags.some((t: string) => normalizeTag(t) === config.normRecurrent) &&
+        hasRecurrentAnnotation(i.item.text, config.normRecurrent) &&
+        matchesTriggerAnnotations(extractTriggerAnnotations(i.item.text, config.normRecurrent), today) &&
+        extractSkipDate(i.item.text) !== todayStr
+    );
+    if (recurrentToMove.length) {
+      for (const item of recurrentToMove)
+        await moveToColumn(app, item.filePath, item.item.line, item.item.tags, config.todayColumn, false, config);
+      items = await collectItems(app, paths, config);
     }
   }
 
@@ -2892,7 +2905,9 @@ export function attachListeners(
     } else if (config.normRecurrent && norm === config.normRecurrent) {
       showInputDialog(title, isProject, (text: string, createDoc: boolean) => {
         showRecurrentTriggerDialog(async (triggerStr) => {
-          const annotated = `${text} @${config.normRecurrent} ${triggerStr}`;
+          const n = new Date();
+          const skipStr = `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;
+          const annotated = `${text} @${config.normRecurrent} ${triggerStr} %% @skip:${skipStr} %%`;
           if (await addNewItem(app, config.newTaskInsert, tag, annotated, null, config, createDoc))
             requestAnimationFrame(() => setTimeout(refresh, 50));
         });

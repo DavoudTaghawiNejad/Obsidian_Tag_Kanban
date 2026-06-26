@@ -283,6 +283,14 @@ function isValidTriggerToken(t) {
 function hasValidTriggers(text, normRecurrent) {
   return extractTriggerAnnotations(text, normRecurrent).some(isValidTriggerToken);
 }
+function extractSkipDate(rawLine) {
+  const m = rawLine.match(/%% @skip:(\d{4}-\d{2}-\d{2}) %%/);
+  return m ? m[1] : null;
+}
+function setSkipDate(line, dateStr) {
+  const cleaned = line.replace(/\s*%% @skip:\d{4}-\d{2}-\d{2} %%/g, "").trimEnd();
+  return `${cleaned} %% @skip:${dateStr} %%`;
+}
 function isLaterDueToday(text, today, normRecurrent) {
   const d = parseCardDate(text);
   if (d)
@@ -453,6 +461,9 @@ async function updateCardTriggers(app, filePath, lineNum, normRecurrent, newTrig
       parsed.text = parsed.text.trimEnd() + " " + tok;
   }
   lines[lineNum - 1] = serializeTaskLine(parsed);
+  const n = new Date();
+  const skipStr = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
+  lines[lineNum - 1] = setSkipDate(lines[lineNum - 1], skipStr);
   await writeFileLines(app, tFile, lines);
 }
 async function editCardText(app, filePath, lineNum, newText) {
@@ -527,6 +538,11 @@ async function moveToColumn(app, filePath, lineNum, originalTags, targetTag, isD
       parsed.orderState = newState ?? ([config.normDone, config.normLater].includes(normalizeTag(targetTag)) ? "collapsed" : "expanded");
     }
     lines[idx] = serializeTaskLine(parsed);
+    if (config.normRecurrent && normalizeTag(targetTag) === config.normRecurrent) {
+      const n = new Date();
+      const skipStr = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
+      lines[idx] = setSkipDate(lines[idx], skipStr);
+    }
     await writeFileLines(app, tFile, lines);
     return true;
   } catch (e) {
@@ -1216,7 +1232,7 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
   );
   if (tagToRemove)
     display = display.split(/\s+/).filter((w) => w !== tagToRemove).join(" ").trim();
-  display = display.replace(/%% @\d+\w %%/g, "").replace(/\s*✅\d{4}-\d{2}-\d{2}/, "").trim();
+  display = display.replace(/\s*%%[\s\S]*?%%/g, "").replace(/\s*✅\d{4}-\d{2}-\d{2}/, "").trim();
   const rawText = display.replace(/^- \[[ xX]\] /, "").replace(/^[-*+]\s+/, "").trim();
   const mainContent = linksToHtml(formatCardDateAnnotation(formatTriggerAnnotations(rawText, config.normRecurrent)), vaultName);
   const hasSubs = item.item.subs.length > 0;
@@ -1271,7 +1287,7 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
     const alreadyTagged = extractTags(sub.text).some(
       (t) => config.normKanban.includes(normalizeTag(t))
     );
-    let subText = sub.text.replace(/%% @\d+\w %%/g, "").replace(/\s*✅\d{4}-\d{2}-\d{2}/, "").trim().split(/\s+/).filter((w) => !config.normKanban.includes(normalizeTag(w))).join(" ").trim();
+    let subText = sub.text.replace(/\s*%%[\s\S]*?%%/g, "").replace(/\s*✅\d{4}-\d{2}-\d{2}/, "").trim().split(/\s+/).filter((w) => !config.normKanban.includes(normalizeTag(w))).join(" ").trim();
     subText = formatCardDateAnnotation(subText);
     const indent = "&nbsp;".repeat(depth * 3);
     const rendered = renderCheckbox(subText, {
@@ -1385,7 +1401,6 @@ function refreshColorVars(config) {
   if (el)
     el.textContent = buildColorCSS(config);
 }
-var _skipNextRecurrentTrigger = false;
 async function buildBoard(app, containerEl, config, savedActiveCol) {
   const vaultName = app.vault.getName();
   const paths = await getTargetFilePaths(app, config);
@@ -1404,17 +1419,14 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
     items = await collectItems(app, paths, config);
   }
   if (config.normRecurrent) {
-    if (_skipNextRecurrentTrigger) {
-      _skipNextRecurrentTrigger = false;
-    } else {
-      const recurrentToMove = items.filter(
-        (i) => i.item.tags.some((t) => normalizeTag(t) === config.normRecurrent) && hasRecurrentAnnotation(i.item.text, config.normRecurrent) && matchesTriggerAnnotations(extractTriggerAnnotations(i.item.text, config.normRecurrent), today)
-      );
-      if (recurrentToMove.length) {
-        for (const item of recurrentToMove)
-          await moveToColumn(app, item.filePath, item.item.line, item.item.tags, config.todayColumn, false, config);
-        items = await collectItems(app, paths, config);
-      }
+    const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+    const recurrentToMove = items.filter(
+      (i) => i.item.tags.some((t) => normalizeTag(t) === config.normRecurrent) && hasRecurrentAnnotation(i.item.text, config.normRecurrent) && matchesTriggerAnnotations(extractTriggerAnnotations(i.item.text, config.normRecurrent), today) && extractSkipDate(i.item.text) !== todayStr
+    );
+    if (recurrentToMove.length) {
+      for (const item of recurrentToMove)
+        await moveToColumn(app, item.filePath, item.item.line, item.item.tags, config.todayColumn, false, config);
+      items = await collectItems(app, paths, config);
     }
   }
   const columns = groupByColumns(items, config);
@@ -2417,7 +2429,9 @@ function attachListeners(boardEl, config, app, refresh) {
     } else if (config.normRecurrent && norm === config.normRecurrent) {
       showInputDialog(title, isProject, (text, createDoc) => {
         showRecurrentTriggerDialog(async (triggerStr) => {
-          const annotated = `${text} @${config.normRecurrent} ${triggerStr}`;
+          const n = new Date();
+          const skipStr = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
+          const annotated = `${text} @${config.normRecurrent} ${triggerStr} %% @skip:${skipStr} %%`;
           if (await addNewItem(app, config.newTaskInsert, tag, annotated, null, config, createDoc))
             requestAnimationFrame(() => setTimeout(refresh, 50));
         });
