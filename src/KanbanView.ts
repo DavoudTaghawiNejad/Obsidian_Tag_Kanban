@@ -1,6 +1,6 @@
 import { ItemView, WorkspaceLeaf } from "obsidian";
 import KanbanPlugin from "./main";
-import { buildConfig, validateConfig, buildBoard, attachListeners, refreshColorVars } from "./kanban";
+import { buildConfig, validateConfig, buildBoard, attachListeners } from "./kanban";
 
 export const VIEW_TYPE_KANBAN = "kanban-board-view";
 
@@ -53,10 +53,6 @@ export class KanbanView extends ItemView {
     await this.renderBoard();
   }
 
-  // Updates color CSS vars without a full re-render. Called from saveSettings().
-  refreshColors() {
-    refreshColorVars(buildConfig(this.plugin.settings));
-  }
 
   private scheduleMidnightRefresh() {
     if (this.midnightTimer) clearTimeout(this.midnightTimer);

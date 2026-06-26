@@ -1802,12 +1802,6 @@ async function tagUntaggedRecurrentCards(app: App, paths: string[], config: Kanb
   }
 }
 
-export function refreshColorVars(config: KanbanConfig): void {
-  const el = document.getElementById("kanban-color-vars") as HTMLStyleElement | null;
-  if (el) el.textContent = buildColorCSS(config);
-}
-
-
 export async function buildBoard(
   app: App,
   containerEl: HTMLElement,
@@ -1872,7 +1866,6 @@ export async function buildBoard(
     });
   }
 
-  // Color vars — updated live via refreshColorVars() without a full re-render
   let _colorCss = document.getElementById("kanban-color-vars");
   if (!_colorCss) { _colorCss = document.createElement("style"); _colorCss.id = "kanban-color-vars"; document.head.appendChild(_colorCss); }
   (_colorCss as HTMLStyleElement).textContent = buildColorCSS(config);

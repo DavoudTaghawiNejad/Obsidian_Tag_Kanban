@@ -1429,11 +1429,6 @@ async function tagUntaggedRecurrentCards(app, paths, config) {
       await app.vault.modify(tFile, lines.join("\n"));
   }
 }
-function refreshColorVars(config) {
-  const el = document.getElementById("kanban-color-vars");
-  if (el)
-    el.textContent = buildColorCSS(config);
-}
 async function buildBoard(app, containerEl, config, savedActiveCol) {
   const vaultName = app.vault.getName();
   const paths = await getTargetFilePaths(app, config);
@@ -2625,10 +2620,6 @@ var KanbanView = class extends import_obsidian2.ItemView {
   async refresh() {
     await this.renderBoard();
   }
-  // Updates color CSS vars without a full re-render. Called from saveSettings().
-  refreshColors() {
-    refreshColorVars(buildConfig(this.plugin.settings));
-  }
   scheduleMidnightRefresh() {
     if (this.midnightTimer)
       clearTimeout(this.midnightTimer);
@@ -2728,6 +2719,10 @@ var DEFAULT_SETTINGS = {
   fontDate: ""
 };
 var KanbanPlugin = class extends import_obsidian3.Plugin {
+  constructor() {
+    super(...arguments);
+    this.usingDesktopFallback = false;
+  }
   async onload() {
     await this.loadSettings();
     this.registerView(VIEW_TYPE_KANBAN, (leaf) => new KanbanView(leaf, this));
@@ -2802,24 +2797,70 @@ var KanbanPlugin = class extends import_obsidian3.Plugin {
     workspace.revealLeaf(leaf);
   }
   async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    let data = await this.loadData();
+    this.usingDesktopFallback = false;
+    if (!data && import_obsidian3.Platform.isMobile) {
+      try {
+        const raw = await this.app.vault.adapter.read(".obsidian/plugins/kanban-board/data.json");
+        data = JSON.parse(raw);
+        this.usingDesktopFallback = true;
+      } catch {
+      }
+    }
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
   }
   async saveSettings() {
     await this.saveData(this.settings);
     this.app.workspace.getLeavesOfType(VIEW_TYPE_KANBAN).forEach((leaf) => {
-      leaf.view.refreshColors();
+      leaf.view.refresh();
     });
   }
 };
 var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
+    this.ignoreWarning = false;
     this.plugin = plugin;
   }
-  display() {
+  async display() {
     const { containerEl } = this;
     containerEl.empty();
     containerEl.createEl("h2", { text: "Kanban Board Settings" });
+    if (import_obsidian3.Platform.isMobile) {
+      const mobilePath = ".obsidian-mobile/plugins/kanban-board/data.json";
+      const hasMobileSettings = await this.app.vault.adapter.exists(mobilePath);
+      if (!hasMobileSettings && !this.ignoreWarning) {
+        if (this.plugin.usingDesktopFallback) {
+          containerEl.createEl("p", { text: "Settings are loaded from the desktop app. Please use the desktop app to change parameters." });
+          containerEl.createEl("p", { text: "Pressing Ignore will create a separate mobile settings file seeded from the desktop. These settings may diverge over time." });
+        } else {
+          containerEl.createEl("p", { text: "No settings found on this device. The desktop settings have not synced yet. The Kanban board will not work until they arrive." });
+          containerEl.createEl("p", { text: "Wait for iCloud to sync, then restart the app. Alternatively, press Ignore to configure settings manually on this device." });
+        }
+        new import_obsidian3.Setting(containerEl).addButton((btn) => {
+          btn.setButtonText("Ignore");
+          btn.buttonEl.addClass("mod-warning");
+          btn.onClick(async () => {
+            await this.plugin.saveSettings();
+            this.ignoreWarning = true;
+            this.display();
+          });
+        });
+        return;
+      }
+      if (hasMobileSettings) {
+        new import_obsidian3.Setting(containerEl).setName("Mobile settings").setDesc(
+          "This device has its own settings that may differ from the desktop. Deleting them will cause this app to use the desktop settings instead, keeping everything in sync. Restart the app after deleting."
+        ).addButton((btn) => {
+          btn.setButtonText("Delete mobile settings");
+          btn.buttonEl.addClass("mod-warning");
+          btn.onClick(async () => {
+            await this.app.vault.adapter.remove(mobilePath);
+            this.display();
+          });
+        });
+      }
+    }
     new import_obsidian3.Setting(containerEl).setName("Kanban columns").setDesc("Comma-separated column tags, in display order (e.g. #todo, #inprogress, #later, #done)").addText(
       (text) => text.setPlaceholder("#todo, #inprogress, #later, #done").setValue(this.plugin.settings.kanban.join(", ")).onChange(async (value) => {
         this.plugin.settings.kanban = value.split(",").map((t) => t.trim()).filter(Boolean);

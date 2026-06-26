@@ -56,6 +56,7 @@ export const DEFAULT_SETTINGS: KanbanSettings = {
 
 export default class KanbanPlugin extends Plugin {
   settings!: KanbanSettings;
+  usingDesktopFallback = false;
 
   async onload() {
     await this.loadSettings();
@@ -148,29 +149,85 @@ export default class KanbanPlugin extends Plugin {
   }
 
   async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    let data = await this.loadData();
+    this.usingDesktopFallback = false;
+    if (!data && Platform.isMobile) {
+      try {
+        const raw = await this.app.vault.adapter.read(".obsidian/plugins/kanban-board/data.json");
+        data = JSON.parse(raw);
+        this.usingDesktopFallback = true;
+      } catch { /* desktop settings not synced yet */ }
+    }
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
   }
 
   async saveSettings() {
     await this.saveData(this.settings);
     this.app.workspace.getLeavesOfType(VIEW_TYPE_KANBAN).forEach((leaf) => {
-      (leaf.view as KanbanView).refreshColors();
+      (leaf.view as KanbanView).refresh();
     });
   }
 }
 
 class KanbanSettingTab extends PluginSettingTab {
   plugin: KanbanPlugin;
+  private ignoreWarning = false;
 
   constructor(app: App, plugin: KanbanPlugin) {
     super(app, plugin);
     this.plugin = plugin;
   }
 
-  display(): void {
+  async display(): Promise<void> {
     const { containerEl } = this;
     containerEl.empty();
     containerEl.createEl("h2", { text: "Kanban Board Settings" });
+
+    if (Platform.isMobile) {
+      const mobilePath = ".obsidian-mobile/plugins/kanban-board/data.json";
+      const hasMobileSettings = await this.app.vault.adapter.exists(mobilePath);
+
+      if (!hasMobileSettings && !this.ignoreWarning) {
+        if (this.plugin.usingDesktopFallback) {
+          // Desktop settings loaded successfully — board works, just warn about editing
+          containerEl.createEl("p", { text: "Settings are loaded from the desktop app. Please use the desktop app to change parameters." });
+          containerEl.createEl("p", { text: "Pressing Ignore will create a separate mobile settings file seeded from the desktop. These settings may diverge over time." });
+        } else {
+          // No settings at all — board is broken
+          containerEl.createEl("p", { text: "No settings found on this device. The desktop settings have not synced yet. The Kanban board will not work until they arrive." });
+          containerEl.createEl("p", { text: "Wait for iCloud to sync, then restart the app. Alternatively, press Ignore to configure settings manually on this device." });
+        }
+        new Setting(containerEl)
+          .addButton((btn) => {
+            btn.setButtonText("Ignore");
+            btn.buttonEl.addClass("mod-warning");
+            btn.onClick(async () => {
+              await this.plugin.saveSettings();
+              this.ignoreWarning = true;
+              this.display();
+            });
+          });
+        return;
+      }
+
+      if (hasMobileSettings) {
+        new Setting(containerEl)
+          .setName("Mobile settings")
+          .setDesc(
+            "This device has its own settings that may differ from the desktop. " +
+            "Deleting them will cause this app to use the desktop settings instead, " +
+            "keeping everything in sync. Restart the app after deleting."
+          )
+          .addButton((btn) => {
+            btn.setButtonText("Delete mobile settings");
+            btn.buttonEl.addClass("mod-warning");
+            btn.onClick(async () => {
+              await this.app.vault.adapter.remove(mobilePath);
+              this.display();
+            });
+          });
+      }
+    }
 
     new Setting(containerEl)
       .setName("Kanban columns")
