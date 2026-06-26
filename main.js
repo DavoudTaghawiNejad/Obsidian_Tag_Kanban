@@ -221,8 +221,11 @@ function hasRecurrentAnnotation(text, normRecurrent) {
   return new RegExp(`@${normRecurrent}\\b`, "i").test(text);
 }
 function extractTriggerAnnotations(text, normRecurrent) {
-  const matches = text.match(/@([a-zA-Z]+|\d{1,2})\b/g) || [];
+  const matches = text.match(/@([a-zA-Z][a-zA-Z_]*|\d{1,2})\b/g) || [];
   return matches.map((m) => m.slice(1).toLowerCase()).filter((m) => m !== normRecurrent);
+}
+function lastDayOfMonth(date) {
+  return new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
 }
 function matchesTriggerAnnotations(triggers, today) {
   if (!triggers.length)
@@ -230,7 +233,13 @@ function matchesTriggerAnnotations(triggers, today) {
   const todayWeekday = today.getDay();
   const todayDate = today.getDate();
   const todayMonth = today.getMonth();
+  const lastDay = lastDayOfMonth(today);
   for (const t of triggers) {
+    if (t === "last_day") {
+      if (todayDate === lastDay)
+        return true;
+      continue;
+    }
     const wdShort = TRIGGER_WEEKDAYS_SHORT.indexOf(t);
     if (wdShort !== -1) {
       if (wdShort === todayWeekday)
@@ -257,13 +266,18 @@ function matchesTriggerAnnotations(triggers, today) {
     }
     if (/^\d{1,2}$/.test(t)) {
       const dayNum = parseInt(t, 10);
-      if (dayNum >= 1 && dayNum <= 31 && dayNum === todayDate)
-        return true;
+      if (dayNum >= 1 && dayNum <= 31) {
+        const effectiveDay = Math.min(dayNum, lastDay);
+        if (effectiveDay === todayDate)
+          return true;
+      }
     }
   }
   return false;
 }
 function isValidTriggerToken(t) {
+  if (t === "last_day")
+    return true;
   return TRIGGER_WEEKDAYS_SHORT.includes(t) || TRIGGER_WEEKDAYS_FULL.includes(t) || TRIGGER_MONTHS_SHORT.includes(t) || TRIGGER_MONTHS_FULL.includes(t) || /^\d{1,2}$/.test(t) && parseInt(t, 10) >= 1 && parseInt(t, 10) <= 31;
 }
 function hasValidTriggers(text, normRecurrent) {
@@ -294,16 +308,30 @@ function getDefaultDate(existing = null) {
   today.setHours(0, 0, 0, 0);
   return c <= today ? getNextMonday() : c;
 }
-var TRIGGER_SPAN = `display:inline-block;margin-right:4px;font-size:.8em;color:var(--kb-date-color);font-family:var(--kb-date-font);`;
+var TRIGGER_LINE_STYLE = `display:block;font-size:.8em;color:var(--kb-date-color);font-family:var(--kb-date-font);margin-top:2px;`;
 function formatTriggerAnnotations(text, normRecurrent) {
-  return text.replace(/@([a-zA-Z]+|\d{1,2})\b/g, (match, token) => {
-    const t = token.toLowerCase();
-    if (normRecurrent && t === normRecurrent)
-      return `<span style="${TRIGGER_SPAN}" title="${t}">\u21BB</span>`;
-    if (!isValidTriggerToken(t))
-      return match;
-    return `<span style="${TRIGGER_SPAN}">${t}</span>`;
+  if (!normRecurrent)
+    return text;
+  let hasRecurrent = false;
+  const triggers = [];
+  text = text.replace(new RegExp(`@${normRecurrent}\\b`, "gi"), () => {
+    hasRecurrent = true;
+    return "";
   });
+  text = text.replace(/@([a-zA-Z][a-zA-Z_]*|\d{1,2})\b/g, (match, token) => {
+    const t = token.toLowerCase();
+    if (isValidTriggerToken(t)) {
+      triggers.push(t === "last_day" ? "last day" : t);
+      return "";
+    }
+    return match;
+  });
+  text = text.replace(/\s{2,}/g, " ").trim();
+  if (hasRecurrent || triggers.length) {
+    const label = triggers.length ? `\u21BB ${triggers.join(" ")}` : "\u21BB";
+    text += `<span class="kb-trigger-label" style="${TRIGGER_LINE_STYLE}cursor:pointer;text-decoration:underline dotted;">${label}</span>`;
+  }
+  return text;
 }
 function formatCardDateAnnotation(text) {
   return text.replace(/@(\d{4})-(\d{2})-(\d{2})\b/g, (_, y, m, d) => {
@@ -323,7 +351,7 @@ function formatCardDateAnnotation(text) {
       const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
       label = `${months[Number(m) - 1]} ${Number(d)}`;
     }
-    return `<span style="display:block;font-size:.8em;color:var(--kb-date-color);font-family:var(--kb-date-font);">${label}</span>`;
+    return `<span class="kb-date-label" data-date="${y}-${m}-${d}" style="display:block;font-size:.8em;color:var(--kb-date-color);font-family:var(--kb-date-font);cursor:pointer;text-decoration:underline dotted;">${label}</span>`;
   });
 }
 function linksToHtml(text, vaultName) {
@@ -396,6 +424,36 @@ async function readFileLines(app, filePath) {
 }
 async function writeFileLines(app, tFile, lines) {
   await app.vault.modify(tFile, lines.join("\n"));
+}
+async function updateCardDate(app, filePath, lineNum, newDateStr) {
+  const { tFile, lines } = await readFileLines(app, filePath);
+  if (lineNum < 1 || lineNum > lines.length)
+    return;
+  const parsed = parseTaskLine(lines[lineNum - 1]);
+  parsed.date = newDateStr;
+  lines[lineNum - 1] = serializeTaskLine(parsed);
+  await writeFileLines(app, tFile, lines);
+}
+async function updateCardTriggers(app, filePath, lineNum, normRecurrent, newTriggerStr) {
+  const { tFile, lines } = await readFileLines(app, filePath);
+  if (lineNum < 1 || lineNum > lines.length)
+    return;
+  const parsed = parseTaskLine(lines[lineNum - 1]);
+  parsed.text = parsed.text.replace(/@([a-zA-Z][a-zA-Z_]*|\d{1,2})\b/g, (match, token) => {
+    const t = token.toLowerCase();
+    if (t === normRecurrent)
+      return match;
+    return isValidTriggerToken(t) ? "" : match;
+  }).replace(/\s{2,}/g, " ").trim();
+  for (const tok of newTriggerStr.trim().split(/\s+/)) {
+    if (!tok)
+      continue;
+    const key = tok.replace(/^@/, "");
+    if (!new RegExp(`@${key}\\b`, "i").test(parsed.text))
+      parsed.text = parsed.text.trimEnd() + " " + tok;
+  }
+  lines[lineNum - 1] = serializeTaskLine(parsed);
+  await writeFileLines(app, tFile, lines);
 }
 async function editCardText(app, filePath, lineNum, newText) {
   try {
@@ -894,7 +952,7 @@ function makeOverlay(id) {
   overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.5);z-index:10000;display:flex;align-items:center;justify-content:center;";
   document.body.appendChild(overlay);
   const dialog = document.createElement("div");
-  dialog.style.cssText = "background:var(--background-primary);color:var(--text-normal);padding:20px;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,.15);min-width:300px;max-width:400px;text-align:center;";
+  dialog.style.cssText = "background:var(--background-primary);color:var(--kb-dialog-text,var(--text-normal));padding:20px;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,.15);min-width:300px;max-width:400px;text-align:center;";
   overlay.appendChild(dialog);
   const close = () => overlay.remove();
   overlay.onclick = (e) => {
@@ -1031,21 +1089,74 @@ function showLaterAddDialog(title, defaultCreateDoc, onSubmit) {
   });
   textInput.focus();
 }
-function showRecurrentTriggerDialog(onSubmit) {
+function showRecurrentTriggerDialog(onSubmit, existingTriggers = []) {
   const { dialog, close } = makeOverlay("kanban-recurrent-trigger-dialog");
+  const WD_KEYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+  const WD_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const MO_KEYS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+  const MO_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const activeWD = new Set(existingTriggers.filter((t) => WD_KEYS.includes(t)));
+  const existingDay = existingTriggers.find((t) => /^\d{1,2}$/.test(t)) ?? "";
+  const existingMonth = existingTriggers.find((t) => MO_KEYS.includes(t)) ?? "";
+  const wdStyle = (active) => `height:24px;padding:0 8px;border-radius:12px;border:1px solid var(--background-modifier-border);cursor:pointer;font-size:.75em;display:inline-flex;align-items:center;justify-content:center;` + (active ? `background:var(--interactive-accent);color:var(--text-on-accent);` : `background:none;color:inherit;`);
+  const wdBtns = WD_KEYS.map(
+    (d, i) => `<button type="button" class="kb-wd-btn" data-day="${d}" style="${wdStyle(activeWD.has(d))}">${WD_LABELS[i]}</button>`
+  ).join("");
+  const dayOpts = `<option value="">\u2014</option>` + Array.from(
+    { length: 30 },
+    (_, i) => `<option value="${i + 1}"${existingDay === String(i + 1) ? " selected" : ""}>${i + 1}</option>`
+  ).join("") + `<option value="last_day" disabled>Last day</option>`;
+  const moOpts = `<option value="">\u2014</option>` + MO_KEYS.map(
+    (m, i) => `<option value="${m}"${existingMonth === m ? " selected" : ""}>${MO_LABELS[i]}</option>`
+  ).join("");
+  const selStyle = `width:100%;padding:6px 8px;border:1px solid var(--background-modifier-border);border-radius:4px;background:var(--background-secondary);color:inherit;box-sizing:border-box;`;
+  const lblStyle = `font-size:.8em;color:inherit;opacity:.75;display:block;margin-bottom:4px;`;
   dialog.innerHTML = `
-    <h3 style="margin:0 0 6px;font-size:1.1em;">Set recurrence trigger</h3>
-    <p style="margin:0 0 10px;font-size:.85em;color:var(--text-muted);">Weekday (mon\u2013sun), day of month (1\u201331), or month (jan\u2013dec). Multiple allowed.</p>
-    <input id="k-trigger" type="text" placeholder="e.g. mon, 15, jan" style="${inputStyle()}" autofocus>
+    <h3 style="margin:0 0 12px;font-size:1.1em;">Set recurrence trigger</h3>
+    <div style="margin-bottom:12px;">
+      <span style="${lblStyle}">Weekday</span>
+      <div id="k-wd-wrap" style="display:flex;gap:4px;flex-wrap:wrap;">${wdBtns}</div>
+    </div>
+    <div style="display:flex;gap:10px;margin-bottom:12px;">
+      <div style="flex:1;">
+        <label style="${lblStyle}" for="k-dom">Day of month</label>
+        <select id="k-dom" style="${selStyle}">${dayOpts}</select>
+      </div>
+      <div style="flex:1;">
+        <label style="${lblStyle}" for="k-month">Month</label>
+        <select id="k-month" style="${selStyle}">${moOpts}</select>
+      </div>
+    </div>
     <p id="k-trigger-err" style="margin:2px 0 8px;font-size:.82em;color:#e03e3e;min-height:1.2em;"></p>
-    <div style="display:flex;gap:10px;justify-content:center;">${buttonHtml("Set", true)}${buttonHtml("Cancel", false)}</div>`;
-  const [setBtn, cancelBtn] = dialog.querySelectorAll("button");
-  const input = dialog.querySelector("#k-trigger");
+    <div id="k-recur-actions" style="display:flex;gap:10px;justify-content:center;">${buttonHtml("Set", true)}${buttonHtml("Cancel", false)}</div>`;
+  const wdWrap = dialog.querySelector("#k-wd-wrap");
+  const domSel = dialog.querySelector("#k-dom");
+  const moSel = dialog.querySelector("#k-month");
   const errEl = dialog.querySelector("#k-trigger-err");
+  const [setBtn, cancelBtn] = dialog.querySelectorAll("#k-recur-actions button");
+  wdWrap.addEventListener("click", (e) => {
+    const btn = e.target.closest(".kb-wd-btn");
+    if (!btn)
+      return;
+    const day = btn.dataset.day;
+    if (activeWD.has(day)) {
+      activeWD.delete(day);
+      btn.style.cssText = wdStyle(false);
+    } else {
+      activeWD.add(day);
+      btn.style.cssText = wdStyle(true);
+    }
+  });
   const submit = () => {
-    const tokens = input.value.split(/[\s,]+/).map((t) => t.trim().replace(/^@/, "").toLowerCase()).filter(Boolean);
-    if (!tokens.length || !tokens.every(isValidTriggerToken)) {
-      errEl.textContent = "Enter a valid weekday (mon\u2013sun), day (1\u201331), or month (jan\u2013dec).";
+    const tokens = [...activeWD];
+    const day = domSel.value;
+    if (day && day !== "last_day")
+      tokens.push(day);
+    const mo = moSel.value;
+    if (mo)
+      tokens.push(mo);
+    if (!tokens.length) {
+      errEl.textContent = "Select at least one trigger.";
       return;
     }
     close();
@@ -1053,13 +1164,12 @@ function showRecurrentTriggerDialog(onSubmit) {
   };
   setBtn.onclick = submit;
   cancelBtn.onclick = close;
-  input.onkeydown = (e) => {
+  dialog.addEventListener("keydown", (e) => {
     if (e.key === "Enter")
       submit();
     if (e.key === "Escape")
       close();
-  };
-  input.focus();
+  });
 }
 function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
   let display = item.item.text;
@@ -1181,6 +1291,7 @@ function buildColorCSS(config) {
       #kanban-wrapper [data-col-norm="${norm}"][data-col-active="1"]{background:color-mix(in srgb,${color} 75%,black);color:var(--text-normal);}
     `).join("");
   return `
+    :root{--kb-dialog-text:${cv(config.colorText, "var(--text-normal)")};--kb-dialog-muted:${cv(config.colorText, "var(--text-muted)")}}
     #kanban-wrapper{
       --kb-card-bg:${cv(config.colorCardBg, "var(--background-secondary)")};
       --kb-col-bg:${cv(config.colorColumnBg, "var(--background-secondary)")};
@@ -1236,6 +1347,7 @@ function refreshColorVars(config) {
   if (el)
     el.textContent = buildColorCSS(config);
 }
+var _skipNextRecurrentTrigger = false;
 async function buildBoard(app, containerEl, config, savedActiveCol) {
   const vaultName = app.vault.getName();
   const paths = await getTargetFilePaths(app, config);
@@ -1254,13 +1366,17 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
     items = await collectItems(app, paths, config);
   }
   if (config.normRecurrent) {
-    const recurrentToMove = items.filter(
-      (i) => i.item.tags.some((t) => normalizeTag(t) === config.normRecurrent) && hasRecurrentAnnotation(i.item.text, config.normRecurrent) && matchesTriggerAnnotations(extractTriggerAnnotations(i.item.text, config.normRecurrent), today)
-    );
-    if (recurrentToMove.length) {
-      for (const item of recurrentToMove)
-        await moveToColumn(app, item.filePath, item.item.line, item.item.tags, config.todayColumn, false, config);
-      items = await collectItems(app, paths, config);
+    if (_skipNextRecurrentTrigger) {
+      _skipNextRecurrentTrigger = false;
+    } else {
+      const recurrentToMove = items.filter(
+        (i) => i.item.tags.some((t) => normalizeTag(t) === config.normRecurrent) && hasRecurrentAnnotation(i.item.text, config.normRecurrent) && matchesTriggerAnnotations(extractTriggerAnnotations(i.item.text, config.normRecurrent), today)
+      );
+      if (recurrentToMove.length) {
+        for (const item of recurrentToMove)
+          await moveToColumn(app, item.filePath, item.item.line, item.item.tags, config.todayColumn, false, config);
+        items = await collectItems(app, paths, config);
+      }
     }
   }
   const columns = groupByColumns(items, config);
@@ -1665,8 +1781,39 @@ function attachListeners(boardEl, config, app, refresh) {
     await writeFileLines(app, tFile, lines);
     refresh();
   }
+  async function onDateLabelClick(e) {
+    const span = e.target.closest(".kb-date-label");
+    if (!span)
+      return;
+    e.stopPropagation();
+    const card = span.closest(".kanban-card");
+    if (!card)
+      return;
+    const currentDateStr = span.dataset.date || "";
+    const existing = currentDateStr ? new Date(currentDateStr + "T00:00:00") : null;
+    const defDate = (existing && !isNaN(existing.getTime()) ? existing : getDefaultDate()).toISOString().split("T")[0];
+    showDateDialog("Change date", defDate, async (dateStr) => {
+      await updateCardDate(app, card.dataset.file, parseInt(card.dataset.line, 10), dateStr);
+      requestAnimationFrame(() => setTimeout(refresh, 50));
+    });
+  }
+  async function onTriggerLabelClick(e) {
+    const span = e.target.closest(".kb-trigger-label");
+    if (!span)
+      return;
+    e.stopPropagation();
+    const card = span.closest(".kanban-card");
+    if (!card)
+      return;
+    const rawText = card.dataset.raw || "";
+    const existing = extractTriggerAnnotations(rawText, config.normRecurrent);
+    showRecurrentTriggerDialog(async (newTriggerStr) => {
+      await updateCardTriggers(app, card.dataset.file, parseInt(card.dataset.line, 10), config.normRecurrent, newTriggerStr);
+      requestAnimationFrame(() => setTimeout(refresh, 50));
+    }, existing);
+  }
   async function onDblClick(e) {
-    if (e.target.closest("a,button,.promote-icon,.demote-btn"))
+    if (e.target.closest("a,button,.promote-icon,.demote-btn,.kb-date-label,.kb-trigger-label"))
       return;
     const titleDiv = e.target.closest(".card-title");
     if (!titleDiv)
@@ -2230,10 +2377,12 @@ function attachListeners(boardEl, config, app, refresh) {
           requestAnimationFrame(() => setTimeout(refresh, 50));
       });
     } else if (config.normRecurrent && norm === config.normRecurrent) {
-      showInputDialog(title, isProject, async (text, createDoc) => {
-        const annotated = `${text} @${config.normRecurrent}`;
-        if (await addNewItem(app, config.newTaskInsert, tag, annotated, null, config, createDoc))
-          requestAnimationFrame(() => setTimeout(refresh, 50));
+      showInputDialog(title, isProject, (text, createDoc) => {
+        showRecurrentTriggerDialog(async (triggerStr) => {
+          const annotated = `${text} @${config.normRecurrent} ${triggerStr}`;
+          if (await addNewItem(app, config.newTaskInsert, tag, annotated, null, config, createDoc))
+            requestAnimationFrame(() => setTimeout(refresh, 50));
+        });
       });
     } else {
       showInputDialog(title, isProject, async (text, createDoc) => {
@@ -2277,6 +2426,8 @@ function attachListeners(boardEl, config, app, refresh) {
   boardEl.addEventListener("mouseover", onMouseOver);
   boardEl.addEventListener("mouseout", onMouseOut);
   boardEl.addEventListener("click", onSubCheckClick);
+  boardEl.addEventListener("click", onDateLabelClick);
+  boardEl.addEventListener("click", onTriggerLabelClick);
   boardEl.addEventListener("click", onCardClick);
   boardEl.addEventListener("click", onPromoteClick);
   boardEl.addEventListener("click", onDemoteClick);
@@ -2299,6 +2450,8 @@ function attachListeners(boardEl, config, app, refresh) {
     boardEl.removeEventListener("mouseover", onMouseOver);
     boardEl.removeEventListener("mouseout", onMouseOut);
     boardEl.removeEventListener("click", onSubCheckClick);
+    boardEl.removeEventListener("click", onDateLabelClick);
+    boardEl.removeEventListener("click", onTriggerLabelClick);
     boardEl.removeEventListener("click", onCardClick);
     boardEl.removeEventListener("click", onPromoteClick);
     boardEl.removeEventListener("click", onDemoteClick);

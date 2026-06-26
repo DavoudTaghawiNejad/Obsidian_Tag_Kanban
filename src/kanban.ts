@@ -423,7 +423,7 @@ function formatTriggerAnnotations(text: string, normRecurrent: string): string {
 
   if (hasRecurrent || triggers.length) {
     const label = triggers.length ? `↻ ${triggers.join(' ')}` : '↻';
-    text += `<span style="${TRIGGER_LINE_STYLE}">${label}</span>`;
+    text += `<span class="kb-trigger-label" style="${TRIGGER_LINE_STYLE}cursor:pointer;text-decoration:underline dotted;">${label}</span>`;
   }
 
   return text;
@@ -446,7 +446,7 @@ function formatCardDateAnnotation(text: string): string {
       const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
       label = `${months[Number(m) - 1]} ${Number(d)}`;
     }
-    return `<span style="display:block;font-size:.8em;color:var(--kb-date-color);font-family:var(--kb-date-font);">${label}</span>`;
+    return `<span class="kb-date-label" data-date="${y}-${m}-${d}" style="display:block;font-size:.8em;color:var(--kb-date-color);font-family:var(--kb-date-font);cursor:pointer;text-decoration:underline dotted;">${label}</span>`;
   });
 }
 
@@ -558,6 +558,38 @@ async function readFileLines(
 
 async function writeFileLines(app: App, tFile: TFile, lines: string[]) {
   await app.vault.modify(tFile, lines.join("\n"));
+}
+
+async function updateCardDate(app: App, filePath: string, lineNum: number, newDateStr: string): Promise<void> {
+  const { tFile, lines } = await readFileLines(app, filePath);
+  if (lineNum < 1 || lineNum > lines.length) return;
+  const parsed = parseTaskLine(lines[lineNum - 1]);
+  parsed.date = newDateStr;
+  lines[lineNum - 1] = serializeTaskLine(parsed);
+  await writeFileLines(app, tFile, lines);
+}
+
+async function updateCardTriggers(
+  app: App, filePath: string, lineNum: number,
+  normRecurrent: string, newTriggerStr: string
+): Promise<void> {
+  const { tFile, lines } = await readFileLines(app, filePath);
+  if (lineNum < 1 || lineNum > lines.length) return;
+  const parsed = parseTaskLine(lines[lineNum - 1]);
+  // Remove old trigger tokens but keep @recurrent annotation
+  parsed.text = parsed.text.replace(/@([a-zA-Z][a-zA-Z_]*|\d{1,2})\b/g, (match, token) => {
+    const t = token.toLowerCase();
+    if (t === normRecurrent) return match;
+    return isValidTriggerToken(t) ? '' : match;
+  }).replace(/\s{2,}/g, ' ').trim();
+  // Append new triggers (avoid duplicates)
+  for (const tok of newTriggerStr.trim().split(/\s+/)) {
+    if (!tok) continue;
+    const key = tok.replace(/^@/, '');
+    if (!new RegExp(`@${key}\\b`, 'i').test(parsed.text)) parsed.text = parsed.text.trimEnd() + ' ' + tok;
+  }
+  lines[lineNum - 1] = serializeTaskLine(parsed);
+  await writeFileLines(app, tFile, lines);
 }
 
 async function editCardText(
@@ -1223,7 +1255,7 @@ function makeOverlay(id: string) {
   document.body.appendChild(overlay);
   const dialog = document.createElement("div");
   dialog.style.cssText =
-    "background:var(--background-primary);color:var(--text-normal);padding:20px;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,.15);min-width:300px;max-width:400px;text-align:center;";
+    "background:var(--background-primary);color:var(--kb-dialog-text,var(--text-normal));padding:20px;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,.15);min-width:300px;max-width:400px;text-align:center;";
   overlay.appendChild(dialog);
   const close = () => overlay.remove();
   overlay.onclick = (e) => {
@@ -1365,35 +1397,90 @@ function showLaterAddDialog(
   textInput.focus();
 }
 
-function showRecurrentTriggerDialog(onSubmit: (trigger: string) => void) {
+function showRecurrentTriggerDialog(onSubmit: (trigger: string) => void, existingTriggers: string[] = []) {
   const { dialog, close } = makeOverlay("kanban-recurrent-trigger-dialog");
-  dialog.innerHTML = `
-    <h3 style="margin:0 0 6px;font-size:1.1em;">Set recurrence trigger</h3>
-    <p style="margin:0 0 10px;font-size:.85em;color:var(--text-muted);">Weekday (mon–sun), day of month (1–31), month (jan–dec), or last_day. Multiple allowed.</p>
-    <input id="k-trigger" type="text" placeholder="e.g. mon, 15, jan, last_day" style="${inputStyle()}" autofocus>
-    <p id="k-trigger-err" style="margin:2px 0 8px;font-size:.82em;color:#e03e3e;min-height:1.2em;"></p>
-    <div style="display:flex;gap:10px;justify-content:center;">${buttonHtml("Set", true)}${buttonHtml("Cancel", false)}</div>`;
 
-  const [setBtn, cancelBtn] = dialog.querySelectorAll("button");
-  const input = dialog.querySelector("#k-trigger") as HTMLInputElement;
-  const errEl = dialog.querySelector("#k-trigger-err") as HTMLElement;
+  const WD_KEYS   = ['sun','mon','tue','wed','thu','fri','sat'];
+  const WD_LABELS = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  const MO_KEYS   = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
+  const MO_LABELS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+  const activeWD = new Set(existingTriggers.filter(t => WD_KEYS.includes(t)));
+  const existingDay   = existingTriggers.find(t => /^\d{1,2}$/.test(t)) ?? '';
+  const existingMonth = existingTriggers.find(t => MO_KEYS.includes(t)) ?? '';
+
+  const wdStyle = (active: boolean) =>
+    `height:24px;padding:0 8px;border-radius:12px;border:1px solid var(--background-modifier-border);cursor:pointer;font-size:.75em;display:inline-flex;align-items:center;justify-content:center;` +
+    (active ? `background:var(--interactive-accent);color:var(--text-on-accent);` : `background:none;color:inherit;`);
+
+  const wdBtns = WD_KEYS.map((d, i) =>
+    `<button type="button" class="kb-wd-btn" data-day="${d}" style="${wdStyle(activeWD.has(d))}">${WD_LABELS[i]}</button>`
+  ).join('');
+
+  const dayOpts = `<option value="">—</option>` +
+    Array.from({length: 30}, (_, i) =>
+      `<option value="${i+1}"${existingDay === String(i+1) ? ' selected' : ''}>${i+1}</option>`
+    ).join('') +
+    `<option value="last_day" disabled>Last day</option>`;
+
+  const moOpts = `<option value="">—</option>` +
+    MO_KEYS.map((m, i) =>
+      `<option value="${m}"${existingMonth === m ? ' selected' : ''}>${MO_LABELS[i]}</option>`
+    ).join('');
+
+  const selStyle = `width:100%;padding:6px 8px;border:1px solid var(--background-modifier-border);border-radius:4px;background:var(--background-secondary);color:inherit;box-sizing:border-box;`;
+  const lblStyle = `font-size:.8em;color:inherit;opacity:.75;display:block;margin-bottom:4px;`;
+
+  dialog.innerHTML = `
+    <h3 style="margin:0 0 12px;font-size:1.1em;">Set recurrence trigger</h3>
+    <div style="margin-bottom:12px;">
+      <span style="${lblStyle}">Weekday</span>
+      <div id="k-wd-wrap" style="display:flex;gap:4px;flex-wrap:wrap;">${wdBtns}</div>
+    </div>
+    <div style="display:flex;gap:10px;margin-bottom:12px;">
+      <div style="flex:1;">
+        <label style="${lblStyle}" for="k-dom">Day of month</label>
+        <select id="k-dom" style="${selStyle}">${dayOpts}</select>
+      </div>
+      <div style="flex:1;">
+        <label style="${lblStyle}" for="k-month">Month</label>
+        <select id="k-month" style="${selStyle}">${moOpts}</select>
+      </div>
+    </div>
+    <p id="k-trigger-err" style="margin:2px 0 8px;font-size:.82em;color:#e03e3e;min-height:1.2em;"></p>
+    <div id="k-recur-actions" style="display:flex;gap:10px;justify-content:center;">${buttonHtml("Set", true)}${buttonHtml("Cancel", false)}</div>`;
+
+  const wdWrap    = dialog.querySelector("#k-wd-wrap") as HTMLElement;
+  const domSel    = dialog.querySelector("#k-dom") as HTMLSelectElement;
+  const moSel     = dialog.querySelector("#k-month") as HTMLSelectElement;
+  const errEl     = dialog.querySelector("#k-trigger-err") as HTMLElement;
+  const [setBtn, cancelBtn] = dialog.querySelectorAll<HTMLButtonElement>("#k-recur-actions button");
+
+  wdWrap.addEventListener("click", (e) => {
+    const btn = (e.target as Element).closest(".kb-wd-btn") as HTMLButtonElement | null;
+    if (!btn) return;
+    const day = btn.dataset.day!;
+    if (activeWD.has(day)) { activeWD.delete(day); btn.style.cssText = wdStyle(false); }
+    else                   { activeWD.add(day);    btn.style.cssText = wdStyle(true);  }
+  });
 
   const submit = () => {
-    const tokens = input.value.split(/[\s,]+/).map(t => t.trim().replace(/^@/, "").toLowerCase()).filter(Boolean);
-    if (!tokens.length || !tokens.every(isValidTriggerToken)) {
-      errEl.textContent = "Enter a valid weekday (mon–sun), day (1–31), or month (jan–dec).";
-      return;
-    }
+    const tokens: string[] = [...activeWD];
+    const day = domSel.value;
+    if (day && day !== 'last_day') tokens.push(day);
+    const mo = moSel.value;
+    if (mo) tokens.push(mo);
+    if (!tokens.length) { errEl.textContent = "Select at least one trigger."; return; }
     close();
     onSubmit(tokens.map(t => `@${t}`).join(" "));
   };
+
   setBtn.onclick = submit;
   cancelBtn.onclick = close;
-  input.onkeydown = (e) => {
+  dialog.addEventListener("keydown", (e) => {
     if (e.key === "Enter") submit();
     if (e.key === "Escape") close();
-  };
-  input.focus();
+  });
 }
 
 // ─── CARD HTML ────────────────────────────────────────────────────────────────
@@ -1564,6 +1651,7 @@ function buildColorCSS(config: KanbanConfig): string {
       #kanban-wrapper [data-col-norm="${norm}"][data-col-active="1"]{background:color-mix(in srgb,${color} 75%,black);color:var(--text-normal);}
     `).join("");
   return `
+    :root{--kb-dialog-text:${cv(config.colorText,"var(--text-normal)")};--kb-dialog-muted:${cv(config.colorText,"var(--text-muted)")}}
     #kanban-wrapper{
       --kb-card-bg:${cv(config.colorCardBg,"var(--background-secondary)")};
       --kb-col-bg:${cv(config.colorColumnBg,"var(--background-secondary)")};
@@ -1613,6 +1701,10 @@ export function refreshColorVars(config: KanbanConfig): void {
   if (el) el.textContent = buildColorCSS(config);
 }
 
+// Set to true when a card is explicitly placed into #recurrent by user action;
+// causes the very next buildBoard to skip Step B so the card isn't immediately re-triggered.
+let _skipNextRecurrentTrigger = false;
+
 export async function buildBoard(
   app: App,
   containerEl: HTMLElement,
@@ -1646,16 +1738,20 @@ export async function buildBoard(
 
   // Step B: move triggered #recurrent cards → today column
   if (config.normRecurrent) {
-    const recurrentToMove = items.filter(
-      (i) =>
-        i.item.tags.some((t: string) => normalizeTag(t) === config.normRecurrent) &&
-        hasRecurrentAnnotation(i.item.text, config.normRecurrent) &&
-        matchesTriggerAnnotations(extractTriggerAnnotations(i.item.text, config.normRecurrent), today)
-    );
-    if (recurrentToMove.length) {
-      for (const item of recurrentToMove)
-        await moveToColumn(app, item.filePath, item.item.line, item.item.tags, config.todayColumn, false, config);
-      items = await collectItems(app, paths, config);
+    if (_skipNextRecurrentTrigger) {
+      _skipNextRecurrentTrigger = false;
+    } else {
+      const recurrentToMove = items.filter(
+        (i) =>
+          i.item.tags.some((t: string) => normalizeTag(t) === config.normRecurrent) &&
+          hasRecurrentAnnotation(i.item.text, config.normRecurrent) &&
+          matchesTriggerAnnotations(extractTriggerAnnotations(i.item.text, config.normRecurrent), today)
+      );
+      if (recurrentToMove.length) {
+        for (const item of recurrentToMove)
+          await moveToColumn(app, item.filePath, item.item.line, item.item.tags, config.todayColumn, false, config);
+        items = await collectItems(app, paths, config);
+      }
     }
   }
 
@@ -2115,9 +2211,40 @@ export function attachListeners(
     refresh();
   }
 
+  // ── Clickable date label on later cards ──
+  async function onDateLabelClick(e: MouseEvent) {
+    const span = (e.target as Element).closest(".kb-date-label") as HTMLElement | null;
+    if (!span) return;
+    e.stopPropagation();
+    const card = span.closest(".kanban-card") as HTMLElement | null;
+    if (!card) return;
+    const currentDateStr = span.dataset.date || "";
+    const existing = currentDateStr ? new Date(currentDateStr + "T00:00:00") : null;
+    const defDate = (existing && !isNaN(existing.getTime()) ? existing : getDefaultDate()).toISOString().split("T")[0];
+    showDateDialog("Change date", defDate, async (dateStr) => {
+      await updateCardDate(app, card.dataset.file!, parseInt(card.dataset.line!, 10), dateStr);
+      requestAnimationFrame(() => setTimeout(refresh, 50));
+    });
+  }
+
+  // ── Clickable trigger label on recurrent cards ──
+  async function onTriggerLabelClick(e: MouseEvent) {
+    const span = (e.target as Element).closest(".kb-trigger-label") as HTMLElement | null;
+    if (!span) return;
+    e.stopPropagation();
+    const card = span.closest(".kanban-card") as HTMLElement | null;
+    if (!card) return;
+    const rawText = card.dataset.raw || "";
+    const existing = extractTriggerAnnotations(rawText, config.normRecurrent);
+    showRecurrentTriggerDialog(async (newTriggerStr) => {
+      await updateCardTriggers(app, card.dataset.file!, parseInt(card.dataset.line!, 10), config.normRecurrent, newTriggerStr);
+      requestAnimationFrame(() => setTimeout(refresh, 50));
+    }, existing);
+  }
+
   // ── Inline card text editing ──
   async function onDblClick(e: MouseEvent) {
-    if ((e.target as Element).closest("a,button,.promote-icon,.demote-btn")) return;
+    if ((e.target as Element).closest("a,button,.promote-icon,.demote-btn,.kb-date-label,.kb-trigger-label")) return;
     const titleDiv = (e.target as Element).closest(".card-title") as HTMLElement | null;
     if (!titleDiv) return;
     const card = titleDiv.closest(".kanban-card") as HTMLElement | null;
@@ -2714,10 +2841,12 @@ export function attachListeners(
           requestAnimationFrame(() => setTimeout(refresh, 50));
       });
     } else if (config.normRecurrent && norm === config.normRecurrent) {
-      showInputDialog(title, isProject, async (text: string, createDoc: boolean) => {
-        const annotated = `${text} @${config.normRecurrent}`;
-        if (await addNewItem(app, config.newTaskInsert, tag, annotated, null, config, createDoc))
-          requestAnimationFrame(() => setTimeout(refresh, 50));
+      showInputDialog(title, isProject, (text: string, createDoc: boolean) => {
+        showRecurrentTriggerDialog(async (triggerStr) => {
+          const annotated = `${text} @${config.normRecurrent} ${triggerStr}`;
+          if (await addNewItem(app, config.newTaskInsert, tag, annotated, null, config, createDoc))
+            requestAnimationFrame(() => setTimeout(refresh, 50));
+        });
       });
     } else {
       showInputDialog(title, isProject, async (text: string, createDoc: boolean) => {
@@ -2763,6 +2892,8 @@ export function attachListeners(
   boardEl.addEventListener("mouseover", onMouseOver);
   boardEl.addEventListener("mouseout", onMouseOut);
   boardEl.addEventListener("click", onSubCheckClick);
+  boardEl.addEventListener("click", onDateLabelClick);
+  boardEl.addEventListener("click", onTriggerLabelClick);
   boardEl.addEventListener("click", onCardClick);
   boardEl.addEventListener("click", onPromoteClick);
   boardEl.addEventListener("click", onDemoteClick);
@@ -2786,6 +2917,8 @@ export function attachListeners(
     boardEl.removeEventListener("mouseover", onMouseOver);
     boardEl.removeEventListener("mouseout", onMouseOut);
     boardEl.removeEventListener("click", onSubCheckClick);
+    boardEl.removeEventListener("click", onDateLabelClick);
+    boardEl.removeEventListener("click", onTriggerLabelClick);
     boardEl.removeEventListener("click", onCardClick);
     boardEl.removeEventListener("click", onPromoteClick);
     boardEl.removeEventListener("click", onDemoteClick);
