@@ -676,11 +676,15 @@ async function archiveToSection(app, filePath, mainLineNum, subLines, config, _i
           parsed.checked = false;
         parsed.doneDate = null;
         parsed.tags.push(config.recurrentColumn);
+        lines[idx] = serializeTaskLine(parsed);
+        const n = new Date();
+        const skipStr = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
+        lines[idx] = setSkipDate(lines[idx], skipStr);
       } else {
         if (tickBox && parsed.checked !== null)
           parsed.checked = true;
+        lines[idx] = serializeTaskLine(parsed);
       }
-      lines[idx] = serializeTaskLine(parsed);
     };
     const { tFile, lines } = await readFileLines(app, filePath);
     archiveLine(mainLineNum - 1, true);
