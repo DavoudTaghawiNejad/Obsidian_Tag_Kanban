@@ -336,7 +336,7 @@ function formatTriggerAnnotations(text, normRecurrent) {
   });
   text = text.replace(/\s{2,}/g, " ").trim();
   if (hasRecurrent || triggers.length) {
-    const label = triggers.length ? `\u21BB ${triggers.join(" ")}` : "\u21BB";
+    const label = triggers.length ? `\u21BB ${triggers.join(", ")}` : "\u21BB";
     text += `<span class="kb-trigger-label" style="${TRIGGER_LINE_STYLE}cursor:pointer;text-decoration:underline dotted;">${label}</span>`;
   }
   return text;

@@ -432,7 +432,7 @@ function formatTriggerAnnotations(text: string, normRecurrent: string): string {
   text = text.replace(/\s{2,}/g, ' ').trim();
 
   if (hasRecurrent || triggers.length) {
-    const label = triggers.length ? `↻ ${triggers.join(' ')}` : '↻';
+    const label = triggers.length ? `↻ ${triggers.join('·')}` : '↻';
     text += `<span class="kb-trigger-label" style="${TRIGGER_LINE_STYLE}cursor:pointer;text-decoration:underline dotted;">${label}</span>`;
   }
 
