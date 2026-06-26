@@ -1,4 +1,4 @@
-import { App, Plugin, PluginSettingTab, Setting, WorkspaceLeaf } from "obsidian";
+import { App, Platform, Plugin, PluginSettingTab, Setting, WorkspaceLeaf } from "obsidian";
 import { KanbanView, VIEW_TYPE_KANBAN } from "./KanbanView";
 
 export interface KanbanSettings {
@@ -72,9 +72,18 @@ export default class KanbanPlugin extends Plugin {
       callback: () => this.activateView(),
     });
 
+    this.addCommand({
+      id: "open-kanban-window",
+      name: "Open Kanban Board in new window",
+      callback: () => this.activateViewInWindow(),
+    });
+
     // Protocol handler: obsidian://open-kanban opens the board from text links
     this.registerObsidianProtocolHandler("open-kanban", () =>
       this.activateView()
+    );
+    this.registerObsidianProtocolHandler("open-kanban-window", () =>
+      this.activateViewInWindow()
     );
 
     // Inject "Open Kanban Board" button into new-tab empty views
@@ -102,6 +111,15 @@ export default class KanbanPlugin extends Plugin {
 
   onunload() {
     this.app.workspace.detachLeavesOfType(VIEW_TYPE_KANBAN);
+  }
+
+  async activateViewInWindow() {
+    const { workspace } = this.app;
+    const leaf = Platform.isMobile
+      ? workspace.getLeaf(true)
+      : workspace.openPopoutLeaf();
+    await leaf.setViewState({ type: VIEW_TYPE_KANBAN, active: true });
+    workspace.revealLeaf(leaf);
   }
 
   async activateView() {

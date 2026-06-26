@@ -1989,6 +1989,7 @@ export function attachListeners(
   app: App,
   refresh: () => void
 ): () => void {
+  const ownerDoc = () => boardEl.ownerDocument;
   let draggedCard: any = null;
   let currentInsertIndex = -1;
 
@@ -2554,13 +2555,13 @@ export function attachListeners(
       boxShadow: "0 8px 24px rgba(0,0,0,.25)",
       transition: "none",
     });
-    document.body.appendChild(g);
+    ownerDoc().body.appendChild(g);
     return g;
   };
 
   const targetFromPoint = (x: number, y: number) => {
     if (ghost) ghost.style.display = "none";
-    const el = document.elementFromPoint(x, y);
+    const el = ownerDoc().elementFromPoint(x, y);
     if (ghost) ghost.style.display = "";
     return {
       zone: el?.closest(".drop-zone") as HTMLElement | null,
@@ -2607,9 +2608,9 @@ export function attachListeners(
         isPanning = true;
         panStartX = e.touches[0].clientX;
         panStartY = e.touches[0].clientY;
-        const scrollEl = document.getElementById("kanban-scroll");
+        const scrollEl = ownerDoc().getElementById("kanban-scroll");
         panScrollStart = scrollEl ? scrollEl.scrollLeft : 0;
-        const vertEl = boardEl.closest<HTMLElement>(".view-content") ?? document.documentElement;
+        const vertEl = boardEl.closest<HTMLElement>(".view-content") ?? ownerDoc().documentElement;
         panScrollTopStart = vertEl.scrollTop;
         return;
       }
@@ -2629,9 +2630,9 @@ export function attachListeners(
   function onTouchMove(e: TouchEvent) {
     if (isPanning && e.touches.length === 1) {
       const t = e.touches[0];
-      const scrollEl = document.getElementById("kanban-scroll");
+      const scrollEl = ownerDoc().getElementById("kanban-scroll");
       if (scrollEl) scrollEl.scrollLeft = panScrollStart - (t.clientX - panStartX);
-      const vertEl = boardEl.closest<HTMLElement>(".view-content") ?? document.documentElement;
+      const vertEl = boardEl.closest<HTMLElement>(".view-content") ?? ownerDoc().documentElement;
       vertEl.scrollTop = panScrollTopStart - (t.clientY - panStartY);
       e.preventDefault();
       return;
@@ -2761,7 +2762,7 @@ export function attachListeners(
     if (ghost) { ghost.remove(); ghost = null; }
     if (mouseCard) { mouseCard.style.opacity = "1"; mouseCard = null; }
     draggedCard = null;
-    document.body.style.userSelect = "";
+    ownerDoc().body.style.userSelect = "";
     boardEl.querySelectorAll<HTMLElement>(".drop-zone").forEach(
       (z) => (z.style.borderColor = "var(--background-modifier-border)")
     );
@@ -2769,8 +2770,8 @@ export function attachListeners(
       (s) => (s.style.borderTopColor = "transparent")
     );
     currentInsertIndex = -1;
-    document.removeEventListener("mousemove", onMouseMove);
-    document.removeEventListener("mouseup", onMouseUp);
+    ownerDoc().removeEventListener("mousemove", onMouseMove);
+    ownerDoc().removeEventListener("mouseup", onMouseUp);
   };
 
   function onMouseDown(e: MouseEvent) {
@@ -2783,8 +2784,8 @@ export function attachListeners(
     draggedCard = cardDataFrom(card);
     mouseStartX = e.clientX;
     mouseStartY = e.clientY;
-    document.addEventListener("mousemove", onMouseMove);
-    document.addEventListener("mouseup", onMouseUp);
+    ownerDoc().addEventListener("mousemove", onMouseMove);
+    ownerDoc().addEventListener("mouseup", onMouseUp);
   }
 
   function onMouseMove(e: MouseEvent) {
@@ -2797,7 +2798,7 @@ export function attachListeners(
       ghost = makeGhost(mouseCard);
       collapseCardEl(mouseCard);
       mouseCard.style.opacity = ".35";
-      document.body.style.userSelect = "none";
+      ownerDoc().body.style.userSelect = "none";
     }
     ghost!.style.left = e.clientX - ghost!.offsetWidth / 2 + "px";
     ghost!.style.top = e.clientY - ghost!.offsetHeight / 2 - 20 + "px";
@@ -2823,8 +2824,8 @@ export function attachListeners(
   }
 
   async function onMouseUp(e: MouseEvent) {
-    document.removeEventListener("mousemove", onMouseMove);
-    document.removeEventListener("mouseup", onMouseUp);
+    ownerDoc().removeEventListener("mousemove", onMouseMove);
+    ownerDoc().removeEventListener("mouseup", onMouseUp);
     if (!isMouseDrag || !draggedCard) {
       clearMouseDrag();
       return;
@@ -2858,29 +2859,29 @@ export function attachListeners(
     isMidPan = true;
     midPanStartX = e.clientX;
     midPanStartY = e.clientY;
-    const scrollEl = document.getElementById("kanban-scroll");
+    const scrollEl = ownerDoc().getElementById("kanban-scroll");
     midPanScrollLeft = scrollEl ? scrollEl.scrollLeft : 0;
-    const vertEl = boardEl.closest<HTMLElement>(".view-content") ?? document.documentElement;
+    const vertEl = boardEl.closest<HTMLElement>(".view-content") ?? ownerDoc().documentElement;
     midPanScrollTop = vertEl.scrollTop;
-    document.body.style.cursor = "grabbing";
-    document.addEventListener("mousemove", onMidMouseMove);
-    document.addEventListener("mouseup", onMidMouseUp);
+    ownerDoc().body.style.cursor = "grabbing";
+    ownerDoc().addEventListener("mousemove", onMidMouseMove);
+    ownerDoc().addEventListener("mouseup", onMidMouseUp);
   }
 
   function onMidMouseMove(e: MouseEvent) {
     if (!isMidPan) return;
-    const scrollEl = document.getElementById("kanban-scroll");
+    const scrollEl = ownerDoc().getElementById("kanban-scroll");
     if (scrollEl) scrollEl.scrollLeft = midPanScrollLeft - (e.clientX - midPanStartX);
-    const vertEl = boardEl.closest<HTMLElement>(".view-content") ?? document.documentElement;
+    const vertEl = boardEl.closest<HTMLElement>(".view-content") ?? ownerDoc().documentElement;
     vertEl.scrollTop = midPanScrollTop - (e.clientY - midPanStartY);
   }
 
   function onMidMouseUp(e: MouseEvent) {
     if (e.button !== 1) return;
     isMidPan = false;
-    document.body.style.cursor = "";
-    document.removeEventListener("mousemove", onMidMouseMove);
-    document.removeEventListener("mouseup", onMidMouseUp);
+    ownerDoc().body.style.cursor = "";
+    ownerDoc().removeEventListener("mousemove", onMidMouseMove);
+    ownerDoc().removeEventListener("mouseup", onMidMouseUp);
   }
 
   // ── Phone column tabs ──
@@ -2888,7 +2889,7 @@ export function attachListeners(
     if (selectedCard) return;
     const tab = (e.target as Element).closest("button[data-col-norm]") as HTMLElement | null;
     if (!tab) return;
-    const wrapper = document.getElementById("kanban-wrapper");
+    const wrapper = ownerDoc().getElementById("kanban-wrapper");
     if (wrapper) wrapper.dataset.activeCol = tab.dataset.colNorm;
     refresh();
   }
@@ -2981,10 +2982,10 @@ export function attachListeners(
   return () => {
     boardEl.removeEventListener("mousedown", onMouseDown);
     boardEl.removeEventListener("mousedown", onMidMouseDown);
-    document.removeEventListener("mousemove", onMouseMove);
-    document.removeEventListener("mouseup", onMouseUp);
-    document.removeEventListener("mousemove", onMidMouseMove);
-    document.removeEventListener("mouseup", onMidMouseUp);
+    ownerDoc().removeEventListener("mousemove", onMouseMove);
+    ownerDoc().removeEventListener("mouseup", onMouseUp);
+    ownerDoc().removeEventListener("mousemove", onMidMouseMove);
+    ownerDoc().removeEventListener("mouseup", onMidMouseUp);
     boardEl.removeEventListener("mouseover", onMouseOver);
     boardEl.removeEventListener("mouseout", onMouseOut);
     boardEl.removeEventListener("click", onSubCheckClick);

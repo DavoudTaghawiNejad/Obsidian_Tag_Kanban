@@ -1569,6 +1569,7 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
   });
 }
 function attachListeners(boardEl, config, app, refresh) {
+  const ownerDoc = () => boardEl.ownerDocument;
   let draggedCard = null;
   let currentInsertIndex = -1;
   const cardDataFrom = (el) => {
@@ -2079,13 +2080,13 @@ function attachListeners(boardEl, config, app, refresh) {
       boxShadow: "0 8px 24px rgba(0,0,0,.25)",
       transition: "none"
     });
-    document.body.appendChild(g);
+    ownerDoc().body.appendChild(g);
     return g;
   };
   const targetFromPoint = (x, y) => {
     if (ghost)
       ghost.style.display = "none";
-    const el = document.elementFromPoint(x, y);
+    const el = ownerDoc().elementFromPoint(x, y);
     if (ghost)
       ghost.style.display = "";
     return {
@@ -2131,9 +2132,9 @@ function attachListeners(boardEl, config, app, refresh) {
         isPanning = true;
         panStartX = e.touches[0].clientX;
         panStartY = e.touches[0].clientY;
-        const scrollEl = document.getElementById("kanban-scroll");
+        const scrollEl = ownerDoc().getElementById("kanban-scroll");
         panScrollStart = scrollEl ? scrollEl.scrollLeft : 0;
-        const vertEl = boardEl.closest(".view-content") ?? document.documentElement;
+        const vertEl = boardEl.closest(".view-content") ?? ownerDoc().documentElement;
         panScrollTopStart = vertEl.scrollTop;
         return;
       }
@@ -2152,10 +2153,10 @@ function attachListeners(boardEl, config, app, refresh) {
   function onTouchMove(e) {
     if (isPanning && e.touches.length === 1) {
       const t = e.touches[0];
-      const scrollEl = document.getElementById("kanban-scroll");
+      const scrollEl = ownerDoc().getElementById("kanban-scroll");
       if (scrollEl)
         scrollEl.scrollLeft = panScrollStart - (t.clientX - panStartX);
-      const vertEl = boardEl.closest(".view-content") ?? document.documentElement;
+      const vertEl = boardEl.closest(".view-content") ?? ownerDoc().documentElement;
       vertEl.scrollTop = panScrollTopStart - (t.clientY - panStartY);
       e.preventDefault();
       return;
@@ -2282,7 +2283,7 @@ function attachListeners(boardEl, config, app, refresh) {
       mouseCard = null;
     }
     draggedCard = null;
-    document.body.style.userSelect = "";
+    ownerDoc().body.style.userSelect = "";
     boardEl.querySelectorAll(".drop-zone").forEach(
       (z) => z.style.borderColor = "var(--background-modifier-border)"
     );
@@ -2290,8 +2291,8 @@ function attachListeners(boardEl, config, app, refresh) {
       (s) => s.style.borderTopColor = "transparent"
     );
     currentInsertIndex = -1;
-    document.removeEventListener("mousemove", onMouseMove);
-    document.removeEventListener("mouseup", onMouseUp);
+    ownerDoc().removeEventListener("mousemove", onMouseMove);
+    ownerDoc().removeEventListener("mouseup", onMouseUp);
   };
   function onMouseDown(e) {
     if (e.button !== 0)
@@ -2307,8 +2308,8 @@ function attachListeners(boardEl, config, app, refresh) {
     draggedCard = cardDataFrom(card);
     mouseStartX = e.clientX;
     mouseStartY = e.clientY;
-    document.addEventListener("mousemove", onMouseMove);
-    document.addEventListener("mouseup", onMouseUp);
+    ownerDoc().addEventListener("mousemove", onMouseMove);
+    ownerDoc().addEventListener("mouseup", onMouseUp);
   }
   function onMouseMove(e) {
     if (!mouseCard)
@@ -2322,7 +2323,7 @@ function attachListeners(boardEl, config, app, refresh) {
       ghost = makeGhost(mouseCard);
       collapseCardEl(mouseCard);
       mouseCard.style.opacity = ".35";
-      document.body.style.userSelect = "none";
+      ownerDoc().body.style.userSelect = "none";
     }
     ghost.style.left = e.clientX - ghost.offsetWidth / 2 + "px";
     ghost.style.top = e.clientY - ghost.offsetHeight / 2 - 20 + "px";
@@ -2346,8 +2347,8 @@ function attachListeners(boardEl, config, app, refresh) {
     }
   }
   async function onMouseUp(e) {
-    document.removeEventListener("mousemove", onMouseMove);
-    document.removeEventListener("mouseup", onMouseUp);
+    ownerDoc().removeEventListener("mousemove", onMouseMove);
+    ownerDoc().removeEventListener("mouseup", onMouseUp);
     if (!isMouseDrag || !draggedCard) {
       clearMouseDrag();
       return;
@@ -2379,30 +2380,30 @@ function attachListeners(boardEl, config, app, refresh) {
     isMidPan = true;
     midPanStartX = e.clientX;
     midPanStartY = e.clientY;
-    const scrollEl = document.getElementById("kanban-scroll");
+    const scrollEl = ownerDoc().getElementById("kanban-scroll");
     midPanScrollLeft = scrollEl ? scrollEl.scrollLeft : 0;
-    const vertEl = boardEl.closest(".view-content") ?? document.documentElement;
+    const vertEl = boardEl.closest(".view-content") ?? ownerDoc().documentElement;
     midPanScrollTop = vertEl.scrollTop;
-    document.body.style.cursor = "grabbing";
-    document.addEventListener("mousemove", onMidMouseMove);
-    document.addEventListener("mouseup", onMidMouseUp);
+    ownerDoc().body.style.cursor = "grabbing";
+    ownerDoc().addEventListener("mousemove", onMidMouseMove);
+    ownerDoc().addEventListener("mouseup", onMidMouseUp);
   }
   function onMidMouseMove(e) {
     if (!isMidPan)
       return;
-    const scrollEl = document.getElementById("kanban-scroll");
+    const scrollEl = ownerDoc().getElementById("kanban-scroll");
     if (scrollEl)
       scrollEl.scrollLeft = midPanScrollLeft - (e.clientX - midPanStartX);
-    const vertEl = boardEl.closest(".view-content") ?? document.documentElement;
+    const vertEl = boardEl.closest(".view-content") ?? ownerDoc().documentElement;
     vertEl.scrollTop = midPanScrollTop - (e.clientY - midPanStartY);
   }
   function onMidMouseUp(e) {
     if (e.button !== 1)
       return;
     isMidPan = false;
-    document.body.style.cursor = "";
-    document.removeEventListener("mousemove", onMidMouseMove);
-    document.removeEventListener("mouseup", onMidMouseUp);
+    ownerDoc().body.style.cursor = "";
+    ownerDoc().removeEventListener("mousemove", onMidMouseMove);
+    ownerDoc().removeEventListener("mouseup", onMidMouseUp);
   }
   function onTabClick(e) {
     if (selectedCard)
@@ -2410,7 +2411,7 @@ function attachListeners(boardEl, config, app, refresh) {
     const tab = e.target.closest("button[data-col-norm]");
     if (!tab)
       return;
-    const wrapper = document.getElementById("kanban-wrapper");
+    const wrapper = ownerDoc().getElementById("kanban-wrapper");
     if (wrapper)
       wrapper.dataset.activeCol = tab.dataset.colNorm;
     refresh();
@@ -2499,10 +2500,10 @@ function attachListeners(boardEl, config, app, refresh) {
   return () => {
     boardEl.removeEventListener("mousedown", onMouseDown);
     boardEl.removeEventListener("mousedown", onMidMouseDown);
-    document.removeEventListener("mousemove", onMouseMove);
-    document.removeEventListener("mouseup", onMouseUp);
-    document.removeEventListener("mousemove", onMidMouseMove);
-    document.removeEventListener("mouseup", onMidMouseUp);
+    ownerDoc().removeEventListener("mousemove", onMouseMove);
+    ownerDoc().removeEventListener("mouseup", onMouseUp);
+    ownerDoc().removeEventListener("mousemove", onMidMouseMove);
+    ownerDoc().removeEventListener("mouseup", onMidMouseUp);
     boardEl.removeEventListener("mouseover", onMouseOver);
     boardEl.removeEventListener("mouseout", onMouseOut);
     boardEl.removeEventListener("click", onSubCheckClick);
@@ -2680,9 +2681,18 @@ var KanbanPlugin = class extends import_obsidian3.Plugin {
       name: "Open Kanban Board",
       callback: () => this.activateView()
     });
+    this.addCommand({
+      id: "open-kanban-window",
+      name: "Open Kanban Board in new window",
+      callback: () => this.activateViewInWindow()
+    });
     this.registerObsidianProtocolHandler(
       "open-kanban",
       () => this.activateView()
+    );
+    this.registerObsidianProtocolHandler(
+      "open-kanban-window",
+      () => this.activateViewInWindow()
     );
     this.registerEvent(
       this.app.workspace.on("layout-change", () => this.injectNewTabButton())
@@ -2706,6 +2716,12 @@ var KanbanPlugin = class extends import_obsidian3.Plugin {
   }
   onunload() {
     this.app.workspace.detachLeavesOfType(VIEW_TYPE_KANBAN);
+  }
+  async activateViewInWindow() {
+    const { workspace } = this.app;
+    const leaf = import_obsidian3.Platform.isMobile ? workspace.getLeaf(true) : workspace.openPopoutLeaf();
+    await leaf.setViewState({ type: VIEW_TYPE_KANBAN, active: true });
+    workspace.revealLeaf(leaf);
   }
   async activateView() {
     const { workspace } = this.app;
