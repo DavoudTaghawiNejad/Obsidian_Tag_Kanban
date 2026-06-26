@@ -1717,15 +1717,45 @@ function createCardHTML(
 
 // ─── BOARD BUILD ─────────────────────────────────────────────────────────────
 
+function hexLuminance(hex: string): number {
+  const clean = hex.replace(/^#/, "");
+  const full = clean.length === 3 ? clean.split("").map((c) => c + c).join("") : clean;
+  if (full.length !== 6) return 0.5;
+  const r = parseInt(full.slice(0, 2), 16) / 255;
+  const g = parseInt(full.slice(2, 4), 16) / 255;
+  const b = parseInt(full.slice(4, 6), 16) / 255;
+  const lin = (c: number) => (c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4));
+  return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+}
+
+function textOnBg(bgHex: string, lightText: string, darkText: string): string {
+  return hexLuminance(bgHex) > 0.179 ? darkText : lightText;
+}
+
+function darkenHex(hex: string, factor: number): string {
+  const clean = hex.replace(/^#/, "");
+  if (clean.length !== 6) return hex;
+  const r = Math.round(parseInt(clean.slice(0, 2), 16) * factor);
+  const g = Math.round(parseInt(clean.slice(2, 4), 16) * factor);
+  const b = Math.round(parseInt(clean.slice(4, 6), 16) * factor);
+  return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
+}
+
 function buildColorCSS(config: KanbanConfig): string {
   const cv = (val: string, fb: string) => (val && val.trim()) ? val.trim() : fb;
+  const configuredDarkText = (config.colorText && config.colorText.trim()) ? config.colorText.trim() : "#1a1a1a";
   const perColRules = Object.entries(config.columnColors)
     .filter(([, c]) => c)
-    .map(([norm, color]) => `
+    .map(([norm, color]) => {
+      const activeBg = darkenHex(color, 0.75);
+      const textNorm = textOnBg(color, "#ffffff", configuredDarkText);
+      const textActive = textOnBg(activeBg, "#ffffff", configuredDarkText);
+      return `
       #kanban-wrapper [data-col-container="${norm}"]{background:${color};}
-      #kanban-wrapper [data-col-norm="${norm}"]{background:${color};color:var(--text-normal);}
-      #kanban-wrapper [data-col-norm="${norm}"][data-col-active="1"]{background:color-mix(in srgb,${color} 75%,black);color:var(--text-normal);}
-    `).join("");
+      #kanban-wrapper [data-col-norm="${norm}"]{background:${color};color:${textNorm};}
+      #kanban-wrapper [data-col-norm="${norm}"][data-col-active="1"]{background:${activeBg};color:${textActive};}
+    `;
+    }).join("");
   return `
     :root{--kb-dialog-text:${cv(config.colorText,"var(--text-normal)")};--kb-dialog-muted:${cv(config.colorText,"var(--text-muted)")}}
     #kanban-wrapper{
