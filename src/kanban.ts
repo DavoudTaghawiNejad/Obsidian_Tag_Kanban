@@ -2575,7 +2575,8 @@ export function attachListeners(
       clearTouch();
       return;
     }
-    if ((e.target as Element).closest("button,a,.promote-icon,.demote-btn")) return;
+    if (boardEl.querySelector(".card-edit-input")) return;
+    if ((e.target as Element).closest("button,a,input,textarea,.promote-icon,.demote-btn")) return;
 
     const card = (e.target as Element).closest(".kanban-card") as HTMLElement | null;
     touchStartX = e.touches[0].clientX;
@@ -2774,6 +2775,7 @@ export function attachListeners(
 
   function onMouseDown(e: MouseEvent) {
     if (e.button !== 0) return;
+    if (boardEl.querySelector(".card-edit-input")) return;
     if ((e.target as Element).closest("button,a,input,.promote-icon,.demote-btn")) return;
     const card = (e.target as Element).closest(".kanban-card") as HTMLElement | null;
     if (!card) return;

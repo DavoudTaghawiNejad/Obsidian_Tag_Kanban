@@ -336,7 +336,7 @@ function formatTriggerAnnotations(text, normRecurrent) {
   });
   text = text.replace(/\s{2,}/g, " ").trim();
   if (hasRecurrent || triggers.length) {
-    const label = triggers.length ? `\u21BB ${triggers.join(" \xB7 ")}` : "\u21BB";
+    const label = triggers.length ? `\u21BB ${triggers.join("\xB7")}` : "\u21BB";
     text += `<span class="kb-trigger-label" style="${TRIGGER_LINE_STYLE}cursor:pointer;text-decoration:underline dotted;">${label}</span>`;
   }
   return text;
@@ -2098,7 +2098,9 @@ function attachListeners(boardEl, config, app, refresh) {
       clearTouch();
       return;
     }
-    if (e.target.closest("button,a,.promote-icon,.demote-btn"))
+    if (boardEl.querySelector(".card-edit-input"))
+      return;
+    if (e.target.closest("button,a,input,textarea,.promote-icon,.demote-btn"))
       return;
     const card = e.target.closest(".kanban-card");
     touchStartX = e.touches[0].clientX;
@@ -2293,6 +2295,8 @@ function attachListeners(boardEl, config, app, refresh) {
   };
   function onMouseDown(e) {
     if (e.button !== 0)
+      return;
+    if (boardEl.querySelector(".card-edit-input"))
       return;
     if (e.target.closest("button,a,input,.promote-icon,.demote-btn"))
       return;
