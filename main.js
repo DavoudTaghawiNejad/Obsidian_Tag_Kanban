@@ -2482,6 +2482,32 @@ function attachListeners(boardEl, config, app, refresh) {
       requestAnimationFrame(() => setTimeout(refresh, 50));
     }
   }
+  function onObsidianLinkClick(e) {
+    const anchor = e.target.closest("a");
+    if (!anchor)
+      return;
+    const href = anchor.getAttribute("href") ?? "";
+    if (!href.startsWith("obsidian://open"))
+      return;
+    e.preventDefault();
+    e.stopPropagation();
+    try {
+      const url = new URL(href);
+      const file = url.searchParams.get("file") ?? "";
+      const section = url.searchParams.get("section") ?? "";
+      const linktext = (section ? `${file}#${section}` : file).replace(/\.md$/, "");
+      let mainLeaf = null;
+      app.workspace.iterateRootLeaves((leaf) => {
+        if (!mainLeaf)
+          mainLeaf = leaf;
+      });
+      if (mainLeaf)
+        app.workspace.setActiveLeaf(mainLeaf, { focus: true });
+      app.workspace.openLinkText(linktext, "", false);
+    } catch {
+    }
+  }
+  boardEl.addEventListener("click", onObsidianLinkClick, true);
   boardEl.addEventListener("mousedown", onMouseDown);
   boardEl.addEventListener("mousedown", onMidMouseDown);
   boardEl.addEventListener("mouseover", onMouseOver);
@@ -2502,6 +2528,7 @@ function attachListeners(boardEl, config, app, refresh) {
   boardEl.addEventListener("touchend", onTouchEnd, { passive: false });
   boardEl.addEventListener("touchcancel", clearTouch, { passive: true });
   return () => {
+    boardEl.removeEventListener("click", onObsidianLinkClick, true);
     boardEl.removeEventListener("mousedown", onMouseDown);
     boardEl.removeEventListener("mousedown", onMidMouseDown);
     ownerDoc().removeEventListener("mousemove", onMouseMove);
@@ -2723,6 +2750,13 @@ var KanbanPlugin = class extends import_obsidian3.Plugin {
   }
   async activateViewInWindow() {
     const { workspace } = this.app;
+    const rootLeaves = /* @__PURE__ */ new Set();
+    workspace.iterateRootLeaves((leaf2) => rootLeaves.add(leaf2));
+    const popoutLeaf = workspace.getLeavesOfType(VIEW_TYPE_KANBAN).find((leaf2) => !rootLeaves.has(leaf2));
+    if (popoutLeaf) {
+      workspace.revealLeaf(popoutLeaf);
+      return;
+    }
     const leaf = import_obsidian3.Platform.isMobile ? workspace.getLeaf(true) : workspace.openPopoutLeaf();
     await leaf.setViewState({ type: VIEW_TYPE_KANBAN, active: true });
     workspace.revealLeaf(leaf);

@@ -115,6 +115,19 @@ export default class KanbanPlugin extends Plugin {
 
   async activateViewInWindow() {
     const { workspace } = this.app;
+
+    // Find any existing Kanban leaf that lives in a popout (not in the main window).
+    const rootLeaves = new Set<WorkspaceLeaf>();
+    workspace.iterateRootLeaves((leaf) => rootLeaves.add(leaf));
+    const popoutLeaf = workspace
+      .getLeavesOfType(VIEW_TYPE_KANBAN)
+      .find((leaf) => !rootLeaves.has(leaf));
+
+    if (popoutLeaf) {
+      workspace.revealLeaf(popoutLeaf);
+      return;
+    }
+
     const leaf = Platform.isMobile
       ? workspace.getLeaf(true)
       : workspace.openPopoutLeaf();

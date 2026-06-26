@@ -2962,7 +2962,30 @@ export function attachListeners(
     }
   }
 
+  // Intercept obsidian:// links so they open via the API instead of triggering
+  // the OS protocol handler, which closes pop-out windows.
+  function onObsidianLinkClick(e: MouseEvent) {
+    const anchor = (e.target as Element).closest("a") as HTMLAnchorElement | null;
+    if (!anchor) return;
+    const href = anchor.getAttribute("href") ?? "";
+    if (!href.startsWith("obsidian://open")) return;
+    e.preventDefault();
+    e.stopPropagation();
+    try {
+      const url = new URL(href);
+      const file = url.searchParams.get("file") ?? "";
+      const section = url.searchParams.get("section") ?? "";
+      const linktext = (section ? `${file}#${section}` : file).replace(/\.md$/, "");
+      // Activate a main-window leaf first so the file opens there, not in the popout.
+      let mainLeaf: any = null;
+      app.workspace.iterateRootLeaves((leaf: any) => { if (!mainLeaf) mainLeaf = leaf; });
+      if (mainLeaf) app.workspace.setActiveLeaf(mainLeaf, { focus: true });
+      app.workspace.openLinkText(linktext, "", false);
+    } catch { /* ignore malformed URLs */ }
+  }
+
   // Attach all listeners
+  boardEl.addEventListener("click", onObsidianLinkClick, true);
   boardEl.addEventListener("mousedown", onMouseDown);
   boardEl.addEventListener("mousedown", onMidMouseDown);
   boardEl.addEventListener("mouseover", onMouseOver);
@@ -2984,6 +3007,7 @@ export function attachListeners(
   boardEl.addEventListener("touchcancel", clearTouch, { passive: true });
 
   return () => {
+    boardEl.removeEventListener("click", onObsidianLinkClick, true);
     boardEl.removeEventListener("mousedown", onMouseDown);
     boardEl.removeEventListener("mousedown", onMidMouseDown);
     ownerDoc().removeEventListener("mousemove", onMouseMove);
