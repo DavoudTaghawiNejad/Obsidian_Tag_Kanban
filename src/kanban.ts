@@ -22,11 +22,13 @@ export interface KanbanConfig {
   doneColumn: string;
   todayColumn: string;
   laterColumn: string;
+  recurrentColumn: string;
   newTaskInsert: string;
   normKanban: string[];
   normDone: string;
   normToday: string;
   normLater: string;
+  normRecurrent: string;
   normProject: string[];
   projectsDocument: string;
   allChildrenDoneColor: string;
@@ -59,6 +61,8 @@ export function buildConfig(settings: KanbanSettings): KanbanConfig {
     normDone: normalizeTag(settings.doneColumn),
     normToday: normalizeTag(settings.todayColumn),
     normLater: normalizeTag(settings.laterColumn),
+    recurrentColumn: settings.recurrentColumn || "#recurrent",
+    normRecurrent: normalizeTag(settings.recurrentColumn || "#recurrent"),
     normProject: (settings.projectColumns || []).map(normalizeTag),
     projectsDocument: settings.projectsDocument || "",
     allChildrenDoneColor: settings.allChildrenDoneColor,
@@ -300,6 +304,75 @@ function parseCardDate(text: string): Date | null {
   return isNaN(d.getTime()) ? null : d;
 }
 
+// ─── RECURRENT TRIGGER HELPERS ───────────────────────────────────────────────
+
+const TRIGGER_WEEKDAYS_SHORT = ['sun','mon','tue','wed','thu','fri','sat'];
+const TRIGGER_WEEKDAYS_FULL  = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
+const TRIGGER_MONTHS_SHORT   = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
+const TRIGGER_MONTHS_FULL    = ['january','february','march','april','may','june','july','august','september','october','november','december'];
+
+function hasRecurrentAnnotation(text: string, normRecurrent: string): boolean {
+  return new RegExp(`@${normRecurrent}\\b`, 'i').test(text);
+}
+
+// Extracts @word and @1-2-digit-number annotations, skipping @YYYY-MM-DD and @recurrent itself.
+function extractTriggerAnnotations(text: string, normRecurrent: string): string[] {
+  const matches = text.match(/@([a-zA-Z]+|\d{1,2})\b/g) || [];
+  return matches
+    .map((m: string) => m.slice(1).toLowerCase())
+    .filter((m: string) => m !== normRecurrent);
+}
+
+function matchesTriggerAnnotations(triggers: string[], today: Date): boolean {
+  if (!triggers.length) return false;
+  const todayWeekday = today.getDay();
+  const todayDate    = today.getDate();
+  const todayMonth   = today.getMonth();
+
+  for (const t of triggers) {
+    const wdShort = TRIGGER_WEEKDAYS_SHORT.indexOf(t);
+    if (wdShort !== -1) { if (wdShort === todayWeekday) return true; continue; }
+
+    const wdFull = TRIGGER_WEEKDAYS_FULL.indexOf(t);
+    if (wdFull !== -1) { if (wdFull === todayWeekday) return true; continue; }
+
+    const mShort = TRIGGER_MONTHS_SHORT.indexOf(t);
+    if (mShort !== -1) { if (mShort === todayMonth && todayDate === 1) return true; continue; }
+
+    const mFull = TRIGGER_MONTHS_FULL.indexOf(t);
+    if (mFull !== -1) { if (mFull === todayMonth && todayDate === 1) return true; continue; }
+
+    // Day-of-month: only match if the string is purely numeric (no letters)
+    if (/^\d{1,2}$/.test(t)) {
+      const dayNum = parseInt(t, 10);
+      if (dayNum >= 1 && dayNum <= 31 && dayNum === todayDate) return true;
+    }
+  }
+  return false;
+}
+
+function isValidTriggerToken(t: string): boolean {
+  return TRIGGER_WEEKDAYS_SHORT.includes(t) ||
+    TRIGGER_WEEKDAYS_FULL.includes(t) ||
+    TRIGGER_MONTHS_SHORT.includes(t) ||
+    TRIGGER_MONTHS_FULL.includes(t) ||
+    (/^\d{1,2}$/.test(t) && parseInt(t, 10) >= 1 && parseInt(t, 10) <= 31);
+}
+
+function hasValidTriggers(text: string, normRecurrent: string): boolean {
+  return extractTriggerAnnotations(text, normRecurrent).some(isValidTriggerToken);
+}
+
+// For #later: full-date ≤ today, OR trigger fires, OR undated+untriggered (move immediately).
+function isLaterDueToday(text: string, today: Date, normRecurrent: string): boolean {
+  const d = parseCardDate(text);
+  if (d) return d <= today;
+  const triggers = extractTriggerAnnotations(text, normRecurrent);
+  if (triggers.length) return matchesTriggerAnnotations(triggers, today);
+  return true; // undated, no triggers → move to today immediately
+}
+
+
 function getNextMonday(): Date {
   const d = new Date();
   d.setHours(0, 0, 0, 0);
@@ -319,6 +392,30 @@ function getDefaultDate(existing: Date | null = null): Date {
 }
 
 // ─── DATE FORMATTING ─────────────────────────────────────────────────────────
+
+const TRIGGER_LINE_STYLE = `display:block;font-size:.8em;color:var(--kb-date-color);font-family:var(--kb-date-font);margin-top:2px;`;
+
+function formatTriggerAnnotations(text: string, normRecurrent: string): string {
+  if (!normRecurrent) return text;
+
+  let hasRecurrent = false;
+  const triggers: string[] = [];
+
+  text = text.replace(new RegExp(`@${normRecurrent}\\b`, 'gi'), () => { hasRecurrent = true; return ''; });
+  text = text.replace(/@([a-zA-Z]+|\d{1,2})\b/g, (match, token) => {
+    const t = token.toLowerCase();
+    if (isValidTriggerToken(t)) { triggers.push(t); return ''; }
+    return match;
+  });
+  text = text.replace(/\s{2,}/g, ' ').trim();
+
+  if (hasRecurrent || triggers.length) {
+    const label = triggers.length ? `↻ ${triggers.join(' ')}` : '↻';
+    text += `<span style="${TRIGGER_LINE_STYLE}">${label}</span>`;
+  }
+
+  return text;
+}
 
 function formatCardDateAnnotation(text: string): string {
   return text.replace(/@(\d{4})-(\d{2})-(\d{2})\b/g, (_, y, m, d) => {
@@ -494,7 +591,8 @@ async function moveToColumn(
   config: KanbanConfig,
   dateStrToAppend: string | null = null,
   newDigits: string | null = null,
-  newState: "expanded" | "collapsed" | null = null
+  newState: "expanded" | "collapsed" | null = null,
+  triggerAnnotation: string | null = null
 ): Promise<boolean> {
   try {
     const { tFile, lines } = await readFileLines(app, filePath);
@@ -518,6 +616,17 @@ async function moveToColumn(
 
     parsed.tags = parsed.tags.filter((t) => !config.normKanban.includes(normalizeTag(t)));
     parsed.tags.push(targetTag);
+
+    if (config.normRecurrent && normalizeTag(targetTag) === config.normRecurrent) {
+      const annRe = new RegExp(`@${config.normRecurrent}\\b`, 'i');
+      if (!annRe.test(parsed.text)) parsed.text += ` @${config.normRecurrent}`;
+      if (triggerAnnotation) {
+        for (const tok of triggerAnnotation.trim().split(/\s+/)) {
+          const tokRe = new RegExp(`@${tok.replace(/^@/, '')}\\b`, 'i');
+          if (!tokRe.test(parsed.text)) parsed.text += ` ${tok}`;
+        }
+      }
+    }
 
     if (parsed.checked !== null) parsed.checked = isDone;
     if (dateStrToAppend) parsed.date = dateStrToAppend;
@@ -709,10 +818,17 @@ async function archiveToSection(
     function archiveLine(idx: number, tickBox: boolean) {
       if (idx < 0 || idx >= lines.length) return;
       const parsed = parseTaskLine(lines[idx]);
-      if (tickBox && parsed.checked !== null) parsed.checked = true;
       parsed.tags = parsed.tags.filter((t) => !config.normKanban.includes(normalizeTag(t)));
       parsed.orderDigits = null;
       parsed.orderState = null;
+      if (config.normRecurrent && hasRecurrentAnnotation(lines[idx], config.normRecurrent)) {
+        // Reset recurrent card: uncheck, clear done-date, restore #recurrent tag
+        if (parsed.checked !== null) parsed.checked = false;
+        parsed.doneDate = null;
+        parsed.tags.push(config.recurrentColumn);
+      } else {
+        if (tickBox && parsed.checked !== null) parsed.checked = true;
+      }
       lines[idx] = serializeTaskLine(parsed);
     }
 
@@ -1237,6 +1353,37 @@ function showLaterAddDialog(
   textInput.focus();
 }
 
+function showRecurrentTriggerDialog(onSubmit: (trigger: string) => void) {
+  const { dialog, close } = makeOverlay("kanban-recurrent-trigger-dialog");
+  dialog.innerHTML = `
+    <h3 style="margin:0 0 6px;font-size:1.1em;">Set recurrence trigger</h3>
+    <p style="margin:0 0 10px;font-size:.85em;color:var(--text-muted);">Weekday (mon–sun), day of month (1–31), or month (jan–dec). Multiple allowed.</p>
+    <input id="k-trigger" type="text" placeholder="e.g. mon, 15, jan" style="${inputStyle()}" autofocus>
+    <p id="k-trigger-err" style="margin:2px 0 8px;font-size:.82em;color:#e03e3e;min-height:1.2em;"></p>
+    <div style="display:flex;gap:10px;justify-content:center;">${buttonHtml("Set", true)}${buttonHtml("Cancel", false)}</div>`;
+
+  const [setBtn, cancelBtn] = dialog.querySelectorAll("button");
+  const input = dialog.querySelector("#k-trigger") as HTMLInputElement;
+  const errEl = dialog.querySelector("#k-trigger-err") as HTMLElement;
+
+  const submit = () => {
+    const tokens = input.value.split(/[\s,]+/).map(t => t.trim().replace(/^@/, "").toLowerCase()).filter(Boolean);
+    if (!tokens.length || !tokens.every(isValidTriggerToken)) {
+      errEl.textContent = "Enter a valid weekday (mon–sun), day (1–31), or month (jan–dec).";
+      return;
+    }
+    close();
+    onSubmit(tokens.map(t => `@${t}`).join(" "));
+  };
+  setBtn.onclick = submit;
+  cancelBtn.onclick = close;
+  input.onkeydown = (e) => {
+    if (e.key === "Enter") submit();
+    if (e.key === "Escape") close();
+  };
+  input.focus();
+}
+
 // ─── CARD HTML ────────────────────────────────────────────────────────────────
 
 function createCardHTML(
@@ -1262,7 +1409,7 @@ function createCardHTML(
     .replace(/^- \[[ xX]\] /, "")
     .replace(/^[-*+]\s+/, "")
     .trim();
-  const mainContent = linksToHtml(formatCardDateAnnotation(rawText), vaultName);
+  const mainContent = linksToHtml(formatCardDateAnnotation(formatTriggerAnnotations(rawText, config.normRecurrent)), vaultName);
 
   const hasSubs = item.item.subs.length > 0; // structural (any subs at all, for expand/collapse)
   const isExpanded = item.state === "expanded";
@@ -1427,6 +1574,28 @@ function buildColorCSS(config: KanbanConfig): string {
     ${perColRules}`;
 }
 
+async function tagUntaggedRecurrentCards(app: App, paths: string[], config: KanbanConfig): Promise<void> {
+  const annotationRe = new RegExp(`@${config.normRecurrent}\\b`, 'i');
+  for (const filePath of paths) {
+    const tFile = app.vault.getAbstractFileByPath(filePath) as TFile | null;
+    if (!tFile) continue;
+    let raw: string;
+    try { raw = await app.vault.read(tFile); } catch { continue; }
+    const lines = raw.split('\n');
+    let changed = false;
+    for (let i = 0; i < lines.length; i++) {
+      if (!annotationRe.test(lines[i])) continue;
+      const tags = extractTags(lines[i]);
+      if (tags.some((t: string) => config.normKanban.includes(normalizeTag(t)))) continue;
+      const parsed = parseTaskLine(lines[i]);
+      parsed.tags.push(config.recurrentColumn);
+      lines[i] = serializeTaskLine(parsed);
+      changed = true;
+    }
+    if (changed) await app.vault.modify(tFile, lines.join('\n'));
+  }
+}
+
 export function refreshColorVars(config: KanbanConfig): void {
   const el = document.getElementById("kanban-color-vars") as HTMLStyleElement | null;
   if (el) el.textContent = buildColorCSS(config);
@@ -1440,31 +1609,42 @@ export async function buildBoard(
 ): Promise<void> {
   const vaultName = app.vault.getName();
 
-  // Auto-move past/undated "later" items → default column
   const paths = await getTargetFilePaths(app, config);
-  let items = await collectItems(app, paths, config);
   const today = new Date();
   today.setHours(0, 0, 0, 0);
+
+  // Step A: tag @recurrent cards that have no kanban tag yet → add #recurrent
+  if (config.normRecurrent) {
+    await tagUntaggedRecurrentCards(app, paths, config);
+  }
+
+  let items = await collectItems(app, paths, config);
+
+  // Auto-move past/undated #later items and triggered #later items → today column
   const laterToMove = items.filter(
     (i) =>
       i.item.tags.some((t: string) => normalizeTag(t) === config.normLater) &&
-      (() => {
-        const d = parseCardDate(i.item.text);
-        return !d || d <= today;
-      })()
+      isLaterDueToday(i.item.text, today, config.normRecurrent)
   );
   if (laterToMove.length) {
     for (const item of laterToMove)
-      await moveToColumn(
-        app,
-        item.filePath,
-        item.item.line,
-        item.item.tags,
-        config.todayColumn,
-        false,
-        config
-      );
+      await moveToColumn(app, item.filePath, item.item.line, item.item.tags, config.todayColumn, false, config);
     items = await collectItems(app, paths, config);
+  }
+
+  // Step B: move triggered #recurrent cards → today column
+  if (config.normRecurrent) {
+    const recurrentToMove = items.filter(
+      (i) =>
+        i.item.tags.some((t: string) => normalizeTag(t) === config.normRecurrent) &&
+        hasRecurrentAnnotation(i.item.text, config.normRecurrent) &&
+        matchesTriggerAnnotations(extractTriggerAnnotations(i.item.text, config.normRecurrent), today)
+    );
+    if (recurrentToMove.length) {
+      for (const item of recurrentToMove)
+        await moveToColumn(app, item.filePath, item.item.line, item.item.tags, config.todayColumn, false, config);
+      items = await collectItems(app, paths, config);
+    }
   }
 
   const columns = groupByColumns(items, config);
@@ -1801,7 +1981,19 @@ export function attachListeners(
       .replace(/^#/, "")
       .replace(/\b\w/g, (l: string) => l.toUpperCase());
 
-    if (targetNorm === config.normLater) {
+    if (config.normRecurrent && targetNorm === config.normRecurrent) {
+      const { lines } = await readFileLines(app, card.filePath);
+      const lineTxt = lines[card.lineNum - 1] || "";
+      if (!hasValidTriggers(lineTxt, config.normRecurrent)) {
+        showRecurrentTriggerDialog(async (trigger) => {
+          await moveToColumn(app, card.filePath, card.lineNum, card.originalTags, targetTag, false, config, null, newCalc.digits, newState, trigger);
+          requestAnimationFrame(() => setTimeout(refresh, 50));
+        });
+        return;
+      }
+      const ok = await moveToColumn(app, card.filePath, card.lineNum, card.originalTags, targetTag, false, config, null, newCalc.digits, newState);
+      if (ok) requestAnimationFrame(() => setTimeout(refresh, 50));
+    } else if (targetNorm === config.normLater) {
       const { lines } = await readFileLines(app, card.filePath);
       const lineTxt = lines[card.lineNum - 1] || "";
       const dateMatch = lineTxt
@@ -2507,6 +2699,12 @@ export function attachListeners(
     if (norm === config.normLater) {
       showLaterAddDialog(title, isProject, async (text: string, dateStr: string, createDoc: boolean) => {
         if (await addNewItem(app, config.newTaskInsert, tag, text, dateStr, config, createDoc))
+          requestAnimationFrame(() => setTimeout(refresh, 50));
+      });
+    } else if (config.normRecurrent && norm === config.normRecurrent) {
+      showInputDialog(title, isProject, async (text: string, createDoc: boolean) => {
+        const annotated = `${text} @${config.normRecurrent}`;
+        if (await addNewItem(app, config.newTaskInsert, tag, annotated, null, config, createDoc))
           requestAnimationFrame(() => setTimeout(refresh, 50));
       });
     } else {

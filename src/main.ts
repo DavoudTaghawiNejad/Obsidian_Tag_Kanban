@@ -6,6 +6,7 @@ export interface KanbanSettings {
   doneColumn: string;
   todayColumn: string;
   laterColumn: string;
+  recurrentColumn: string;
   newTaskInsert: string;
   parentPages: string[];
   allVaultNotes: boolean;
@@ -28,10 +29,11 @@ export interface KanbanSettings {
 }
 
 export const DEFAULT_SETTINGS: KanbanSettings = {
-  kanban: ["#todo", "#inprogress", "#later", "#done"],
+  kanban: ["#todo", "#inprogress", "#later", "#done", "#recurrent"],
   doneColumn: "#done",
   todayColumn: "#today",
   laterColumn: "#later",
+  recurrentColumn: "#recurrent",
   newTaskInsert: "Tasks",
   parentPages: [],
   allVaultNotes: true,
@@ -190,6 +192,19 @@ class KanbanSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.laterColumn)
           .onChange(async (value) => {
             this.plugin.settings.laterColumn = value.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Recurrent column")
+      .setDesc("Tag for the recurrent column. Cards with a matching @annotation and no other kanban tag are automatically placed here. Must be included in 'Kanban columns'.")
+      .addText((text) =>
+        text
+          .setPlaceholder("#recurrent")
+          .setValue(this.plugin.settings.recurrentColumn)
+          .onChange(async (value) => {
+            this.plugin.settings.recurrentColumn = value.trim();
             await this.plugin.saveSettings();
           })
       );
