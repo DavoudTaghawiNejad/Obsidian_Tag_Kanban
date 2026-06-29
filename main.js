@@ -553,7 +553,7 @@ async function editCardText(app, filePath, lineNum, newText) {
     return false;
   }
 }
-async function moveToColumn(app, filePath, lineNum, originalTags, targetTag, isDone, config, dateStrToAppend = null, newDigits = null, newState = null, triggerAnnotation = null) {
+async function moveToColumn(app, filePath, lineNum, originalTags, targetTag, isDone, config, dateStrToAppend = null, newDigits = null, newState = null, triggerAnnotation = null, clearDate = false) {
   try {
     const { tFile, lines } = await readFileLines(app, filePath);
     const sortedOrig = originalTags.slice().sort().join(",");
@@ -585,6 +585,8 @@ async function moveToColumn(app, filePath, lineNum, originalTags, targetTag, isD
     }
     if (parsed.checked !== null)
       parsed.checked = isDone;
+    if (clearDate)
+      parsed.date = null;
     if (dateStrToAppend)
       parsed.date = dateStrToAppend;
     if (isDone) {
@@ -1570,7 +1572,7 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
   );
   if (laterToMove.length) {
     for (const item of laterToMove)
-      await moveToColumn(app, item.filePath, item.item.line, item.item.tags, config.todayColumn, false, config);
+      await moveToColumn(app, item.filePath, item.item.line, item.item.tags, config.todayColumn, false, config, null, null, null, null, true);
     items = await collectItems(app, paths, config);
   }
   if (config.normRecurrent) {

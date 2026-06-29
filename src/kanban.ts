@@ -715,7 +715,8 @@ async function moveToColumn(
   dateStrToAppend: string | null = null,
   newDigits: string | null = null,
   newState: "expanded" | "collapsed" | null = null,
-  triggerAnnotation: string | null = null
+  triggerAnnotation: string | null = null,
+  clearDate: boolean = false
 ): Promise<boolean> {
   try {
     const { tFile, lines } = await readFileLines(app, filePath);
@@ -752,6 +753,7 @@ async function moveToColumn(
     }
 
     if (parsed.checked !== null) parsed.checked = isDone;
+    if (clearDate) parsed.date = null;
     if (dateStrToAppend) parsed.date = dateStrToAppend;
     if (isDone) {
       const n = new Date();
@@ -1961,7 +1963,7 @@ export async function buildBoard(
   );
   if (laterToMove.length) {
     for (const item of laterToMove)
-      await moveToColumn(app, item.filePath, item.item.line, item.item.tags, config.todayColumn, false, config);
+      await moveToColumn(app, item.filePath, item.item.line, item.item.tags, config.todayColumn, false, config, null, null, null, null, true);
     items = await collectItems(app, paths, config);
   }
 
