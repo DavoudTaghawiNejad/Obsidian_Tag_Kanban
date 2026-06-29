@@ -1400,6 +1400,51 @@ function showRecurrentTriggerDialog(onSubmit, existingTriggers = []) {
       close();
   });
 }
+function showSubtaskDialog(onSubmit) {
+  const { dialog, close } = makeOverlay("kanban-subtask-dialog");
+  dialog.innerHTML = `<h3 style="margin:0 0 10px;font-size:1.1em;">Add subtask</h3>
+    <input id="k-text" type="text" placeholder="Enter subtask text..." style="${inputStyle()}" autofocus>
+    <div style="display:flex;gap:10px;justify-content:center;">${buttonHtml("Add", true)}${buttonHtml("Cancel", false)}</div>`;
+  const [addBtn, cancelBtn] = dialog.querySelectorAll("button");
+  const input = dialog.querySelector("#k-text");
+  const submit = () => {
+    const v = input.value.trim();
+    close();
+    if (v)
+      onSubmit(v);
+  };
+  addBtn.onclick = submit;
+  cancelBtn.onclick = close;
+  input.onkeydown = (e) => {
+    if (e.key === "Enter")
+      submit();
+    if (e.key === "Escape")
+      close();
+  };
+  input.focus();
+}
+async function addSubtaskToCard(app, filePath, afterLine, cardLine, text) {
+  try {
+    const { tFile, lines } = await readFileLines(app, filePath);
+    const cardIndent = (lines[cardLine - 1]?.match(/^(\s*)/) ?? ["", ""])[1];
+    lines.splice(afterLine, 0, `${cardIndent}  - [ ] ${text}`);
+    await writeFileLines(app, tFile, lines);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function maxSubLine(subs) {
+  let max = 0;
+  for (const s of subs ?? []) {
+    if (s.line > max)
+      max = s.line;
+    const m = maxSubLine(s.subs);
+    if (m > max)
+      max = m;
+  }
+  return max;
+}
 function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
   let display = item.item.text;
   const tagToRemove = extractTags(display).find(
@@ -1479,6 +1524,8 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
   function renderSubTree(subs, depth = 0) {
     return (subs || []).map((sub) => renderSub(sub, depth) + renderSubTree(sub.subs, depth + 1)).join("");
   }
+  const addSubBtnStyle = `width:24px;height:24px;border-radius:50%;border:1px solid var(--background-modifier-border);background:none;cursor:pointer;font-size:1.1em;line-height:1;display:inline-flex;align-items:center;justify-content:center;color:inherit;`;
+  const addSubBtn = `<button class="kb-add-sub" style="${addSubBtnStyle}">+</button>`;
   const bodyHTML = hasSubs ? `<div style="position:relative;">
          <div class="card-title" style="padding:6px 32px 6px 0;font-weight:600;cursor:pointer;color:var(--kb-text);"
               onclick="this.closest('.kanban-card').querySelector('details').toggleAttribute('open')">
@@ -1488,16 +1535,22 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
          <details ${isExpanded ? "open" : ""} style="margin:4px 0 0 0;">
            <summary style="display:none;"></summary>
            <div style="padding-left:8px;">${renderSubTree(item.item.subs)}</div>
+           <div style="display:flex;justify-content:flex-end;margin-top:4px;">${addSubBtn}</div>
          </details>
-       </div>` : `<div class="card-title" style="padding:6px 0;font-weight:600;color:var(--kb-text);">${mainContent}</div>`;
+       </div>` : `<div style="position:relative;">
+         <div class="card-title" style="padding:6px 36px 6px 0;font-weight:600;color:var(--kb-text);">${mainContent}</div>
+         <button class="kb-add-sub" style="${addSubBtnStyle}position:absolute;top:4px;right:0;">+</button>
+       </div>`;
   const border = isMulti ? "background:var(--background-modifier-error-hover);border:1px solid var(--background-modifier-error);" : hasUnmanagedWork ? `border:2px solid var(--kb-children-done);background:color-mix(in srgb,var(--kb-children-done) 20%,var(--kb-card-bg));` : allSubsChecked ? `border:2px solid var(--kb-all-checked);background:color-mix(in srgb,var(--kb-all-checked) 20%,var(--kb-card-bg));` : "border:1px solid var(--background-modifier-border);";
   const src = item.source.path.split("/").pop().replace(/\.md$/, "");
   const href = `obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(item.filePath)}`;
   const badge = `<div style="margin-top:8px;font-size:.8em;color:var(--kb-text);">
     from: <a href="${href}" style="color:var(--kb-link);text-decoration:none;">${src}</a></div>`;
+  const lastSubLn = maxSubLine(item.item.subs) || item.item.line;
   return `<div class="kanban-card"
     data-file="${item.filePath}"
     data-line="${item.item.line}"
+    data-last-sub-line="${lastSubLn}"
     data-raw="${rawText.replace(/"/g, "&quot;")}"
     data-order="${item.order || ""}"
     data-digits="${item.digits || ""}"
@@ -2060,6 +2113,43 @@ function attachListeners(boardEl, config, app, refresh) {
     lines[subLineNum - 1] = serializeTaskLine(parsed);
     await writeFileLines(app, tFile, lines);
     refresh();
+  }
+  async function onAddSubClick(e) {
+    const btn = e.target.closest(".kb-add-sub");
+    if (!btn)
+      return;
+    e.stopPropagation();
+    const card = btn.closest(".kanban-card");
+    if (!card)
+      return;
+    const filePath = card.dataset.file;
+    const cardLine = parseInt(card.dataset.line, 10);
+    const afterLine = parseInt(card.dataset.lastSubLine, 10);
+    const tags = JSON.parse(card.dataset.tags || "[]");
+    const normTags = tags.map(normalizeTag);
+    const isLater = normTags.some((t) => t === config.normLater);
+    const isRecurrent = !!(config.normRecurrent && normTags.some((t) => t === config.normRecurrent));
+    const doAdd = async (text) => {
+      if (await addSubtaskToCard(app, filePath, afterLine, cardLine, text))
+        requestAnimationFrame(() => setTimeout(refresh, 50));
+    };
+    showSubtaskDialog(async (text) => {
+      if (isLater) {
+        const defDate = getDefaultDate().toISOString().split("T")[0];
+        showDateDialog("Set date for subtask", defDate, async (dateStr) => {
+          await doAdd(dateStr ? `${text} ${dateStr}` : text);
+        });
+      } else if (isRecurrent) {
+        showRecurrentTriggerDialog(async (triggerStr) => {
+          const n = new Date();
+          const skipStr = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
+          const triggerPart = triggerStr ? ` ${triggerStr}` : "";
+          await doAdd(`${text} @${config.normRecurrent}${triggerPart} %% @skip:${skipStr} %%`);
+        });
+      } else {
+        await doAdd(text);
+      }
+    });
   }
   async function onPromoteClick(e) {
     const icon = e.target.closest(".promote-icon");
@@ -2779,6 +2869,7 @@ function attachListeners(boardEl, config, app, refresh) {
   boardEl.addEventListener("click", onDateLabelClick);
   boardEl.addEventListener("click", onTriggerLabelClick);
   boardEl.addEventListener("click", onCardClick);
+  boardEl.addEventListener("click", onAddSubClick);
   boardEl.addEventListener("click", onPromoteClick);
   boardEl.addEventListener("click", onDemoteClick);
   boardEl.addEventListener("click", onTabClick);
@@ -2804,6 +2895,7 @@ function attachListeners(boardEl, config, app, refresh) {
     boardEl.removeEventListener("click", onDateLabelClick);
     boardEl.removeEventListener("click", onTriggerLabelClick);
     boardEl.removeEventListener("click", onCardClick);
+    boardEl.removeEventListener("click", onAddSubClick);
     boardEl.removeEventListener("click", onPromoteClick);
     boardEl.removeEventListener("click", onDemoteClick);
     boardEl.removeEventListener("click", onTabClick);

@@ -1728,6 +1728,42 @@ function showRecurrentTriggerDialog(onSubmit: (trigger: string) => void, existin
   });
 }
 
+function showSubtaskDialog(onSubmit: (text: string) => void) {
+  const { dialog, close } = makeOverlay("kanban-subtask-dialog");
+  dialog.innerHTML = `<h3 style="margin:0 0 10px;font-size:1.1em;">Add subtask</h3>
+    <input id="k-text" type="text" placeholder="Enter subtask text..." style="${inputStyle()}" autofocus>
+    <div style="display:flex;gap:10px;justify-content:center;">${buttonHtml("Add", true)}${buttonHtml("Cancel", false)}</div>`;
+  const [addBtn, cancelBtn] = dialog.querySelectorAll("button");
+  const input = dialog.querySelector("#k-text") as HTMLInputElement;
+  const submit = () => { const v = input.value.trim(); close(); if (v) onSubmit(v); };
+  addBtn.onclick = submit;
+  cancelBtn.onclick = close;
+  input.onkeydown = (e) => { if (e.key === "Enter") submit(); if (e.key === "Escape") close(); };
+  input.focus();
+}
+
+async function addSubtaskToCard(
+  app: App, filePath: string, afterLine: number, cardLine: number, text: string
+): Promise<boolean> {
+  try {
+    const { tFile, lines } = await readFileLines(app, filePath);
+    const cardIndent = (lines[cardLine - 1]?.match(/^(\s*)/) ?? ["",""])[1];
+    lines.splice(afterLine, 0, `${cardIndent}  - [ ] ${text}`);
+    await writeFileLines(app, tFile, lines);
+    return true;
+  } catch { return false; }
+}
+
+function maxSubLine(subs: any[]): number {
+  let max = 0;
+  for (const s of subs ?? []) {
+    if (s.line > max) max = s.line;
+    const m = maxSubLine(s.subs);
+    if (m > max) max = m;
+  }
+  return max;
+}
+
 // ─── CARD HTML ────────────────────────────────────────────────────────────────
 
 function createCardHTML(
@@ -1839,6 +1875,9 @@ function createCardHTML(
       .join("");
   }
 
+  const addSubBtnStyle = `width:24px;height:24px;border-radius:50%;border:1px solid var(--background-modifier-border);background:none;cursor:pointer;font-size:1.1em;line-height:1;display:inline-flex;align-items:center;justify-content:center;color:inherit;`;
+  const addSubBtn = `<button class="kb-add-sub" style="${addSubBtnStyle}">+</button>`;
+
   const bodyHTML = hasSubs
     ? `<div style="position:relative;">
          <div class="card-title" style="padding:6px 32px 6px 0;font-weight:600;cursor:pointer;color:var(--kb-text);"
@@ -1849,9 +1888,13 @@ function createCardHTML(
          <details ${isExpanded ? "open" : ""} style="margin:4px 0 0 0;">
            <summary style="display:none;"></summary>
            <div style="padding-left:8px;">${renderSubTree(item.item.subs)}</div>
+           <div style="display:flex;justify-content:flex-end;margin-top:4px;">${addSubBtn}</div>
          </details>
        </div>`
-    : `<div class="card-title" style="padding:6px 0;font-weight:600;color:var(--kb-text);">${mainContent}</div>`;
+    : `<div style="position:relative;">
+         <div class="card-title" style="padding:6px 36px 6px 0;font-weight:600;color:var(--kb-text);">${mainContent}</div>
+         <button class="kb-add-sub" style="${addSubBtnStyle}position:absolute;top:4px;right:0;">+</button>
+       </div>`;
 
   const border = isMulti
     ? "background:var(--background-modifier-error-hover);border:1px solid var(--background-modifier-error);"
@@ -1866,9 +1909,12 @@ function createCardHTML(
   const badge = `<div style="margin-top:8px;font-size:.8em;color:var(--kb-text);">
     from: <a href="${href}" style="color:var(--kb-link);text-decoration:none;">${src}</a></div>`;
 
+  const lastSubLn = maxSubLine(item.item.subs) || item.item.line;
+
   return `<div class="kanban-card"
     data-file="${item.filePath}"
     data-line="${item.item.line}"
+    data-last-sub-line="${lastSubLn}"
     data-raw="${rawText.replace(/"/g, "&quot;")}"
     data-order="${item.order || ""}"
     data-digits="${item.digits || ""}"
@@ -2493,6 +2539,46 @@ export function attachListeners(
     lines[subLineNum - 1] = serializeTaskLine(parsed);
     await writeFileLines(app, tFile, lines);
     refresh();
+  }
+
+  // ── Add subtask button ──
+  async function onAddSubClick(e: Event) {
+    const btn = (e.target as Element).closest(".kb-add-sub") as HTMLElement | null;
+    if (!btn) return;
+    e.stopPropagation();
+    const card = btn.closest(".kanban-card") as HTMLElement | null;
+    if (!card) return;
+
+    const filePath = card.dataset.file!;
+    const cardLine = parseInt(card.dataset.line!, 10);
+    const afterLine = parseInt(card.dataset.lastSubLine!, 10);
+    const tags: string[] = JSON.parse(card.dataset.tags || "[]");
+    const normTags = tags.map(normalizeTag);
+    const isLater = normTags.some(t => t === config.normLater);
+    const isRecurrent = !!(config.normRecurrent && normTags.some(t => t === config.normRecurrent));
+
+    const doAdd = async (text: string) => {
+      if (await addSubtaskToCard(app, filePath, afterLine, cardLine, text))
+        requestAnimationFrame(() => setTimeout(refresh, 50));
+    };
+
+    showSubtaskDialog(async (text) => {
+      if (isLater) {
+        const defDate = getDefaultDate().toISOString().split("T")[0];
+        showDateDialog("Set date for subtask", defDate, async (dateStr) => {
+          await doAdd(dateStr ? `${text} ${dateStr}` : text);
+        });
+      } else if (isRecurrent) {
+        showRecurrentTriggerDialog(async (triggerStr) => {
+          const n = new Date();
+          const skipStr = `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;
+          const triggerPart = triggerStr ? ` ${triggerStr}` : '';
+          await doAdd(`${text} @${config.normRecurrent}${triggerPart} %% @skip:${skipStr} %%`);
+        });
+      } else {
+        await doAdd(text);
+      }
+    });
   }
 
   // ── Promote icon ──
@@ -3242,6 +3328,7 @@ export function attachListeners(
   boardEl.addEventListener("click", onDateLabelClick);
   boardEl.addEventListener("click", onTriggerLabelClick);
   boardEl.addEventListener("click", onCardClick);
+  boardEl.addEventListener("click", onAddSubClick);
   boardEl.addEventListener("click", onPromoteClick);
   boardEl.addEventListener("click", onDemoteClick);
   boardEl.addEventListener("click", onTabClick);
@@ -3268,6 +3355,7 @@ export function attachListeners(
     boardEl.removeEventListener("click", onDateLabelClick);
     boardEl.removeEventListener("click", onTriggerLabelClick);
     boardEl.removeEventListener("click", onCardClick);
+    boardEl.removeEventListener("click", onAddSubClick);
     boardEl.removeEventListener("click", onPromoteClick);
     boardEl.removeEventListener("click", onDemoteClick);
     boardEl.removeEventListener("click", onTabClick);
