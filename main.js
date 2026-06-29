@@ -330,6 +330,40 @@ async function addTagAndSkipDate(app, filePath, lineNum, tag, dateStr) {
   } catch {
   }
 }
+async function addTagAndClearDate(app, filePath, lineNum, tag) {
+  try {
+    const { tFile, lines } = await readFileLines(app, filePath);
+    const idx = lineNum - 1;
+    if (idx < 0 || idx >= lines.length)
+      return;
+    const parsed = parseTaskLine(lines[idx]);
+    if (!parsed.tags.includes(tag))
+      parsed.tags.push(tag);
+    parsed.date = null;
+    lines[idx] = serializeTaskLine(parsed);
+    await writeFileLines(app, tFile, lines);
+  } catch {
+  }
+}
+async function triggerDatedLaterSubs(app, subs, filePath, config, today) {
+  if (!subs || !subs.length)
+    return false;
+  let changed = false;
+  for (const sub of subs) {
+    if (!sub.tags.some((t) => config.normKanban.includes(normalizeTag(t)))) {
+      const d = parseCardDate(sub.text);
+      if (d && d <= today) {
+        await addTagAndClearDate(app, filePath, sub.line, config.todayColumn);
+        changed = true;
+      }
+    }
+    if (sub.subs?.length) {
+      if (await triggerDatedLaterSubs(app, sub.subs, filePath, config, today))
+        changed = true;
+    }
+  }
+  return changed;
+}
 async function triggerRecurrentSubs(app, subs, filePath, config, today, todayStr) {
   if (!subs || !subs.length)
     return false;
@@ -348,11 +382,22 @@ async function triggerRecurrentSubs(app, subs, filePath, config, today, todayStr
   }
   return changed;
 }
+function hasDatedSub(subs) {
+  if (!subs?.length)
+    return false;
+  for (const sub of subs) {
+    if (parseCardDate(sub.text))
+      return true;
+    if (hasDatedSub(sub.subs))
+      return true;
+  }
+  return false;
+}
 function isLaterDueToday(text, today, normRecurrent) {
   const d = parseCardDate(text);
   if (d)
     return d <= today;
-  const triggers = extractTriggerAnnotations(text, normRecurrent);
+  const triggers = extractTriggerAnnotations(text, normRecurrent).filter(isValidTriggerToken);
   if (triggers.length)
     return matchesTriggerAnnotations(triggers, today);
   return true;
@@ -590,8 +635,8 @@ async function moveToColumn(app, filePath, lineNum, originalTags, targetTag, isD
     if (dateStrToAppend)
       parsed.date = dateStrToAppend;
     if (isDone) {
-      const n = new Date();
-      parsed.doneDate = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
+      const n2 = new Date();
+      parsed.doneDate = `${n2.getFullYear()}-${String(n2.getMonth() + 1).padStart(2, "0")}-${String(n2.getDate()).padStart(2, "0")}`;
     } else {
       parsed.doneDate = null;
     }
@@ -600,9 +645,12 @@ async function moveToColumn(app, filePath, lineNum, originalTags, targetTag, isD
       parsed.orderState = newState ?? ([config.normDone, config.normLater].includes(normalizeTag(targetTag)) ? "collapsed" : "expanded");
     }
     lines[idx] = serializeTaskLine(parsed);
+    const n = new Date();
+    const skipStr = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
     if (config.normRecurrent && normalizeTag(targetTag) === config.normRecurrent) {
-      const n = new Date();
-      const skipStr = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
+      lines[idx] = setSkipDate(lines[idx], skipStr);
+    }
+    if (normalizeTag(targetTag) === config.normLater && !parsed.date) {
       lines[idx] = setSkipDate(lines[idx], skipStr);
     }
     await writeFileLines(app, tFile, lines);
@@ -628,9 +676,15 @@ async function addNewItem(app, rawInsertTarget, columnTag, userText, dateStr, co
       let newLine2 = `- [ ] ${cardText} ${columnTag}`;
       if (dateStr)
         newLine2 += ` ${dateStr}`;
-      if (config.normRecurrent && normalizeTag(columnTag) === config.normRecurrent && !hasValidTriggers(newLine2, config.normRecurrent) && !extractSkipDate(newLine2)) {
+      {
         const n = new Date();
-        newLine2 = setSkipDate(newLine2, `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`);
+        const skipStr = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
+        if (config.normRecurrent && normalizeTag(columnTag) === config.normRecurrent && !hasValidTriggers(newLine2, config.normRecurrent) && !extractSkipDate(newLine2)) {
+          newLine2 = setSkipDate(newLine2, skipStr);
+        }
+        if (normalizeTag(columnTag) === config.normLater && !dateStr) {
+          newLine2 = setSkipDate(newLine2, skipStr);
+        }
       }
       const projLines = (await app.vault.read(projFile)).split("\n");
       projLines.splice(afterFrontMatter(projLines), 0, newLine2);
@@ -679,9 +733,15 @@ async function addNewItem(app, rawInsertTarget, columnTag, userText, dateStr, co
     let newLine = `- [ ] ${cardText} ${columnTag}`;
     if (dateStr)
       newLine += ` ${dateStr}`;
-    if (config.normRecurrent && normalizeTag(columnTag) === config.normRecurrent && !hasValidTriggers(newLine, config.normRecurrent) && !extractSkipDate(newLine)) {
+    {
       const n = new Date();
-      newLine = setSkipDate(newLine, `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`);
+      const skipStr = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
+      if (config.normRecurrent && normalizeTag(columnTag) === config.normRecurrent && !hasValidTriggers(newLine, config.normRecurrent) && !extractSkipDate(newLine)) {
+        newLine = setSkipDate(newLine, skipStr);
+      }
+      if (normalizeTag(columnTag) === config.normLater && !dateStr) {
+        newLine = setSkipDate(newLine, skipStr);
+      }
     }
     const monthlyLines = (await app.vault.read(monthlyFile)).split("\n");
     let insertAt = afterFrontMatter(monthlyLines);
@@ -1126,8 +1186,8 @@ function showDateDialog(title, defaultDate, onSubmit) {
   const { dialog, close } = makeOverlay("kanban-date-dialog");
   dialog.innerHTML = `<h3 style="margin:0 0 10px;font-size:1.1em;">${title}</h3>
     <input id="k-date" type="date" value="${defaultDate}" style="${inputStyle()}" autofocus>
-    <div style="display:flex;gap:10px;justify-content:center;">${buttonHtml("Set", true)}${buttonHtml("Cancel", false)}</div>`;
-  const [setBtn, cancelBtn] = dialog.querySelectorAll("button");
+    <div style="display:flex;gap:10px;justify-content:center;">${buttonHtml("Set", true)}${buttonHtml("No date", false)}${buttonHtml("Cancel", false)}</div>`;
+  const [setBtn, noDateBtn, cancelBtn] = dialog.querySelectorAll("button");
   const dateInput = dialog.querySelector("#k-date");
   const submit = () => {
     const v = dateInput.value;
@@ -1136,6 +1196,10 @@ function showDateDialog(title, defaultDate, onSubmit) {
       onSubmit("@" + v);
   };
   setBtn.onclick = submit;
+  noDateBtn.onclick = () => {
+    close();
+    onSubmit(null);
+  };
   cancelBtn.onclick = close;
   dateInput.onkeydown = (e) => {
     if (e.key === "Enter")
@@ -1155,24 +1219,26 @@ function showLaterAddDialog(title, defaultCreateDoc, onSubmit) {
     <label style="display:flex;align-items:center;gap:8px;margin-bottom:12px;cursor:pointer;font-size:.9em;">
       <input id="k-doc" type="checkbox" ${chk}> Create new document
     </label>
-    <div style="display:flex;gap:10px;justify-content:center;">${buttonHtml("Add", true)}${buttonHtml("Cancel", false)}</div>`;
-  const [addBtn, cancelBtn] = dialog.querySelectorAll("button");
+    <div style="display:flex;gap:10px;justify-content:center;">${buttonHtml("Add", true)}${buttonHtml("No date", false)}${buttonHtml("Cancel", false)}</div>`;
+  const [addBtn, noDateBtn, cancelBtn] = dialog.querySelectorAll("button");
   const textInput = dialog.querySelector("#k-text");
   const dateInput = dialog.querySelector("#k-date");
   const docCheck = dialog.querySelector("#k-doc");
-  const submit = () => {
-    const t = textInput.value.trim(), d = dateInput.value;
+  const submit = (useDate) => {
+    const t = textInput.value.trim();
+    const d = useDate ? dateInput.value : null;
     const createDoc = docCheck.checked;
     close();
-    if (t && d)
-      onSubmit(t, "@" + d, createDoc);
+    if (t)
+      onSubmit(t, d ? "@" + d : null, createDoc);
   };
-  addBtn.onclick = submit;
+  addBtn.onclick = () => submit(true);
+  noDateBtn.onclick = () => submit(false);
   cancelBtn.onclick = close;
   [textInput, dateInput].forEach((el) => {
     el.onkeydown = (e) => {
       if (e.key === "Enter")
-        submit();
+        submit(true);
       if (e.key === "Escape")
         close();
     };
@@ -1567,13 +1633,36 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
     await tagUntaggedRecurrentCards(app, paths, config);
   }
   let items = await collectItems(app, paths, config);
-  const laterToMove = items.filter(
-    (i) => i.item.tags.some((t) => normalizeTag(t) === config.normLater) && isLaterDueToday(i.item.text, today, config.normRecurrent)
-  );
+  const todayStrLater = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+  const laterToMove = items.filter((i) => {
+    if (!i.item.tags.some((t) => normalizeTag(t) === config.normLater))
+      return false;
+    if (extractSkipDate(i.item.text) === todayStrLater)
+      return false;
+    if (!isLaterDueToday(i.item.text, today, config.normRecurrent))
+      return false;
+    const hasDate = !!parseCardDate(i.item.text);
+    const hasTriggers = extractTriggerAnnotations(i.item.text, config.normRecurrent).some(isValidTriggerToken);
+    if (!hasDate && !hasTriggers && hasDatedSub(i.item.subs))
+      return false;
+    return true;
+  });
   if (laterToMove.length) {
     for (const item of laterToMove)
       await moveToColumn(app, item.filePath, item.item.line, item.item.tags, config.todayColumn, false, config, null, null, null, null, true);
     items = await collectItems(app, paths, config);
+  }
+  {
+    const remainingLater = items.filter(
+      (i) => i.item.tags.some((t) => normalizeTag(t) === config.normLater)
+    );
+    let anyLaterSubTriggered = false;
+    for (const i of remainingLater) {
+      if (await triggerDatedLaterSubs(app, i.item.subs, i.filePath, config, today))
+        anyLaterSubTriggered = true;
+    }
+    if (anyLaterSubTriggered)
+      items = await collectItems(app, paths, config);
   }
   if (config.normRecurrent) {
     const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
@@ -1918,7 +2007,9 @@ function attachListeners(boardEl, config, app, refresh) {
             config,
             dateStr,
             newCalc.digits,
-            newState
+            newState,
+            null,
+            dateStr === null
           );
           requestAnimationFrame(() => setTimeout(refresh, 50));
         }

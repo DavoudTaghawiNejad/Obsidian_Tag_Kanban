@@ -410,6 +410,39 @@ async function addTagAndSkipDate(app: App, filePath: string, lineNum: number, ta
   } catch { /* ignore */ }
 }
 
+async function addTagAndClearDate(app: App, filePath: string, lineNum: number, tag: string): Promise<void> {
+  try {
+    const { tFile, lines } = await readFileLines(app, filePath);
+    const idx = lineNum - 1;
+    if (idx < 0 || idx >= lines.length) return;
+    const parsed = parseTaskLine(lines[idx]);
+    if (!parsed.tags.includes(tag)) parsed.tags.push(tag);
+    parsed.date = null;
+    lines[idx] = serializeTaskLine(parsed);
+    await writeFileLines(app, tFile, lines);
+  } catch { /* ignore */ }
+}
+
+// Adds #today and removes the date from every subtask of a #later card whose @YYYY-MM-DD has arrived.
+async function triggerDatedLaterSubs(
+  app: App, subs: any[], filePath: string, config: KanbanConfig, today: Date
+): Promise<boolean> {
+  if (!subs || !subs.length) return false;
+  let changed = false;
+  for (const sub of subs) {
+    if (!sub.tags.some((t: string) => config.normKanban.includes(normalizeTag(t)))) {
+      const d = parseCardDate(sub.text);
+      if (d && d <= today) {
+        await addTagAndClearDate(app, filePath, sub.line, config.todayColumn);
+        changed = true;
+      }
+    }
+    if (sub.subs?.length)
+      if (await triggerDatedLaterSubs(app, sub.subs, filePath, config, today)) changed = true;
+  }
+  return changed;
+}
+
 // Adds #today + skip date to every untriggered subtask whose @recurrent trigger fires today.
 async function triggerRecurrentSubs(
   app: App, subs: any[], filePath: string, config: KanbanConfig, today: Date, todayStr: string
@@ -433,13 +466,22 @@ async function triggerRecurrentSubs(
   return changed;
 }
 
-// For #later: full-date ≤ today, OR trigger fires, OR undated+untriggered (move immediately).
+function hasDatedSub(subs: any[]): boolean {
+  if (!subs?.length) return false;
+  for (const sub of subs) {
+    if (parseCardDate(sub.text)) return true;
+    if (hasDatedSub(sub.subs)) return true;
+  }
+  return false;
+}
+
+// For #later: full-date ≤ today, OR trigger fires, OR undated+untriggered (move to today).
 function isLaterDueToday(text: string, today: Date, normRecurrent: string): boolean {
   const d = parseCardDate(text);
   if (d) return d <= today;
-  const triggers = extractTriggerAnnotations(text, normRecurrent);
+  const triggers = extractTriggerAnnotations(text, normRecurrent).filter(isValidTriggerToken);
   if (triggers.length) return matchesTriggerAnnotations(triggers, today);
-  return true; // undated, no triggers → move to today immediately
+  return true;
 }
 
 
@@ -636,7 +678,7 @@ async function writeFileLines(app: App, tFile: TFile, lines: string[]) {
   await app.vault.modify(tFile, lines.join("\n"));
 }
 
-async function updateCardDate(app: App, filePath: string, lineNum: number, newDateStr: string): Promise<void> {
+async function updateCardDate(app: App, filePath: string, lineNum: number, newDateStr: string | null): Promise<void> {
   const { tFile, lines } = await readFileLines(app, filePath);
   if (lineNum < 1 || lineNum > lines.length) return;
   const parsed = parseTaskLine(lines[lineNum - 1]);
@@ -772,9 +814,12 @@ async function moveToColumn(
     }
 
     lines[idx] = serializeTaskLine(parsed);
+    const n = new Date();
+    const skipStr = `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;
     if (config.normRecurrent && normalizeTag(targetTag) === config.normRecurrent) {
-      const n = new Date();
-      const skipStr = `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;
+      lines[idx] = setSkipDate(lines[idx], skipStr);
+    }
+    if (normalizeTag(targetTag) === config.normLater && !parsed.date) {
       lines[idx] = setSkipDate(lines[idx], skipStr);
     }
     await writeFileLines(app, tFile, lines);
@@ -818,10 +863,16 @@ async function addNewItem(
 
       let newLine = `- [ ] ${cardText} ${columnTag}`;
       if (dateStr) newLine += ` ${dateStr}`;
-      if (config.normRecurrent && normalizeTag(columnTag) === config.normRecurrent
-          && !hasValidTriggers(newLine, config.normRecurrent) && !extractSkipDate(newLine)) {
+      {
         const n = new Date();
-        newLine = setSkipDate(newLine, `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`);
+        const skipStr = `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;
+        if (config.normRecurrent && normalizeTag(columnTag) === config.normRecurrent
+            && !hasValidTriggers(newLine, config.normRecurrent) && !extractSkipDate(newLine)) {
+          newLine = setSkipDate(newLine, skipStr);
+        }
+        if (normalizeTag(columnTag) === config.normLater && !dateStr) {
+          newLine = setSkipDate(newLine, skipStr);
+        }
       }
       const projLines = (await app.vault.read(projFile)).split("\n");
       projLines.splice(afterFrontMatter(projLines), 0, newLine);
@@ -878,10 +929,16 @@ async function addNewItem(
 
     let newLine = `- [ ] ${cardText} ${columnTag}`;
     if (dateStr) newLine += ` ${dateStr}`;
-    if (config.normRecurrent && normalizeTag(columnTag) === config.normRecurrent
-        && !hasValidTriggers(newLine, config.normRecurrent) && !extractSkipDate(newLine)) {
+    {
       const n = new Date();
-      newLine = setSkipDate(newLine, `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`);
+      const skipStr = `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;
+      if (config.normRecurrent && normalizeTag(columnTag) === config.normRecurrent
+          && !hasValidTriggers(newLine, config.normRecurrent) && !extractSkipDate(newLine)) {
+        newLine = setSkipDate(newLine, skipStr);
+      }
+      if (normalizeTag(columnTag) === config.normLater && !dateStr) {
+        newLine = setSkipDate(newLine, skipStr);
+      }
     }
     const monthlyLines = (await app.vault.read(monthlyFile)).split("\n");
     let insertAt = afterFrontMatter(monthlyLines);
@@ -1441,14 +1498,14 @@ function showInputDialog(title: string, defaultCreateDoc: boolean, onSubmit: (v:
 function showDateDialog(
   title: string,
   defaultDate: string,
-  onSubmit: (v: string) => void
+  onSubmit: (v: string | null) => void
 ) {
   const { dialog, close } = makeOverlay("kanban-date-dialog");
   dialog.innerHTML = `<h3 style="margin:0 0 10px;font-size:1.1em;">${title}</h3>
     <input id="k-date" type="date" value="${defaultDate}" style="${inputStyle()}" autofocus>
-    <div style="display:flex;gap:10px;justify-content:center;">${buttonHtml("Set", true)}${buttonHtml("Cancel", false)}</div>`;
+    <div style="display:flex;gap:10px;justify-content:center;">${buttonHtml("Set", true)}${buttonHtml("No date", false)}${buttonHtml("Cancel", false)}</div>`;
 
-  const [setBtn, cancelBtn] = dialog.querySelectorAll("button");
+  const [setBtn, noDateBtn, cancelBtn] = dialog.querySelectorAll("button");
   const dateInput = dialog.querySelector("#k-date") as HTMLInputElement;
   const submit = () => {
     const v = dateInput.value;
@@ -1456,6 +1513,7 @@ function showDateDialog(
     if (v) onSubmit("@" + v);
   };
   setBtn.onclick = submit;
+  noDateBtn.onclick = () => { close(); onSubmit(null); };
   cancelBtn.onclick = close;
   dateInput.onkeydown = (e) => {
     if (e.key === "Enter") submit();
@@ -1467,7 +1525,7 @@ function showDateDialog(
 function showLaterAddDialog(
   title: string,
   defaultCreateDoc: boolean,
-  onSubmit: (text: string, dateStr: string, createDoc: boolean) => void
+  onSubmit: (text: string, dateStr: string | null, createDoc: boolean) => void
 ) {
   const { dialog, close } = makeOverlay("kanban-later-add-dialog");
   const defDate = getDefaultDate().toISOString().split("T")[0];
@@ -1478,24 +1536,25 @@ function showLaterAddDialog(
     <label style="display:flex;align-items:center;gap:8px;margin-bottom:12px;cursor:pointer;font-size:.9em;">
       <input id="k-doc" type="checkbox" ${chk}> Create new document
     </label>
-    <div style="display:flex;gap:10px;justify-content:center;">${buttonHtml("Add", true)}${buttonHtml("Cancel", false)}</div>`;
+    <div style="display:flex;gap:10px;justify-content:center;">${buttonHtml("Add", true)}${buttonHtml("No date", false)}${buttonHtml("Cancel", false)}</div>`;
 
-  const [addBtn, cancelBtn] = dialog.querySelectorAll("button");
+  const [addBtn, noDateBtn, cancelBtn] = dialog.querySelectorAll("button");
   const textInput = dialog.querySelector("#k-text") as HTMLInputElement;
   const dateInput = dialog.querySelector("#k-date") as HTMLInputElement;
   const docCheck = dialog.querySelector("#k-doc") as HTMLInputElement;
-  const submit = () => {
-    const t = textInput.value.trim(),
-      d = dateInput.value;
+  const submit = (useDate: boolean) => {
+    const t = textInput.value.trim();
+    const d = useDate ? dateInput.value : null;
     const createDoc = docCheck.checked;
     close();
-    if (t && d) onSubmit(t, "@" + d, createDoc);
+    if (t) onSubmit(t, d ? "@" + d : null, createDoc);
   };
-  addBtn.onclick = submit;
+  addBtn.onclick = () => submit(true);
+  noDateBtn.onclick = () => submit(false);
   cancelBtn.onclick = close;
   [textInput, dateInput].forEach((el) => {
     el.onkeydown = (e) => {
-      if (e.key === "Enter") submit();
+      if (e.key === "Enter") submit(true);
       if (e.key === "Escape") close();
     };
   });
@@ -1956,15 +2015,34 @@ export async function buildBoard(
   let items = await collectItems(app, paths, config);
 
   // Auto-move past/undated #later items and triggered #later items → today column
-  const laterToMove = items.filter(
-    (i) =>
-      i.item.tags.some((t: string) => normalizeTag(t) === config.normLater) &&
-      isLaterDueToday(i.item.text, today, config.normRecurrent)
-  );
+  const todayStrLater = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}`;
+  const laterToMove = items.filter((i) => {
+    if (!i.item.tags.some((t: string) => normalizeTag(t) === config.normLater)) return false;
+    if (extractSkipDate(i.item.text) === todayStrLater) return false;
+    if (!isLaterDueToday(i.item.text, today, config.normRecurrent)) return false;
+    // Don't move undated+untriggered cards that hold children with scheduled dates
+    const hasDate = !!parseCardDate(i.item.text);
+    const hasTriggers = extractTriggerAnnotations(i.item.text, config.normRecurrent).some(isValidTriggerToken);
+    if (!hasDate && !hasTriggers && hasDatedSub(i.item.subs)) return false;
+    return true;
+  });
   if (laterToMove.length) {
     for (const item of laterToMove)
       await moveToColumn(app, item.filePath, item.item.line, item.item.tags, config.todayColumn, false, config, null, null, null, null, true);
     items = await collectItems(app, paths, config);
+  }
+
+  // Step A2: add #today and remove date from dated subtasks of remaining #later cards
+  {
+    const remainingLater = items.filter(
+      (i) => i.item.tags.some((t: string) => normalizeTag(t) === config.normLater)
+    );
+    let anyLaterSubTriggered = false;
+    for (const i of remainingLater) {
+      if (await triggerDatedLaterSubs(app, i.item.subs, i.filePath, config, today))
+        anyLaterSubTriggered = true;
+    }
+    if (anyLaterSubTriggered) items = await collectItems(app, paths, config);
   }
 
   // Step B: move triggered #recurrent cards → today column
@@ -2366,7 +2444,9 @@ export function attachListeners(
             config,
             dateStr,
             newCalc.digits,
-            newState
+            newState,
+            null,
+            dateStr === null
           );
           requestAnimationFrame(() => setTimeout(refresh, 50));
         }
@@ -3077,7 +3157,7 @@ export function attachListeners(
     const isProject = config.normProject.includes(norm);
 
     if (norm === config.normLater) {
-      showLaterAddDialog(title, isProject, async (text: string, dateStr: string, createDoc: boolean) => {
+      showLaterAddDialog(title, isProject, async (text: string, dateStr: string | null, createDoc: boolean) => {
         if (await addNewItem(app, config.newTaskInsert, tag, text, dateStr, config, createDoc))
           requestAnimationFrame(() => setTimeout(refresh, 50));
       });
