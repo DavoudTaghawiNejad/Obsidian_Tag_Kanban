@@ -1095,13 +1095,15 @@ async function assignInitialOrders(app, columns, _config) {
     col.cards.sort(cmp);
   }
 }
+var _dialogDoc = document;
 function makeOverlay(id) {
-  document.getElementById(id)?.remove();
-  const overlay = document.createElement("div");
+  const doc = _dialogDoc;
+  doc.getElementById(id)?.remove();
+  const overlay = doc.createElement("div");
   overlay.id = id;
   overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.5);z-index:10000;display:flex;align-items:center;justify-content:center;";
-  document.body.appendChild(overlay);
-  const dialog = document.createElement("div");
+  doc.body.appendChild(overlay);
+  const dialog = doc.createElement("div");
   dialog.style.cssText = "background:var(--background-primary);color:var(--kb-dialog-text,var(--text-normal));padding:20px;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,.15);min-width:300px;max-width:400px;text-align:center;";
   overlay.appendChild(dialog);
   const close = () => overlay.remove();
@@ -1678,6 +1680,7 @@ async function tagUntaggedRecurrentCards(app, paths, config) {
   }
 }
 async function buildBoard(app, containerEl, config, savedActiveCol) {
+  _dialogDoc = containerEl.ownerDocument;
   const vaultName = app.vault.getName();
   const paths = await getTargetFilePaths(app, config);
   const today = new Date();
@@ -1762,18 +1765,19 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
       return da.getTime() - db.getTime();
     });
   }
-  let _colorCss = document.getElementById("kanban-color-vars");
+  const boardDoc = containerEl.ownerDocument;
+  let _colorCss = boardDoc.getElementById("kanban-color-vars");
   if (!_colorCss) {
-    _colorCss = document.createElement("style");
+    _colorCss = boardDoc.createElement("style");
     _colorCss.id = "kanban-color-vars";
-    document.head.appendChild(_colorCss);
+    boardDoc.head.appendChild(_colorCss);
   }
   _colorCss.textContent = buildColorCSS(config);
-  let _css = document.getElementById("kanban-board-styles");
+  let _css = boardDoc.getElementById("kanban-board-styles");
   if (!_css) {
-    _css = document.createElement("style");
+    _css = boardDoc.createElement("style");
     _css.id = "kanban-board-styles";
-    document.head.appendChild(_css);
+    boardDoc.head.appendChild(_css);
   }
   _css.textContent = `
       #kanban-scroll::-webkit-scrollbar{height:8px}
@@ -1862,7 +1866,7 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
       }
     });
     const insertSlot = (idx) => {
-      const s = document.createElement("div");
+      const s = boardDoc.createElement("div");
       s.className = "insert-slot";
       s.style.cssText = "height:0;border-top:2px dashed transparent;width:100%";
       s.dataset.index = String(idx);
@@ -2234,7 +2238,7 @@ function attachListeners(boardEl, config, app, refresh) {
     const filePath = card.dataset.file;
     const lineNum = parseInt(card.dataset.line, 10);
     const savedHTML = titleDiv.innerHTML;
-    const input = document.createElement("textarea");
+    const input = ownerDoc().createElement("textarea");
     input.value = raw;
     input.className = "card-edit-input";
     input.rows = 1;
@@ -2344,19 +2348,20 @@ function attachListeners(boardEl, config, app, refresh) {
   };
   const showColumnPicker = (savedCard) => {
     closeColPicker();
-    const overlay = document.createElement("div");
+    const doc = ownerDoc();
+    const overlay = doc.createElement("div");
     overlay.id = "kanban-col-picker";
     overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.5);z-index:10000;display:flex;align-items:flex-end;justify-content:center;";
-    document.body.appendChild(overlay);
+    doc.body.appendChild(overlay);
     colPickerOverlay = overlay;
-    const sheet = document.createElement("div");
+    const sheet = doc.createElement("div");
     sheet.style.cssText = "background:var(--background-primary);color:var(--text-normal);padding:16px 16px 32px;border-radius:16px 16px 0 0;width:100%;max-width:480px;box-shadow:0 -4px 24px rgba(0,0,0,.2);";
     overlay.appendChild(sheet);
-    const title = document.createElement("p");
+    const title = doc.createElement("p");
     title.textContent = "Move to column";
     title.style.cssText = "margin:0 0 14px;font-size:.9em;font-weight:600;text-align:center;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;";
     sheet.appendChild(title);
-    const list = document.createElement("div");
+    const list = doc.createElement("div");
     list.style.cssText = "display:flex;flex-direction:column;gap:8px;";
     sheet.appendChild(list);
     const tabs = Array.from(boardEl.querySelectorAll("[data-col-norm]"));
@@ -2364,7 +2369,7 @@ function attachListeners(boardEl, config, app, refresh) {
       const norm = tab.dataset.colNorm;
       const label = tab.textContent || norm.toUpperCase();
       const cc = config.columnColors?.[norm] || "";
-      const btn = document.createElement("button");
+      const btn = doc.createElement("button");
       btn.textContent = label;
       btn.style.cssText = `padding:14px 16px;border-radius:10px;border:1px solid var(--background-modifier-border);background:${cc ? `color-mix(in srgb,${cc} 20%,var(--background-secondary))` : "var(--background-secondary)"};color:var(--text-normal);font-size:1em;cursor:pointer;text-align:left;font-weight:500;`;
       btn.addEventListener("click", async () => {
@@ -2376,7 +2381,7 @@ function attachListeners(boardEl, config, app, refresh) {
       });
       list.appendChild(btn);
     }
-    const cancelBtn = document.createElement("button");
+    const cancelBtn = doc.createElement("button");
     cancelBtn.textContent = "Cancel";
     cancelBtn.style.cssText = "margin-top:12px;padding:14px;border-radius:10px;border:1px solid var(--background-modifier-border);background:none;color:var(--text-muted);width:100%;cursor:pointer;font-size:1em;";
     cancelBtn.addEventListener("click", () => {
