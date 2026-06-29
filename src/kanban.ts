@@ -155,6 +155,7 @@ interface TaskLine {
   doneDate: string | null;                     // "%% YYYY-MM-DD %%" comment
   orderDigits: string | null;
   orderState: "expanded" | "collapsed" | null;
+  skipDate: string | null;                     // "%% @skip:YYYY-MM-DD %%" comment
 }
 
 function parseTaskLine(raw: string): TaskLine {
@@ -169,6 +170,10 @@ function parseTaskLine(raw: string): TaskLine {
     orderDigits = om[1];
     orderState = om[2].toLowerCase() === "x" ? "expanded" : "collapsed";
   }
+  // Skip date — preserve across parse/serialize round-trips
+  let skipDate: string | null = null;
+  const sm = rest.match(/%% @skip:(\d{4}-\d{2}-\d{2}) %%/);
+  if (sm) skipDate = sm[1];
   rest = rest.replace(/\s*%%[\s\S]*?%%/g, "").trim();
 
   // Date annotation (@YYYY-MM-DD)
@@ -202,7 +207,7 @@ function parseTaskLine(raw: string): TaskLine {
   const tags = (rest.match(/(?<!\w)#\w+/g) || []);
   const text = rest.replace(/\s*(?<!\w)#\w+/g, "").trim();
 
-  return { indent, bullet, checked, text, tags, date, doneDate, orderDigits, orderState };
+  return { indent, bullet, checked, text, tags, date, doneDate, orderDigits, orderState, skipDate };
 }
 
 function serializeTaskLine(t: TaskLine): string {
@@ -217,6 +222,9 @@ function serializeTaskLine(t: TaskLine): string {
   if (t.doneDate) parts.push(`✅${t.doneDate}`);
   if (t.orderDigits && t.orderState !== null) {
     parts.push(`%% @${t.orderDigits}${t.orderState === "expanded" ? "x" : "c"} %%`);
+  }
+  if (t.skipDate) {
+    parts.push(`%% @skip:${t.skipDate} %%`);
   }
 
   return t.indent + parts.join(" ");
@@ -383,6 +391,42 @@ function extractSkipDate(rawLine: string): string | null {
 function setSkipDate(line: string, dateStr: string): string {
   const cleaned = line.replace(/\s*%% @skip:\d{4}-\d{2}-\d{2} %%/g, "").trimEnd();
   return `${cleaned} %% @skip:${dateStr} %%`;
+}
+
+async function addTagAndSkipDate(app: App, filePath: string, lineNum: number, tag: string, dateStr: string): Promise<void> {
+  try {
+    const { tFile, lines } = await readFileLines(app, filePath);
+    const idx = lineNum - 1;
+    if (idx < 0 || idx >= lines.length) return;
+    const parsed = parseTaskLine(lines[idx]);
+    if (!parsed.tags.includes(tag)) parsed.tags.push(tag);
+    lines[idx] = serializeTaskLine(parsed);
+    lines[idx] = setSkipDate(lines[idx], dateStr);
+    await writeFileLines(app, tFile, lines);
+  } catch { /* ignore */ }
+}
+
+// Adds #today + skip date to every untriggered subtask whose @recurrent trigger fires today.
+async function triggerRecurrentSubs(
+  app: App, subs: any[], filePath: string, config: KanbanConfig, today: Date, todayStr: string
+): Promise<boolean> {
+  if (!subs || !subs.length) return false;
+  let changed = false;
+  for (const sub of subs) {
+    if (!sub.tags.some((t: string) => config.normKanban.includes(normalizeTag(t)))) {
+      if (
+        hasRecurrentAnnotation(sub.text, config.normRecurrent) &&
+        matchesTriggerAnnotations(extractTriggerAnnotations(sub.text, config.normRecurrent), today) &&
+        extractSkipDate(sub.text) !== todayStr
+      ) {
+        await addTagAndSkipDate(app, filePath, sub.line, config.todayColumn, todayStr);
+        changed = true;
+      }
+    }
+    if (sub.subs?.length)
+      if (await triggerRecurrentSubs(app, sub.subs, filePath, config, today, todayStr)) changed = true;
+  }
+  return changed;
 }
 
 // For #later: full-date ≤ today, OR trigger fires, OR undated+untriggered (move immediately).
@@ -750,6 +794,11 @@ async function addNewItem(
 
       let newLine = `- [ ] ${cardText} ${columnTag}`;
       if (dateStr) newLine += ` ${dateStr}`;
+      if (config.normRecurrent && normalizeTag(columnTag) === config.normRecurrent
+          && !hasValidTriggers(newLine, config.normRecurrent) && !extractSkipDate(newLine)) {
+        const n = new Date();
+        newLine = setSkipDate(newLine, `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`);
+      }
       const projLines = (await app.vault.read(projFile)).split("\n");
       projLines.splice(afterFrontMatter(projLines), 0, newLine);
       await app.vault.modify(projFile, projLines.join("\n"));
@@ -805,6 +854,11 @@ async function addNewItem(
 
     let newLine = `- [ ] ${cardText} ${columnTag}`;
     if (dateStr) newLine += ` ${dateStr}`;
+    if (config.normRecurrent && normalizeTag(columnTag) === config.normRecurrent
+        && !hasValidTriggers(newLine, config.normRecurrent) && !extractSkipDate(newLine)) {
+      const n = new Date();
+      newLine = setSkipDate(newLine, `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`);
+    }
     const monthlyLines = (await app.vault.read(monthlyFile)).split("\n");
     let insertAt = afterFrontMatter(monthlyLines);
     if (monthlyLines[insertAt]?.match(/^#\s/)) insertAt++;
@@ -1475,7 +1529,7 @@ function showRecurrentTriggerDialog(onSubmit: (trigger: string) => void, existin
     <div id="k-dom-rows" style="display:flex;flex-wrap:wrap;gap:4px;min-height:4px;margin-bottom:10px;"></div>
     <div id="k-month-rows" style="display:flex;flex-wrap:wrap;gap:4px;min-height:4px;margin-bottom:10px;"></div>
     <p id="k-trigger-err" style="margin:2px 0 8px;font-size:.82em;color:#e03e3e;min-height:1.2em;"></p>
-    <div id="k-recur-actions" style="display:flex;gap:10px;justify-content:center;">${buttonHtml("Set", true)}${buttonHtml("Cancel", false)}</div>`;
+    <div id="k-recur-actions" style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">${buttonHtml("Set", true)}${buttonHtml("No trigger", false)}${buttonHtml("Cancel", false)}</div>`;
 
   const wdWrap  = dialog.querySelector("#k-wd-wrap") as HTMLElement;
   const domSel  = dialog.querySelector("#k-dom") as HTMLSelectElement;
@@ -1483,7 +1537,7 @@ function showRecurrentTriggerDialog(onSubmit: (trigger: string) => void, existin
   const domRows = dialog.querySelector("#k-dom-rows") as HTMLElement;
   const moRows  = dialog.querySelector("#k-month-rows") as HTMLElement;
   const errEl   = dialog.querySelector("#k-trigger-err") as HTMLElement;
-  const [setBtn, cancelBtn] = dialog.querySelectorAll<HTMLButtonElement>("#k-recur-actions button");
+  const [setBtn, noTriggerBtn, cancelBtn] = dialog.querySelectorAll<HTMLButtonElement>("#k-recur-actions button");
 
   const renderDomRows = () => {
     domRows.innerHTML = selectedDays.map((d, i) =>
@@ -1552,6 +1606,7 @@ function showRecurrentTriggerDialog(onSubmit: (trigger: string) => void, existin
   };
 
   setBtn.onclick = submit;
+  noTriggerBtn.onclick = () => { close(); onSubmit(""); };
   cancelBtn.onclick = close;
   dialog.addEventListener("keydown", (e) => {
     if (e.key === "Enter") submit();
@@ -1782,6 +1837,7 @@ function buildColorCSS(config: KanbanConfig): string {
 
 async function tagUntaggedRecurrentCards(app: App, paths: string[], config: KanbanConfig): Promise<void> {
   const annotationRe = new RegExp(`@${config.normRecurrent}\\b`, 'i');
+  const listItemRe = /^(\s*)(?:[-*+]|\d+[.)]\s)/;
   for (const filePath of paths) {
     const tFile = app.vault.getAbstractFileByPath(filePath) as TFile | null;
     if (!tFile) continue;
@@ -1793,9 +1849,32 @@ async function tagUntaggedRecurrentCards(app: App, paths: string[], config: Kanb
       if (!annotationRe.test(lines[i])) continue;
       const tags = extractTags(lines[i]);
       if (tags.some((t: string) => config.normKanban.includes(normalizeTag(t)))) continue;
+      // Skip if this line is a subtask of a parent that already has #recurrent
+      const myIndent = (lines[i].match(/^(\s*)/) || [""])[0].length;
+      if (myIndent > 0) {
+        let skipLine = false;
+        for (let j = i - 1; j >= 0; j--) {
+          if (!listItemRe.test(lines[j])) continue;
+          const parentIndent = (lines[j].match(/^(\s*)/) || [""])[0].length;
+          if (parentIndent < myIndent) {
+            const parentTags = extractTags(lines[j]);
+            if (parentTags.some((t: string) => normalizeTag(t) === config.normRecurrent)) {
+              skipLine = true;
+            }
+            break;
+          }
+        }
+        if (skipLine) continue;
+      }
       const parsed = parseTaskLine(lines[i]);
       parsed.tags.push(config.recurrentColumn);
       lines[i] = serializeTaskLine(parsed);
+      // No-trigger cards would fire every day; skip today so they don't move immediately on creation.
+      if (!hasValidTriggers(lines[i], config.normRecurrent)) {
+        const n = new Date();
+        const skipStr = `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;
+        lines[i] = setSkipDate(lines[i], skipStr);
+      }
       changed = true;
     }
     if (changed) await app.vault.modify(tFile, lines.join('\n'));
@@ -1836,18 +1915,28 @@ export async function buildBoard(
   // Step B: move triggered #recurrent cards → today column
   if (config.normRecurrent) {
     const todayStr = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}`;
-    const recurrentToMove = items.filter(
-      (i) =>
-        i.item.tags.some((t: string) => normalizeTag(t) === config.normRecurrent) &&
-        hasRecurrentAnnotation(i.item.text, config.normRecurrent) &&
-        matchesTriggerAnnotations(extractTriggerAnnotations(i.item.text, config.normRecurrent), today) &&
-        extractSkipDate(i.item.text) !== todayStr
-    );
+    // A card with no trigger annotations fires every day; a card with triggers fires on matching days.
+    const recurrentToMove = items.filter((i) => {
+      if (!i.item.tags.some((t: string) => normalizeTag(t) === config.normRecurrent)) return false;
+      if (!hasRecurrentAnnotation(i.item.text, config.normRecurrent)) return false;
+      if (extractSkipDate(i.item.text) === todayStr) return false;
+      const triggers = extractTriggerAnnotations(i.item.text, config.normRecurrent);
+      if (triggers.length === 0) return !i.item.subs || i.item.subs.length === 0;
+      return matchesTriggerAnnotations(triggers, today);
+    });
     if (recurrentToMove.length) {
       for (const item of recurrentToMove)
         await moveToColumn(app, item.filePath, item.item.line, item.item.tags, config.todayColumn, false, config);
       items = await collectItems(app, paths, config);
     }
+    // Step C: add #today to subtasks of #recurrent cards whose trigger fires today
+    let anySubTriggered = false;
+    for (const i of items) {
+      if (!i.item.tags.some((t: string) => normalizeTag(t) === config.normRecurrent)) continue;
+      if (await triggerRecurrentSubs(app, i.item.subs, i.filePath, config, today, todayStr))
+        anySubTriggered = true;
+    }
+    if (anySubTriggered) items = await collectItems(app, paths, config);
   }
 
   const columns = groupByColumns(items, config);
@@ -2942,7 +3031,8 @@ export function attachListeners(
         showRecurrentTriggerDialog(async (triggerStr) => {
           const n = new Date();
           const skipStr = `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;
-          const annotated = `${text} @${config.normRecurrent} ${triggerStr} %% @skip:${skipStr} %%`;
+          const triggerPart = triggerStr ? ` ${triggerStr}` : '';
+          const annotated = `${text} @${config.normRecurrent}${triggerPart} %% @skip:${skipStr} %%`;
           if (await addNewItem(app, config.newTaskInsert, tag, annotated, null, config, createDoc))
             requestAnimationFrame(() => setTimeout(refresh, 50));
         });
