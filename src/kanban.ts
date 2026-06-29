@@ -326,7 +326,7 @@ function hasRecurrentAnnotation(text: string, normRecurrent: string): boolean {
 // Extracts @word and @1-2-digit-number annotations, skipping @YYYY-MM-DD and @recurrent itself.
 // Supports underscores in words (e.g. @last_day).
 function extractTriggerAnnotations(text: string, normRecurrent: string): string[] {
-  const matches = text.match(/@([a-zA-Z][a-zA-Z_]*|\d{1,2})\b/g) || [];
+  const matches = text.match(/@([a-zA-Z][a-zA-Z_]*(?:[+-]\d+)?|\d{1,2})\b/g) || [];
   return matches
     .map((m: string) => m.slice(1).toLowerCase())
     .filter((m: string) => m !== normRecurrent);
@@ -345,6 +345,9 @@ function matchesTriggerAnnotations(triggers: string[], today: Date): boolean {
 
   for (const t of triggers) {
     if (t === 'last_day') { if (todayDate === lastDay) return true; continue; }
+    if (t === 'quarterly' || t === 'q+1') { if (todayDate === 1 && [0, 3, 6, 9].includes(todayMonth)) return true; continue; }
+    if (t === 'quarterly+2' || t === 'q+2') { if (todayDate === 1 && [1, 4, 7, 10].includes(todayMonth)) return true; continue; }
+    if (t === 'quarterly+3' || t === 'q+3') { if (todayDate === 1 && [2, 5, 8, 11].includes(todayMonth)) return true; continue; }
 
     const wdShort = TRIGGER_WEEKDAYS_SHORT.indexOf(t);
     if (wdShort !== -1) { if (wdShort === todayWeekday) return true; continue; }
@@ -372,6 +375,7 @@ function matchesTriggerAnnotations(triggers: string[], today: Date): boolean {
 
 function isValidTriggerToken(t: string): boolean {
   if (t === 'last_day') return true;
+  if (t === 'quarterly' || t === 'quarterly+2' || t === 'quarterly+3' || t === 'q+1' || t === 'q+2' || t === 'q+3') return true;
   return TRIGGER_WEEKDAYS_SHORT.includes(t) ||
     TRIGGER_WEEKDAYS_FULL.includes(t) ||
     TRIGGER_MONTHS_SHORT.includes(t) ||
@@ -461,23 +465,29 @@ function getDefaultDate(existing: Date | null = null): Date {
 
 const TRIGGER_LINE_STYLE = `display:block;font-size:.8em;color:var(--kb-date-color);font-family:var(--kb-date-font);margin-top:2px;`;
 
-function formatTriggerAnnotations(text: string, normRecurrent: string): string {
+function formatTriggerAnnotations(text: string, normRecurrent: string, clickable = true): string {
   if (!normRecurrent) return text;
 
   let hasRecurrent = false;
   const triggers: string[] = [];
 
   text = text.replace(new RegExp(`@${normRecurrent}\\b`, 'gi'), () => { hasRecurrent = true; return ''; });
-  text = text.replace(/@([a-zA-Z][a-zA-Z_]*|\d{1,2})\b/g, (match, token) => {
+  text = text.replace(/@([a-zA-Z][a-zA-Z_]*(?:[+-]\d+)?|\d{1,2})\b/g, (match, token) => {
     const t = token.toLowerCase();
-    if (isValidTriggerToken(t)) { triggers.push(t === 'last_day' ? 'last day' : t); return ''; }
-    return match;
+    if (!isValidTriggerToken(t)) return match;
+    const label = t === 'last_day' ? 'last day' : t;
+    triggers.push(label);
+    return '';
   });
   text = text.replace(/\s{2,}/g, ' ').trim();
 
-  if (hasRecurrent || triggers.length) {
-    const label = triggers.length ? `↻ ${triggers.join('·')}` : '↻';
-    text += `<span class="kb-trigger-label" style="${TRIGGER_LINE_STYLE}cursor:pointer;text-decoration:underline dotted;">${label}</span>`;
+  if (triggers.length) {
+    const label = `↻ ${triggers.join('·')}`;
+    const spanStyle = clickable
+      ? `${TRIGGER_LINE_STYLE}cursor:pointer;text-decoration:underline dotted;`
+      : TRIGGER_LINE_STYLE.replace('display:block', 'display:inline');
+    const spanClass = clickable ? `class="kb-trigger-label" ` : '';
+    text += `<span ${spanClass}style="${spanStyle}">${label}</span>`;
   }
 
   return text;
@@ -494,7 +504,7 @@ function stripTriggerAnnotations(text: string, normRecurrent: string): string {
   return text;
 }
 
-function formatCardDateAnnotation(text: string): string {
+function formatCardDateAnnotation(text: string, inline = false): string {
   return text.replace(/@(\d{4})-(\d{2})-(\d{2})\b/g, (_, y, m, d) => {
     const dateVal = new Date(Number(y), Number(m) - 1, Number(d));
     const today = new Date();
@@ -511,7 +521,8 @@ function formatCardDateAnnotation(text: string): string {
       const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
       label = `${months[Number(m) - 1]} ${Number(d)}`;
     }
-    return `<span class="kb-date-label" data-date="${y}-${m}-${d}" style="display:block;font-size:.8em;color:var(--kb-date-color);font-family:var(--kb-date-font);cursor:pointer;text-decoration:underline dotted;">${label}</span>`;
+    const display = inline ? "inline" : "block";
+    return `<span class="kb-date-label" data-date="${y}-${m}-${d}" style="display:${display};font-size:.8em;color:var(--kb-date-color);font-family:var(--kb-date-font);cursor:pointer;text-decoration:underline dotted;">${label}</span>`;
   });
 }
 
@@ -642,7 +653,7 @@ async function updateCardTriggers(
   if (lineNum < 1 || lineNum > lines.length) return;
   const parsed = parseTaskLine(lines[lineNum - 1]);
   // Remove old trigger tokens but keep @recurrent annotation
-  parsed.text = parsed.text.replace(/@([a-zA-Z][a-zA-Z_]*|\d{1,2})\b/g, (match, token) => {
+  parsed.text = parsed.text.replace(/@([a-zA-Z][a-zA-Z_]*(?:[+-]\d+)?|\d{1,2})\b/g, (match, token) => {
     const t = token.toLowerCase();
     if (t === normRecurrent) return match;
     return isValidTriggerToken(t) ? '' : match;
@@ -1500,6 +1511,12 @@ function showRecurrentTriggerDialog(onSubmit: (trigger: string) => void, existin
   const activeWD       = new Set(existingTriggers.filter(t => WD_KEYS.includes(t)));
   const selectedDays   = existingTriggers.filter(t => /^\d{1,2}$/.test(t));
   const selectedMonths = existingTriggers.filter(t => MO_KEYS.includes(t));
+  const activeQuarterly = new Set<string>(
+    existingTriggers
+      .filter(t => t === 'quarterly+2' || t === 'quarterly+3' || t === 'q+2' || t === 'q+3')
+      .map(t => t === 'q+2' ? 'quarterly+2' : t === 'q+3' ? 'quarterly+3' : t)
+  );
+  let quarterlyActive = existingTriggers.includes('quarterly') || existingTriggers.includes('q+1');
 
   const wdStyle = (active: boolean) =>
     `height:24px;padding:0 8px;border-radius:12px;border:1px solid var(--background-modifier-border);cursor:pointer;font-size:.75em;display:inline-flex;align-items:center;justify-content:center;` +
@@ -1527,6 +1544,14 @@ function showRecurrentTriggerDialog(onSubmit: (trigger: string) => void, existin
       <span style="${lblStyle}display:block;margin-bottom:4px;">Weekday</span>
       <div id="k-wd-wrap" style="display:flex;gap:4px;flex-wrap:wrap;">${wdBtns}</div>
     </div>
+    <div style="margin-bottom:12px;">
+      <span style="${lblStyle}display:block;margin-bottom:4px;">Quarterly</span>
+      <div style="display:flex;gap:4px;flex-wrap:wrap;">
+        <button type="button" id="k-quarterly-btn" style="${wdStyle(quarterlyActive)}">quarterly</button>
+        <button type="button" class="kb-q-btn" data-q="quarterly+2" style="${wdStyle(activeQuarterly.has('quarterly+2'))}">quarterly+2</button>
+        <button type="button" class="kb-q-btn" data-q="quarterly+3" style="${wdStyle(activeQuarterly.has('quarterly+3'))}">quarterly+3</button>
+      </div>
+    </div>
     <div style="display:flex;gap:10px;margin-bottom:6px;">
       <div style="display:flex;align-items:center;gap:6px;">
         <span style="${lblStyle}white-space:nowrap;">Day of month</span>
@@ -1542,12 +1567,13 @@ function showRecurrentTriggerDialog(onSubmit: (trigger: string) => void, existin
     <p id="k-trigger-err" style="margin:2px 0 8px;font-size:.82em;color:#e03e3e;min-height:1.2em;"></p>
     <div id="k-recur-actions" style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">${buttonHtml("Set", true)}${buttonHtml("No trigger", false)}${buttonHtml("Cancel", false)}</div>`;
 
-  const wdWrap  = dialog.querySelector("#k-wd-wrap") as HTMLElement;
-  const domSel  = dialog.querySelector("#k-dom") as HTMLSelectElement;
-  const moSel   = dialog.querySelector("#k-month") as HTMLSelectElement;
-  const domRows = dialog.querySelector("#k-dom-rows") as HTMLElement;
-  const moRows  = dialog.querySelector("#k-month-rows") as HTMLElement;
-  const errEl   = dialog.querySelector("#k-trigger-err") as HTMLElement;
+  const wdWrap   = dialog.querySelector("#k-wd-wrap") as HTMLElement;
+  const qWrap    = dialog.querySelector(".kb-q-btn")!.parentElement as HTMLElement;
+  const domSel   = dialog.querySelector("#k-dom") as HTMLSelectElement;
+  const moSel        = dialog.querySelector("#k-month") as HTMLSelectElement;
+  const domRows      = dialog.querySelector("#k-dom-rows") as HTMLElement;
+  const moRows       = dialog.querySelector("#k-month-rows") as HTMLElement;
+  const errEl        = dialog.querySelector("#k-trigger-err") as HTMLElement;
   const [setBtn, noTriggerBtn, cancelBtn] = dialog.querySelectorAll<HTMLButtonElement>("#k-recur-actions button");
 
   const renderDomRows = () => {
@@ -1564,6 +1590,22 @@ function showRecurrentTriggerDialog(onSubmit: (trigger: string) => void, existin
 
   renderDomRows();
   renderMoRows();
+
+  // Quarterly toggle (plain)
+  const quarterlyBtn = dialog.querySelector("#k-quarterly-btn") as HTMLButtonElement;
+  quarterlyBtn.addEventListener("click", () => {
+    quarterlyActive = !quarterlyActive;
+    quarterlyBtn.style.cssText = wdStyle(quarterlyActive);
+  });
+
+  // quarterly+2 / quarterly+3 toggles
+  qWrap.addEventListener("click", (e) => {
+    const btn = (e.target as Element).closest(".kb-q-btn") as HTMLButtonElement | null;
+    if (!btn) return;
+    const q = btn.dataset.q!;
+    if (activeQuarterly.has(q)) { activeQuarterly.delete(q); btn.style.cssText = wdStyle(false); }
+    else                        { activeQuarterly.add(q);    btn.style.cssText = wdStyle(true);  }
+  });
 
   // Weekday toggle
   wdWrap.addEventListener("click", (e) => {
@@ -1610,7 +1652,7 @@ function showRecurrentTriggerDialog(onSubmit: (trigger: string) => void, existin
   });
 
   const submit = () => {
-    const tokens = [...activeWD, ...selectedDays, ...selectedMonths];
+    const tokens = [...activeWD, ...(quarterlyActive ? ['quarterly'] : []), ...['quarterly+2','quarterly+3'].filter(q => activeQuarterly.has(q)), ...selectedDays, ...selectedMonths];
     if (!tokens.length) { errEl.textContent = "Select at least one trigger."; return; }
     close();
     onSubmit(tokens.map(t => `@${t}`).join(" "));
@@ -1716,7 +1758,7 @@ function createCardHTML(
       .filter((w: string) => !(w.startsWith('#') && config.normKanban.includes(normalizeTag(w))))
       .join(" ")
       .trim();
-    subText = formatCardDateAnnotation(stripTriggerAnnotations(subText, config.normRecurrent));
+    subText = formatCardDateAnnotation(formatTriggerAnnotations(subText, config.normRecurrent, false), true);
     const indent = "&nbsp;".repeat(depth * 3);
     const rendered = renderCheckbox(subText, {
       isSub: true,
