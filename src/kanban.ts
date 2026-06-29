@@ -483,6 +483,17 @@ function formatTriggerAnnotations(text: string, normRecurrent: string): string {
   return text;
 }
 
+function stripTriggerAnnotations(text: string, normRecurrent: string): string {
+  if (!normRecurrent) return text;
+  text = text.replace(new RegExp(`@(${normRecurrent})\\b`, 'gi'), '$1');
+  text = text.replace(/@([a-zA-Z][a-zA-Z_]*(?:[+-]\d+)?|\d{1,2})\b/g, (match, token) => {
+    const t = token.toLowerCase();
+    if (isValidTriggerToken(t) || /^quarterly([+-]\d+)?$/.test(t)) return token;
+    return match;
+  });
+  return text;
+}
+
 function formatCardDateAnnotation(text: string): string {
   return text.replace(/@(\d{4})-(\d{2})-(\d{2})\b/g, (_, y, m, d) => {
     const dateVal = new Date(Number(y), Number(m) - 1, Number(d));
@@ -1702,10 +1713,10 @@ function createCardHTML(
       .replace(/\s*✅\d{4}-\d{2}-\d{2}/, "")
       .trim()
       .split(/\s+/)
-      .filter((w: string) => !config.normKanban.includes(normalizeTag(w)))
+      .filter((w: string) => !(w.startsWith('#') && config.normKanban.includes(normalizeTag(w))))
       .join(" ")
       .trim();
-    subText = formatCardDateAnnotation(subText);
+    subText = formatCardDateAnnotation(stripTriggerAnnotations(subText, config.normRecurrent));
     const indent = "&nbsp;".repeat(depth * 3);
     const rendered = renderCheckbox(subText, {
       isSub: true,

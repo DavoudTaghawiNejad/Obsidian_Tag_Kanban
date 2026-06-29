@@ -381,6 +381,18 @@ function formatTriggerAnnotations(text, normRecurrent) {
   }
   return text;
 }
+function stripTriggerAnnotations(text, normRecurrent) {
+  if (!normRecurrent)
+    return text;
+  text = text.replace(new RegExp(`@(${normRecurrent})\\b`, "gi"), "$1");
+  text = text.replace(/@([a-zA-Z][a-zA-Z_]*(?:[+-]\d+)?|\d{1,2})\b/g, (match, token) => {
+    const t = token.toLowerCase();
+    if (isValidTriggerToken(t) || /^quarterly([+-]\d+)?$/.test(t))
+      return token;
+    return match;
+  });
+  return text;
+}
 function formatCardDateAnnotation(text) {
   return text.replace(/@(\d{4})-(\d{2})-(\d{2})\b/g, (_, y, m, d) => {
     const dateVal = new Date(Number(y), Number(m) - 1, Number(d));
@@ -1343,8 +1355,8 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
     const alreadyTagged = extractTags(sub.text).some(
       (t) => config.normKanban.includes(normalizeTag(t))
     );
-    let subText = sub.text.replace(/\s*%%[\s\S]*?%%/g, "").replace(/\s*✅\d{4}-\d{2}-\d{2}/, "").trim().split(/\s+/).filter((w) => !config.normKanban.includes(normalizeTag(w))).join(" ").trim();
-    subText = formatCardDateAnnotation(subText);
+    let subText = sub.text.replace(/\s*%%[\s\S]*?%%/g, "").replace(/\s*✅\d{4}-\d{2}-\d{2}/, "").trim().split(/\s+/).filter((w) => !(w.startsWith("#") && config.normKanban.includes(normalizeTag(w)))).join(" ").trim();
+    subText = formatCardDateAnnotation(stripTriggerAnnotations(subText, config.normRecurrent));
     const indent = "&nbsp;".repeat(depth * 3);
     const rendered = renderCheckbox(subText, {
       isSub: true,
