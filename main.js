@@ -1841,11 +1841,15 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
       text: col.rawTag.replace(/^#/, "").toUpperCase(),
       attr: { style: "margin:0;flex-grow:1;font-weight:bold;color:var(--kb-text);" }
     });
+    header.createEl("span", {
+      text: String(col.cards.length),
+      attr: { style: "margin-right:6px;font-size:.75em;color:var(--kb-text);background:transparent;border:1px solid var(--background-modifier-border);border-radius:50%;width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;" }
+    });
     if (norm !== config.normDone) {
       const btn = header.createEl("button", {
         text: "+",
         attr: {
-          style: "width:24px;height:24px;border-radius:50%;border:1px solid var(--background-modifier-border);background:none;cursor:pointer;display:flex;align-items:center;justify-content:center;"
+          style: "width:24px;height:24px;border-radius:50%;border:1px solid var(--background-modifier-border);background:none;cursor:pointer;display:flex;align-items:center;justify-content:center;color:var(--kb-text);"
         }
       });
       btn.dataset.column = norm;
