@@ -837,6 +837,7 @@ async function moveCardToNewDoc(app, filePath, lineNum, plainTitle, targetTag, c
   }
   new import_obsidian.Notice(isNew ? `Created "${safeTitle}.md" and moved task.` : `Moved task to existing "${safeTitle}.md".`);
 }
+var ARCHIVE_CALLOUT_HEADER = "> [!note]- Archived";
 async function archiveToSection(app, filePath, mainLineNum, subLines, config, _isTopLevel = true) {
   try {
     let archiveLine = function(idx, tickBox) {
@@ -847,6 +848,7 @@ async function archiveToSection(app, filePath, mainLineNum, subLines, config, _i
       parsed.orderDigits = null;
       parsed.orderState = null;
       if (config.normRecurrent && hasRecurrentAnnotation(lines[idx], config.normRecurrent)) {
+        hasRecurrentInBlock = true;
         if (parsed.checked !== null)
           parsed.checked = false;
         parsed.doneDate = null;
@@ -862,7 +864,10 @@ async function archiveToSection(app, filePath, mainLineNum, subLines, config, _i
       }
     };
     const { tFile, lines } = await readFileLines(app, filePath);
-    archiveLine(mainLineNum - 1, true);
+    let hasRecurrentInBlock = false;
+    const mainIdx = mainLineNum - 1;
+    const endIdx = (maxSubLine(subLines) || mainLineNum) - 1;
+    archiveLine(mainIdx, true);
     const recurse = (subs) => {
       for (const sub of subs) {
         archiveLine(sub.line - 1, false);
@@ -871,6 +876,18 @@ async function archiveToSection(app, filePath, mainLineNum, subLines, config, _i
       }
     };
     recurse(subLines);
+    if (_isTopLevel && !hasRecurrentInBlock) {
+      const blockLines = lines.slice(mainIdx, endIdx + 1).map((l) => `> ${l}`);
+      lines.splice(mainIdx, endIdx - mainIdx + 1);
+      const calloutIdx = lines.findIndex((l) => l.trim() === ARCHIVE_CALLOUT_HEADER);
+      if (calloutIdx >= 0) {
+        lines.splice(calloutIdx + 1, 0, ...blockLines);
+      } else {
+        while (lines.length && lines[lines.length - 1].trim() === "")
+          lines.pop();
+        lines.push("", ARCHIVE_CALLOUT_HEADER, ...blockLines);
+      }
+    }
     await writeFileLines(app, tFile, lines);
     return true;
   } catch (e) {
@@ -2874,8 +2891,9 @@ function attachListeners(boardEl, config, app, refresh) {
     const zone = btn.closest("[data-col-container]")?.querySelector(".drop-zone");
     if (!zone)
       return;
+    const cards = Array.from(zone.querySelectorAll(".kanban-card")).sort((a, b) => parseInt(b.dataset.line, 10) - parseInt(a.dataset.line, 10));
     let count = 0;
-    for (const card of Array.from(zone.querySelectorAll(".kanban-card"))) {
+    for (const card of cards) {
       let subs = [];
       try {
         subs = JSON.parse(card.dataset.subs || "[]");

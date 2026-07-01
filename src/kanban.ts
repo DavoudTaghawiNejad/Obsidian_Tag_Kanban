@@ -1056,6 +1056,8 @@ async function moveCardToNewDoc(
   new Notice(isNew ? `Created "${safeTitle}.md" and moved task.` : `Moved task to existing "${safeTitle}.md".`);
 }
 
+const ARCHIVE_CALLOUT_HEADER = "> [!note]- Archived";
+
 async function archiveToSection(
   app: App,
   filePath: string,
@@ -1067,6 +1069,10 @@ async function archiveToSection(
   try {
     const { tFile, lines } = await readFileLines(app, filePath);
 
+    // Recurring cards reset back to active below; if any line in this block
+    // recurs, leave the whole block where it is instead of archiving it.
+    let hasRecurrentInBlock = false;
+
     function archiveLine(idx: number, tickBox: boolean) {
       if (idx < 0 || idx >= lines.length) return;
       const parsed = parseTaskLine(lines[idx]);
@@ -1074,6 +1080,7 @@ async function archiveToSection(
       parsed.orderDigits = null;
       parsed.orderState = null;
       if (config.normRecurrent && hasRecurrentAnnotation(lines[idx], config.normRecurrent)) {
+        hasRecurrentInBlock = true;
         // Reset recurrent card: uncheck, clear done-date, restore #recurrent tag
         if (parsed.checked !== null) parsed.checked = false;
         parsed.doneDate = null;
@@ -1088,7 +1095,10 @@ async function archiveToSection(
       }
     }
 
-    archiveLine(mainLineNum - 1, true);
+    const mainIdx = mainLineNum - 1;
+    const endIdx = (maxSubLine(subLines) || mainLineNum) - 1;
+
+    archiveLine(mainIdx, true);
     const recurse = (subs: any[]) => {
       for (const sub of subs) {
         archiveLine(sub.line - 1, false);
@@ -1096,6 +1106,22 @@ async function archiveToSection(
       }
     };
     recurse(subLines);
+
+    if (_isTopLevel && !hasRecurrentInBlock) {
+      // Move the whole card + its descendants into a collapsible "Archived"
+      // callout at the end of the document, creating it if needed. The "-"
+      // after the callout type makes it foldable and collapsed by default.
+      const blockLines = lines.slice(mainIdx, endIdx + 1).map((l) => `> ${l}`);
+      lines.splice(mainIdx, endIdx - mainIdx + 1);
+
+      const calloutIdx = lines.findIndex((l) => l.trim() === ARCHIVE_CALLOUT_HEADER);
+      if (calloutIdx >= 0) {
+        lines.splice(calloutIdx + 1, 0, ...blockLines);
+      } else {
+        while (lines.length && lines[lines.length - 1].trim() === "") lines.pop();
+        lines.push("", ARCHIVE_CALLOUT_HEADER, ...blockLines);
+      }
+    }
 
     await writeFileLines(app, tFile, lines);
     return true;
@@ -3346,8 +3372,15 @@ export function attachListeners(
       ?.querySelector(".drop-zone") as HTMLElement | null;
     if (!zone) return;
 
+    // Archiving a top-level card removes its block from its original spot and
+    // appends it elsewhere, which shifts every later line number in that file.
+    // Process bottom-to-top (by line number) so line numbers captured earlier
+    // in this batch stay valid for cards still waiting to be archived.
+    const cards = Array.from(zone.querySelectorAll<HTMLElement>(".kanban-card"))
+      .sort((a, b) => parseInt(b.dataset.line!, 10) - parseInt(a.dataset.line!, 10));
+
     let count = 0;
-    for (const card of Array.from(zone.querySelectorAll<HTMLElement>(".kanban-card"))) {
+    for (const card of cards) {
       let subs: any[] = [];
       try { subs = JSON.parse(card.dataset.subs || "[]"); } catch { /* ignore malformed subs */ }
       const ok = await archiveToSection(
