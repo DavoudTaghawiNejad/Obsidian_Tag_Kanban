@@ -1879,6 +1879,7 @@ function createCardHTML(
   vaultName: string
 ): string {
   let display = item.item.text;
+  display = display.replace(/\s*%%[\s\S]*?%%/g, "").replace(/\s*✅\d{4}-\d{2}-\d{2}/, "").trim();
   const tagToRemove = extractTags(display).find(
     (t: string) => normalizeTag(t) === currentNorm
   );
@@ -1888,7 +1889,6 @@ function createCardHTML(
       .filter((w: string) => w !== tagToRemove)
       .join(" ")
       .trim();
-  display = display.replace(/\s*%%[\s\S]*?%%/g, "").replace(/\s*✅\d{4}-\d{2}-\d{2}/, "").trim();
 
   const rawText = display
     .replace(/^- \[[ xX]\] /, "")

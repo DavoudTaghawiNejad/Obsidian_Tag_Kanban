@@ -1522,12 +1522,12 @@ function maxSubLine(subs) {
 }
 function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
   let display = item.item.text;
+  display = display.replace(/\s*%%[\s\S]*?%%/g, "").replace(/\s*✅\d{4}-\d{2}-\d{2}/, "").trim();
   const tagToRemove = extractTags(display).find(
     (t) => normalizeTag(t) === currentNorm
   );
   if (tagToRemove)
     display = display.split(/\s+/).filter((w) => w !== tagToRemove).join(" ").trim();
-  display = display.replace(/\s*%%[\s\S]*?%%/g, "").replace(/\s*✅\d{4}-\d{2}-\d{2}/, "").trim();
   const rawText = display.replace(/^- \[[ xX]\] /, "").replace(/^[-*+]\s+/, "").trim();
   const mainContent = linksToHtml(formatCardDateAnnotation(formatTriggerAnnotations(rawText, config.normRecurrent)), vaultName);
   const hasSubs = item.item.subs.length > 0;
