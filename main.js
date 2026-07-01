@@ -741,20 +741,30 @@ async function addNewItem(app, rawInsertTarget, columnTag, userText, dateStr, co
     }
     const baseName = rawInsertTarget.trim().split("#")[0].replace(/\.md$/, "").trim();
     const dirPath = baseName;
-    const now = new Date();
-    const monthStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-    const monthlyFileName = `${baseName}-${monthStr}`;
-    const monthlyPath = `${dirPath}/${monthlyFileName}.md`;
     const indexPath = `${dirPath}/${baseName}.md`;
     if (!(app.vault.getAbstractFileByPath(dirPath) instanceof import_obsidian.TFolder)) {
       await app.vault.createFolder(dirPath);
     }
-    let monthlyFile = app.vault.getAbstractFileByPath(monthlyPath);
-    if (!monthlyFile) {
-      monthlyFile = await app.vault.create(monthlyPath, `# ${monthlyFileName}
+    const normColumn = normalizeTag(columnTag);
+    const isLater = normColumn === config.normLater;
+    const isRecurrent = !!config.normRecurrent && normColumn === config.normRecurrent;
+    let targetFileName;
+    if (isLater)
+      targetFileName = "Later";
+    else if (isRecurrent)
+      targetFileName = "Recurrent";
+    else {
+      const now = new Date();
+      const monthStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+      targetFileName = `${baseName}-${monthStr}`;
+    }
+    const targetPath = `${dirPath}/${targetFileName}.md`;
+    let targetFile = app.vault.getAbstractFileByPath(targetPath);
+    if (!targetFile) {
+      targetFile = await app.vault.create(targetPath, `# ${targetFileName}
 `);
     }
-    const linkLine = `[[${monthlyFileName}]]`;
+    const linkLine = `[[${targetFileName}]]`;
     let indexFile = app.vault.getAbstractFileByPath(indexPath);
     if (!indexFile) {
       await app.vault.create(indexPath, linkLine + "\n");
@@ -771,19 +781,19 @@ async function addNewItem(app, rawInsertTarget, columnTag, userText, dateStr, co
     {
       const n = new Date();
       const skipStr = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
-      if (config.normRecurrent && normalizeTag(columnTag) === config.normRecurrent && !hasValidTriggers(newLine, config.normRecurrent) && !extractSkipDate(newLine)) {
+      if (isRecurrent && !hasValidTriggers(newLine, config.normRecurrent) && !extractSkipDate(newLine)) {
         newLine = setSkipDate(newLine, skipStr);
       }
-      if (normalizeTag(columnTag) === config.normLater && !dateStr) {
+      if (isLater && !dateStr) {
         newLine = setSkipDate(newLine, skipStr);
       }
     }
-    const monthlyLines = (await app.vault.read(monthlyFile)).split("\n");
-    let insertAt = afterFrontMatter(monthlyLines);
-    if (monthlyLines[insertAt]?.match(/^#\s/))
+    const targetLines = (await app.vault.read(targetFile)).split("\n");
+    let insertAt = afterFrontMatter(targetLines);
+    if (targetLines[insertAt]?.match(/^#\s/))
       insertAt++;
-    monthlyLines.splice(insertAt, 0, newLine);
-    await app.vault.modify(monthlyFile, monthlyLines.join("\n"));
+    targetLines.splice(insertAt, 0, newLine);
+    await app.vault.modify(targetFile, targetLines.join("\n"));
     new import_obsidian.Notice(`Added "${userText}" to ${columnTag.replace(/^#/, "").toUpperCase()}.`);
     return true;
   } catch (e) {

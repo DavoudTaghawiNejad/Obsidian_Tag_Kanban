@@ -934,28 +934,39 @@ async function addNewItem(
       return true;
     }
 
-    // ── Normal path: monthly document structure ──────────────────────────────
-    // {baseName}/{baseName}-YYYY-MM.md  — tasks live here
-    // {baseName}/{baseName}.md          — index linking to each month (newest on top)
+    // ── Normal path ────────────────────────────────────────────────────────
+    // Later/Recurrent: {baseName}/{ColumnName}.md — one undated running doc per column
+    // Everything else: {baseName}/{baseName}-YYYY-MM.md — monthly document
+    // {baseName}/{baseName}.md — index linking to each target doc (newest on top)
     const baseName = rawInsertTarget.trim().split("#")[0].replace(/\.md$/, "").trim();
     const dirPath = baseName;
-    const now = new Date();
-    const monthStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-    const monthlyFileName = `${baseName}-${monthStr}`;
-    const monthlyPath = `${dirPath}/${monthlyFileName}.md`;
     const indexPath = `${dirPath}/${baseName}.md`;
 
     if (!(app.vault.getAbstractFileByPath(dirPath) instanceof TFolder)) {
       await app.vault.createFolder(dirPath);
     }
 
-    let monthlyFile = app.vault.getAbstractFileByPath(monthlyPath) as TFile | null;
-    if (!monthlyFile) {
-      monthlyFile = await app.vault.create(monthlyPath, `# ${monthlyFileName}\n`);
+    const normColumn = normalizeTag(columnTag);
+    const isLater = normColumn === config.normLater;
+    const isRecurrent = !!config.normRecurrent && normColumn === config.normRecurrent;
+
+    let targetFileName: string;
+    if (isLater) targetFileName = "Later";
+    else if (isRecurrent) targetFileName = "Recurrent";
+    else {
+      const now = new Date();
+      const monthStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+      targetFileName = `${baseName}-${monthStr}`;
+    }
+    const targetPath = `${dirPath}/${targetFileName}.md`;
+
+    let targetFile = app.vault.getAbstractFileByPath(targetPath) as TFile | null;
+    if (!targetFile) {
+      targetFile = await app.vault.create(targetPath, `# ${targetFileName}\n`);
     }
 
     // Add link to index only if not already present
-    const linkLine = `[[${monthlyFileName}]]`;
+    const linkLine = `[[${targetFileName}]]`;
     let indexFile = app.vault.getAbstractFileByPath(indexPath) as TFile | null;
     if (!indexFile) {
       await app.vault.create(indexPath, linkLine + "\n");
@@ -972,19 +983,18 @@ async function addNewItem(
     {
       const n = new Date();
       const skipStr = `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;
-      if (config.normRecurrent && normalizeTag(columnTag) === config.normRecurrent
-          && !hasValidTriggers(newLine, config.normRecurrent) && !extractSkipDate(newLine)) {
+      if (isRecurrent && !hasValidTriggers(newLine, config.normRecurrent) && !extractSkipDate(newLine)) {
         newLine = setSkipDate(newLine, skipStr);
       }
-      if (normalizeTag(columnTag) === config.normLater && !dateStr) {
+      if (isLater && !dateStr) {
         newLine = setSkipDate(newLine, skipStr);
       }
     }
-    const monthlyLines = (await app.vault.read(monthlyFile)).split("\n");
-    let insertAt = afterFrontMatter(monthlyLines);
-    if (monthlyLines[insertAt]?.match(/^#\s/)) insertAt++;
-    monthlyLines.splice(insertAt, 0, newLine);
-    await app.vault.modify(monthlyFile, monthlyLines.join("\n"));
+    const targetLines = (await app.vault.read(targetFile)).split("\n");
+    let insertAt = afterFrontMatter(targetLines);
+    if (targetLines[insertAt]?.match(/^#\s/)) insertAt++;
+    targetLines.splice(insertAt, 0, newLine);
+    await app.vault.modify(targetFile, targetLines.join("\n"));
 
     new Notice(`Added "${userText}" to ${columnTag.replace(/^#/, "").toUpperCase()}.`);
     return true;
