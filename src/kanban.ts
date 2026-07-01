@@ -2159,6 +2159,36 @@ async function tagUntaggedRecurrentCards(app: App, paths: string[], config: Kanb
   }
 }
 
+// Scans every task line (cards and sub-items) for ones that were checked off
+// directly in the document — not via the board UI — and swaps their kanban
+// column tag for the done tag, so hand-edited files still land in #done.
+async function moveCheckedCardsToDone(app: App, paths: string[], config: KanbanConfig): Promise<void> {
+  if (!config.normDone) return;
+  for (const filePath of paths) {
+    const tFile = app.vault.getAbstractFileByPath(filePath) as TFile | null;
+    if (!tFile) continue;
+    let raw: string;
+    try { raw = await app.vault.read(tFile); } catch { continue; }
+    const lines = raw.split("\n");
+    let changed = false;
+    for (let i = 0; i < lines.length; i++) {
+      const parsed = parseTaskLine(lines[i]);
+      if (parsed.checked !== true) continue;
+      if (!parsed.tags.some((t) => matchesKanbanTag(t, config.normKanban))) continue;
+      if (parsed.tags.some((t) => normalizeTag(t) === config.normDone)) continue;
+      parsed.tags = parsed.tags.filter((t) => !matchesKanbanTag(t, config.normKanban));
+      parsed.tags.push(config.doneColumn);
+      if (!parsed.doneDate) {
+        const n = new Date();
+        parsed.doneDate = `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,"0")}-${String(n.getDate()).padStart(2,"0")}`;
+      }
+      lines[i] = serializeTaskLine(parsed);
+      changed = true;
+    }
+    if (changed) await app.vault.modify(tFile, lines.join("\n"));
+  }
+}
+
 export const KANBAN_NARROW_BREAKPOINT = 700;
 
 export function isNarrowLayout(width: number): boolean {
@@ -2183,6 +2213,9 @@ export async function buildBoard(
   if (config.normRecurrent) {
     await tagUntaggedRecurrentCards(app, paths, config);
   }
+
+  // Step A1: cards/sub-items checked off directly in the document → #done
+  await moveCheckedCardsToDone(app, paths, config);
 
   let items = await collectItems(app, paths, config);
 

@@ -1764,6 +1764,42 @@ async function tagUntaggedRecurrentCards(app, paths, config) {
       await app.vault.modify(tFile, lines.join("\n"));
   }
 }
+async function moveCheckedCardsToDone(app, paths, config) {
+  if (!config.normDone)
+    return;
+  for (const filePath of paths) {
+    const tFile = app.vault.getAbstractFileByPath(filePath);
+    if (!tFile)
+      continue;
+    let raw;
+    try {
+      raw = await app.vault.read(tFile);
+    } catch {
+      continue;
+    }
+    const lines = raw.split("\n");
+    let changed = false;
+    for (let i = 0; i < lines.length; i++) {
+      const parsed = parseTaskLine(lines[i]);
+      if (parsed.checked !== true)
+        continue;
+      if (!parsed.tags.some((t) => matchesKanbanTag(t, config.normKanban)))
+        continue;
+      if (parsed.tags.some((t) => normalizeTag(t) === config.normDone))
+        continue;
+      parsed.tags = parsed.tags.filter((t) => !matchesKanbanTag(t, config.normKanban));
+      parsed.tags.push(config.doneColumn);
+      if (!parsed.doneDate) {
+        const n = new Date();
+        parsed.doneDate = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
+      }
+      lines[i] = serializeTaskLine(parsed);
+      changed = true;
+    }
+    if (changed)
+      await app.vault.modify(tFile, lines.join("\n"));
+  }
+}
 var KANBAN_NARROW_BREAKPOINT = 700;
 function isNarrowLayout(width) {
   const isPhone = /iPhone|iPod|(Android.*Mobile)/i.test(navigator.userAgent);
@@ -1778,6 +1814,7 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
   if (config.normRecurrent) {
     await tagUntaggedRecurrentCards(app, paths, config);
   }
+  await moveCheckedCardsToDone(app, paths, config);
   let items = await collectItems(app, paths, config);
   const todayStrLater = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
   const laterToMove = items.filter((i) => {
