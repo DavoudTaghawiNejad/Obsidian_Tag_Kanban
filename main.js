@@ -2278,6 +2278,11 @@ function attachListeners(boardEl, config, app, refresh) {
     const parsed = parseTaskLine(lines[lineNum - 1]);
     parsed.tags = parsed.tags.filter((t) => !config.normKanban.includes(normalizeTag(t)));
     lines[lineNum - 1] = serializeTaskLine(parsed);
+    if (config.normRecurrent && hasRecurrentAnnotation(lines[lineNum - 1], config.normRecurrent)) {
+      const n = new Date();
+      const skipStr = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
+      lines[lineNum - 1] = setSkipDate(lines[lineNum - 1], skipStr);
+    }
     await writeFileLines(app, tFile, lines);
     refresh();
   }
