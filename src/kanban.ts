@@ -2159,6 +2159,13 @@ async function tagUntaggedRecurrentCards(app: App, paths: string[], config: Kanb
   }
 }
 
+export const KANBAN_NARROW_BREAKPOINT = 700;
+
+export function isNarrowLayout(width: number): boolean {
+  const isPhone = /iPhone|iPod|(Android.*Mobile)/i.test(navigator.userAgent);
+  return isPhone || width < KANBAN_NARROW_BREAKPOINT;
+}
+
 export async function buildBoard(
   app: App,
   containerEl: HTMLElement,
@@ -2286,12 +2293,9 @@ export async function buildBoard(
     },
   });
 
-  const isPhone = /iPhone|iPod|(Android.*Mobile)/i.test(navigator.userAgent);
-  const isNarrow =
-    isPhone ||
-    (wrapper.clientWidth > 0
-      ? wrapper.clientWidth < 700
-      : window.innerWidth < 700);
+  const isNarrow = isNarrowLayout(
+    wrapper.clientWidth > 0 ? wrapper.clientWidth : window.innerWidth
+  );
   wrapper.dataset.narrow = isNarrow ? "1" : "0";
 
   const allNorms = Object.keys(columns);

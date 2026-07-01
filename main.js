@@ -1764,6 +1764,11 @@ async function tagUntaggedRecurrentCards(app, paths, config) {
       await app.vault.modify(tFile, lines.join("\n"));
   }
 }
+var KANBAN_NARROW_BREAKPOINT = 700;
+function isNarrowLayout(width) {
+  const isPhone = /iPhone|iPod|(Android.*Mobile)/i.test(navigator.userAgent);
+  return isPhone || width < KANBAN_NARROW_BREAKPOINT;
+}
 async function buildBoard(app, containerEl, config, savedActiveCol) {
   _dialogDoc = containerEl.ownerDocument;
   const vaultName = app.vault.getName();
@@ -1885,8 +1890,9 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
       style: "display:flex;overflow-x:auto;gap:0;padding:12px 0;-webkit-overflow-scrolling:touch;"
     }
   });
-  const isPhone = /iPhone|iPod|(Android.*Mobile)/i.test(navigator.userAgent);
-  const isNarrow = isPhone || (wrapper.clientWidth > 0 ? wrapper.clientWidth < 700 : window.innerWidth < 700);
+  const isNarrow = isNarrowLayout(
+    wrapper.clientWidth > 0 ? wrapper.clientWidth : window.innerWidth
+  );
   wrapper.dataset.narrow = isNarrow ? "1" : "0";
   const allNorms = Object.keys(columns);
   let activeNorm = savedActiveCol && allNorms.includes(savedActiveCol) ? savedActiveCol : config.normToday;
@@ -3020,6 +3026,8 @@ var KanbanView = class extends import_obsidian2.ItemView {
     this.debounceTimer = null;
     this.midnightTimer = null;
     this.listenerCleanup = null;
+    this.resizeObserver = null;
+    this.resizeDebounceTimer = null;
     this.plugin = plugin;
   }
   getViewType() {
@@ -3039,6 +3047,8 @@ var KanbanView = class extends import_obsidian2.ItemView {
       })
     );
     this.scheduleMidnightRefresh();
+    this.resizeObserver = new ResizeObserver(() => this.scheduleResizeCheck());
+    this.resizeObserver.observe(this.contentEl);
     await this.renderBoard();
   }
   async onClose() {
@@ -3046,6 +3056,10 @@ var KanbanView = class extends import_obsidian2.ItemView {
       clearTimeout(this.debounceTimer);
     if (this.midnightTimer)
       clearTimeout(this.midnightTimer);
+    if (this.resizeDebounceTimer)
+      clearTimeout(this.resizeDebounceTimer);
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
     this.listenerCleanup?.();
   }
   // Called from action handlers (promote, demote, archive, drop) to force an immediate re-render.
@@ -3068,6 +3082,21 @@ var KanbanView = class extends import_obsidian2.ItemView {
     if (this.debounceTimer)
       clearTimeout(this.debounceTimer);
     this.debounceTimer = setTimeout(() => this.renderBoard(), delay);
+  }
+  // Debounce resize events, then re-render only if single/multi column mode actually needs to change
+  scheduleResizeCheck() {
+    if (this.resizeDebounceTimer)
+      clearTimeout(this.resizeDebounceTimer);
+    this.resizeDebounceTimer = setTimeout(() => {
+      const wrapper = this.contentEl.querySelector("#kanban-wrapper");
+      if (!wrapper)
+        return;
+      const width = wrapper.clientWidth > 0 ? wrapper.clientWidth : this.contentEl.clientWidth;
+      const shouldBeNarrow = isNarrowLayout(width);
+      const isCurrentlyNarrow = wrapper.dataset.narrow === "1";
+      if (shouldBeNarrow !== isCurrentlyNarrow)
+        this.scheduleRefresh(0);
+    }, 150);
   }
   async renderBoard() {
     if (this.isRefreshing)

@@ -1,6 +1,6 @@
 import { ItemView, WorkspaceLeaf } from "obsidian";
 import KanbanPlugin from "./main";
-import { buildConfig, validateConfig, buildBoard, attachListeners } from "./kanban";
+import { buildConfig, validateConfig, buildBoard, attachListeners, isNarrowLayout } from "./kanban";
 
 export const VIEW_TYPE_KANBAN = "kanban-board-view";
 
@@ -10,6 +10,8 @@ export class KanbanView extends ItemView {
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
   private midnightTimer: ReturnType<typeof setTimeout> | null = null;
   private listenerCleanup: (() => void) | null = null;
+  private resizeObserver: ResizeObserver | null = null;
+  private resizeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(leaf: WorkspaceLeaf, plugin: KanbanPlugin) {
     super(leaf);
@@ -39,12 +41,19 @@ export class KanbanView extends ItemView {
     // Refresh just past midnight so past-due #later cards auto-move
     this.scheduleMidnightRefresh();
 
+    // Re-render when the pane/window is resized across the single/multi column breakpoint
+    this.resizeObserver = new ResizeObserver(() => this.scheduleResizeCheck());
+    this.resizeObserver.observe(this.contentEl);
+
     await this.renderBoard();
   }
 
   async onClose() {
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
     if (this.midnightTimer) clearTimeout(this.midnightTimer);
+    if (this.resizeDebounceTimer) clearTimeout(this.resizeDebounceTimer);
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
     this.listenerCleanup?.();
   }
 
@@ -69,6 +78,19 @@ export class KanbanView extends ItemView {
     if (this.isRefreshing) return;
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
     this.debounceTimer = setTimeout(() => this.renderBoard(), delay);
+  }
+
+  // Debounce resize events, then re-render only if single/multi column mode actually needs to change
+  private scheduleResizeCheck() {
+    if (this.resizeDebounceTimer) clearTimeout(this.resizeDebounceTimer);
+    this.resizeDebounceTimer = setTimeout(() => {
+      const wrapper = this.contentEl.querySelector<HTMLElement>("#kanban-wrapper");
+      if (!wrapper) return;
+      const width = wrapper.clientWidth > 0 ? wrapper.clientWidth : this.contentEl.clientWidth;
+      const shouldBeNarrow = isNarrowLayout(width);
+      const isCurrentlyNarrow = wrapper.dataset.narrow === "1";
+      if (shouldBeNarrow !== isCurrentlyNarrow) this.scheduleRefresh(0);
+    }, 150);
   }
 
   async renderBoard() {
