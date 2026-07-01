@@ -419,6 +419,39 @@ function getDefaultDate(existing = null) {
   return c <= today ? getNextMonday() : c;
 }
 var TRIGGER_LINE_STYLE = `display:block;font-size:.8em;color:var(--kb-date-color);font-family:var(--kb-date-font);margin-top:2px;`;
+function collapseWeekdayLabels(triggers) {
+  const weekdayIndex = (label) => {
+    const s = TRIGGER_WEEKDAYS_SHORT.indexOf(label);
+    return s !== -1 ? s : TRIGGER_WEEKDAYS_FULL.indexOf(label);
+  };
+  let firstPos = -1;
+  const present = /* @__PURE__ */ new Set();
+  triggers.forEach((label, i) => {
+    const idx = weekdayIndex(label);
+    if (idx !== -1) {
+      present.add(idx);
+      if (firstPos === -1)
+        firstPos = i;
+    }
+  });
+  const hasAllWeekdays = [1, 2, 3, 4, 5].every((i) => present.has(i));
+  if (!hasAllWeekdays)
+    return;
+  let combined;
+  if (present.has(0) && present.has(6))
+    combined = "every day";
+  else if (present.has(6))
+    combined = "week day.saturday";
+  else if (present.has(0))
+    combined = "week day.sunday";
+  else
+    combined = "week day";
+  for (let i = triggers.length - 1; i >= 0; i--) {
+    if (weekdayIndex(triggers[i]) !== -1)
+      triggers.splice(i, 1);
+  }
+  triggers.splice(firstPos, 0, combined);
+}
 function formatTriggerAnnotations(text, normRecurrent, clickable = true) {
   if (!normRecurrent)
     return text;
@@ -437,6 +470,7 @@ function formatTriggerAnnotations(text, normRecurrent, clickable = true) {
     return "";
   });
   text = text.replace(/\s{2,}/g, " ").trim();
+  collapseWeekdayLabels(triggers);
   if (triggers.length) {
     const label = `\u21BB ${triggers.join("\xB7")}`;
     const spanStyle = clickable ? `${TRIGGER_LINE_STYLE}cursor:pointer;text-decoration:underline dotted;` : TRIGGER_LINE_STYLE.replace("display:block", "display:inline");

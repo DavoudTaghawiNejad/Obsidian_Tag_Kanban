@@ -507,6 +507,39 @@ function getDefaultDate(existing: Date | null = null): Date {
 
 const TRIGGER_LINE_STYLE = `display:block;font-size:.8em;color:var(--kb-date-color);font-family:var(--kb-date-font);margin-top:2px;`;
 
+// Collapses mon-fri (+ sat/sun) trigger labels into "week day" / "week day+sat" /
+// "week day+sun" / "every day" so a full weekday recurrence doesn't list all 5-7 days.
+function collapseWeekdayLabels(triggers: string[]): void {
+  const weekdayIndex = (label: string): number => {
+    const s = TRIGGER_WEEKDAYS_SHORT.indexOf(label);
+    return s !== -1 ? s : TRIGGER_WEEKDAYS_FULL.indexOf(label);
+  };
+
+  let firstPos = -1;
+  const present = new Set<number>();
+  triggers.forEach((label, i) => {
+    const idx = weekdayIndex(label);
+    if (idx !== -1) {
+      present.add(idx);
+      if (firstPos === -1) firstPos = i;
+    }
+  });
+
+  const hasAllWeekdays = [1, 2, 3, 4, 5].every((i) => present.has(i));
+  if (!hasAllWeekdays) return;
+
+  let combined: string;
+  if (present.has(0) && present.has(6)) combined = 'every day';
+  else if (present.has(6)) combined = 'week day+sat';
+  else if (present.has(0)) combined = 'week day+sun';
+  else combined = 'week day';
+
+  for (let i = triggers.length - 1; i >= 0; i--) {
+    if (weekdayIndex(triggers[i]) !== -1) triggers.splice(i, 1);
+  }
+  triggers.splice(firstPos, 0, combined);
+}
+
 function formatTriggerAnnotations(text: string, normRecurrent: string, clickable = true): string {
   if (!normRecurrent) return text;
 
@@ -522,6 +555,8 @@ function formatTriggerAnnotations(text: string, normRecurrent: string, clickable
     return '';
   });
   text = text.replace(/\s{2,}/g, ' ').trim();
+
+  collapseWeekdayLabels(triggers);
 
   if (triggers.length) {
     const label = `↻ ${triggers.join('·')}`;
