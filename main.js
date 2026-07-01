@@ -410,6 +410,31 @@ function getNextMonday() {
   d.setDate(d.getDate() + diff);
   return d;
 }
+function getTomorrow() {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() + 1);
+  return d;
+}
+function getNextWeekend() {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  const diff = (6 - d.getDay() + 7) % 7 || 7;
+  d.setDate(d.getDate() + diff);
+  return d;
+}
+function getNextMonth() {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  d.setMonth(d.getMonth() + 1);
+  return d;
+}
+var DATE_PRESETS = [
+  ["tomorrow", "Tomorrow", getTomorrow],
+  ["weekend", "Next weekend", getNextWeekend],
+  ["monday", "Next monday", getNextMonday],
+  ["month", "Next month", getNextMonth]
+];
 function getDefaultDate(existing = null) {
   if (!(existing instanceof Date) || isNaN(existing.getTime()))
     return getNextMonday();
@@ -1242,68 +1267,58 @@ function showInputDialog(title, defaultCreateDoc, onSubmit) {
   };
   input.focus();
 }
-function showDateDialog(title, defaultDate, onSubmit) {
-  const { dialog, close } = makeOverlay("kanban-date-dialog");
-  dialog.innerHTML = `<h3 style="margin:0 0 10px;font-size:1.1em;">${title}</h3>
-    <input id="k-date" type="date" value="${defaultDate}" style="${inputStyle()}" autofocus>
-    <div style="display:flex;gap:10px;justify-content:center;">${buttonHtml("Set", true)}${buttonHtml("No date", false)}${buttonHtml("Cancel", false)}</div>`;
-  const [setBtn, noDateBtn, cancelBtn] = dialog.querySelectorAll("button");
-  const dateInput = dialog.querySelector("#k-date");
-  const submit = () => {
-    const v = dateInput.value;
-    close();
-    if (v)
-      onSubmit("@" + v);
-  };
-  setBtn.onclick = submit;
-  noDateBtn.onclick = () => {
-    close();
-    onSubmit(null);
-  };
-  cancelBtn.onclick = close;
-  dateInput.onkeydown = (e) => {
-    if (e.key === "Enter")
-      submit();
-    if (e.key === "Escape")
-      close();
-  };
-  dateInput.focus();
-}
-function showLaterAddDialog(title, defaultCreateDoc, onSubmit) {
-  const { dialog, close } = makeOverlay("kanban-later-add-dialog");
-  const defDate = getDefaultDate().toISOString().split("T")[0];
+function showDateDialog(title, defaultDate, onSubmit, opts = {}) {
+  const { withText, defaultCreateDoc } = opts;
+  const { dialog, close } = makeOverlay(withText ? "kanban-later-add-dialog" : "kanban-date-dialog");
   const chk = defaultCreateDoc ? "checked" : "";
+  const presetBtnStyle = (active) => `padding:4px 10px;border:none;border-radius:12px;cursor:pointer;font-size:.75em;` + (active ? `background:var(--interactive-accent);color:var(--text-on-accent);` : `background:var(--background-modifier-border);color:var(--text-normal);`);
+  let selectedPreset = DATE_PRESETS.find(([, , fn]) => fn().toISOString().split("T")[0] === defaultDate)?.[0] ?? null;
+  const presetBtnsHtml = DATE_PRESETS.map(
+    ([key, label]) => `<button type="button" class="kb-date-preset" data-preset="${key}" style="${presetBtnStyle(key === selectedPreset)}">${label}</button>`
+  ).join("");
   dialog.innerHTML = `<h3 style="margin:0 0 10px;font-size:1.1em;">${title}</h3>
-    <input id="k-text" type="text" placeholder="Enter new item text..." style="${inputStyle()}" autofocus>
-    <input id="k-date" type="date" value="${defDate}" style="${inputStyle()}">
-    <label style="display:flex;align-items:center;gap:8px;margin-bottom:12px;cursor:pointer;font-size:.9em;">
+    ${withText ? `<input id="k-text" type="text" placeholder="Enter new item text..." style="${inputStyle()}" autofocus>` : ""}
+    <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:center;margin-bottom:8px;">${presetBtnsHtml}</div>
+    <input id="k-date" type="date" value="${defaultDate}" style="${inputStyle()}" ${withText ? "" : "autofocus"}>
+    ${withText ? `<label style="display:flex;align-items:center;gap:8px;margin-bottom:12px;cursor:pointer;font-size:.9em;">
       <input id="k-doc" type="checkbox" ${chk}> Create new document
-    </label>
-    <div style="display:flex;gap:10px;justify-content:center;">${buttonHtml("Add", true)}${buttonHtml("No date", false)}${buttonHtml("Cancel", false)}</div>`;
-  const [addBtn, noDateBtn, cancelBtn] = dialog.querySelectorAll("button");
-  const textInput = dialog.querySelector("#k-text");
+    </label>` : ""}
+    <div id="k-date-actions" style="display:flex;gap:10px;justify-content:center;">${buttonHtml(withText ? "Add" : "Set", true)}${buttonHtml("No date", false)}${buttonHtml("Cancel", false)}</div>`;
+  const [actionBtn, noDateBtn, cancelBtn] = dialog.querySelectorAll("#k-date-actions button");
+  const textInput = withText ? dialog.querySelector("#k-text") : null;
   const dateInput = dialog.querySelector("#k-date");
-  const docCheck = dialog.querySelector("#k-doc");
+  const docCheck = withText ? dialog.querySelector("#k-doc") : null;
+  const presetBtns = dialog.querySelectorAll(".kb-date-preset");
+  presetBtns.forEach((btn) => {
+    const preset = DATE_PRESETS.find(([key]) => key === btn.dataset.preset);
+    btn.onclick = () => {
+      dateInput.value = preset[2]().toISOString().split("T")[0];
+      selectedPreset = preset[0];
+      presetBtns.forEach((b) => {
+        b.style.cssText = presetBtnStyle(b.dataset.preset === selectedPreset);
+      });
+    };
+  });
   const submit = (useDate) => {
-    const t = textInput.value.trim();
-    const d = useDate ? dateInput.value : null;
-    const createDoc = docCheck.checked;
+    const t = textInput?.value.trim() ?? "";
+    if (withText && !t)
+      return;
+    const d = useDate ? dateInput.value : "";
     close();
-    if (t)
-      onSubmit(t, d ? "@" + d : null, createDoc);
+    onSubmit(d ? "@" + d : null, withText ? t : void 0, docCheck?.checked);
   };
-  addBtn.onclick = () => submit(true);
+  actionBtn.onclick = () => submit(true);
   noDateBtn.onclick = () => submit(false);
   cancelBtn.onclick = close;
   [textInput, dateInput].forEach((el) => {
-    el.onkeydown = (e) => {
+    el?.addEventListener("keydown", (e) => {
       if (e.key === "Enter")
         submit(true);
       if (e.key === "Escape")
         close();
-    };
+    });
   });
-  textInput.focus();
+  (textInput ?? dateInput).focus();
 }
 function showRecurrentTriggerDialog(onSubmit, existingTriggers = []) {
   const { dialog, close } = makeOverlay("kanban-recurrent-trigger-dialog");
@@ -2862,10 +2877,11 @@ function attachListeners(boardEl, config, app, refresh) {
     const title = `Add to ${tag.replace(/^#/, "").toUpperCase()} Column`;
     const isProject = config.normProject.includes(norm);
     if (norm === config.normLater) {
-      showLaterAddDialog(title, isProject, async (text, dateStr, createDoc) => {
-        if (await addNewItem(app, config.newTaskInsert, tag, text, dateStr, config, createDoc))
+      const defDate = getDefaultDate().toISOString().split("T")[0];
+      showDateDialog(title, defDate, async (dateStr, text, createDoc) => {
+        if (text && await addNewItem(app, config.newTaskInsert, tag, text, dateStr, config, !!createDoc))
           requestAnimationFrame(() => setTimeout(refresh, 50));
-      });
+      }, { withText: true, defaultCreateDoc: isProject });
     } else if (config.normRecurrent && norm === config.normRecurrent) {
       showInputDialog(title, isProject, (text, createDoc) => {
         showRecurrentTriggerDialog(async (triggerStr) => {
