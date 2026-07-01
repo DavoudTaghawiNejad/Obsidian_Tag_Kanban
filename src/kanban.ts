@@ -1463,9 +1463,6 @@ function makeOverlay(id: string) {
     "background:var(--background-primary);color:var(--kb-dialog-text,var(--text-normal));padding:20px;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,.15);min-width:300px;max-width:400px;text-align:center;";
   overlay.appendChild(dialog);
   const close = () => overlay.remove();
-  overlay.onclick = (e) => {
-    if (e.target === overlay) close();
-  };
   return { overlay, dialog, close };
 }
 
