@@ -47,6 +47,7 @@ function buildConfig(settings) {
     recurrentColumn: settings.recurrentColumn || "#recurrent",
     normRecurrent: normalizeTag(settings.recurrentColumn || "#recurrent"),
     normProject: (settings.projectColumns || []).map(normalizeTag),
+    normActive: (settings.activeColumns && settings.activeColumns.length ? settings.activeColumns : ["#next", "#important", "#today"]).map(normalizeTag),
     projectsDocument: settings.projectsDocument || "",
     allChildrenDoneColor: settings.allChildrenDoneColor,
     allCheckedColor: settings.allCheckedColor || "#2db55d",
@@ -441,9 +442,9 @@ function collapseWeekdayLabels(triggers) {
   if (present.has(0) && present.has(6))
     combined = "every day";
   else if (present.has(6))
-    combined = "week day.saturday";
+    combined = "week day+sat";
   else if (present.has(0))
-    combined = "week day.sunday";
+    combined = "week day+sun";
   else
     combined = "week day";
   for (let i = triggers.length - 1; i >= 0; i--) {
@@ -1521,10 +1522,7 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
     for (const s of subs ?? []) {
       if (isCheckboxItem(s) && !isCheckedItem(s)) {
         const tags = s.tags ?? [];
-        if (tags.some((t) => {
-          const norm = normalizeTag(t);
-          return config.normKanban.includes(norm) && norm !== config.normDone && !config.normProject.includes(norm);
-        }))
+        if (tags.some((t) => config.normActive.includes(normalizeTag(t))))
           return true;
       }
       if (s.subs?.length && hasActiveKanban(s.subs))
@@ -1532,10 +1530,25 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
     }
     return false;
   }
+  function allUncheckedInLaterOrRecurrent(subs, inheritedCovered = false) {
+    for (const s of subs ?? []) {
+      const tags = s.tags ?? [];
+      const selfCovered = tags.some((t) => {
+        const norm = normalizeTag(t);
+        return norm === config.normLater || norm === config.normRecurrent;
+      });
+      const covered = inheritedCovered || selfCovered;
+      if (isCheckboxItem(s) && !isCheckedItem(s) && !covered)
+        return false;
+      if (s.subs?.length && !allUncheckedInLaterOrRecurrent(s.subs, covered))
+        return false;
+    }
+    return true;
+  }
   const hasCheckboxSubs = hasAnyCheckbox(item.item.subs);
   const allSubsChecked = hasCheckboxSubs && !hasUnchecked(item.item.subs);
   const isProjectColumn = config.normProject.includes(currentNorm);
-  const hasUnmanagedWork = isProjectColumn && hasCheckboxSubs && hasUnchecked(item.item.subs) && !hasActiveKanban(item.item.subs);
+  const hasUnmanagedWork = isProjectColumn && hasCheckboxSubs && hasUnchecked(item.item.subs) && !hasActiveKanban(item.item.subs) && !allUncheckedInLaterOrRecurrent(item.item.subs);
   function renderSub(sub, depth) {
     const parentTag = item.item.tags.find((t) => normalizeTag(t) === currentNorm) || "";
     const hasCheckbox = /^- \[[ xX]\] /.test(sub.text);
@@ -3079,6 +3092,7 @@ var DEFAULT_SETTINGS = {
   allChildrenDoneColor: "#e03e3e",
   allCheckedColor: "#2db55d",
   projectColumns: [],
+  activeColumns: ["#next", "#important", "#today"],
   projectsDocument: "",
   columnColors: [],
   colorCardBg: "",
@@ -3270,6 +3284,14 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
     ).addText(
       (text) => text.setPlaceholder("#todo, #inprogress").setValue((this.plugin.settings.projectColumns || []).join(", ")).onChange(async (value) => {
         this.plugin.settings.projectColumns = value.split(",").map((t) => t.trim()).filter(Boolean);
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian3.Setting(containerEl).setName("Active columns").setDesc(
+      "Comma-separated tags for columns considered 'active' work. A project card is highlighted as unmanaged work only when none of its sub-tasks are in one of these columns, and not all of its sub-tasks are in the Later or Recurrent columns."
+    ).addText(
+      (text) => text.setPlaceholder("#next, #important, #today").setValue((this.plugin.settings.activeColumns || []).join(", ")).onChange(async (value) => {
+        this.plugin.settings.activeColumns = value.split(",").map((t) => t.trim()).filter(Boolean);
         await this.plugin.saveSettings();
       })
     );

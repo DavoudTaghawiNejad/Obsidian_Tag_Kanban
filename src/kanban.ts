@@ -30,6 +30,7 @@ export interface KanbanConfig {
   normLater: string;
   normRecurrent: string;
   normProject: string[];
+  normActive: string[];
   projectsDocument: string;
   allChildrenDoneColor: string;
   allCheckedColor: string;
@@ -64,6 +65,10 @@ export function buildConfig(settings: KanbanSettings): KanbanConfig {
     recurrentColumn: settings.recurrentColumn || "#recurrent",
     normRecurrent: normalizeTag(settings.recurrentColumn || "#recurrent"),
     normProject: (settings.projectColumns || []).map(normalizeTag),
+    normActive: (settings.activeColumns && settings.activeColumns.length
+      ? settings.activeColumns
+      : ["#next", "#important", "#today"]
+    ).map(normalizeTag),
     projectsDocument: settings.projectsDocument || "",
     allChildrenDoneColor: settings.allChildrenDoneColor,
     allCheckedColor: settings.allCheckedColor || "#2db55d",
@@ -1855,27 +1860,40 @@ function createCardHTML(
     }
     return false;
   }
-  // Any unchecked descendant that has an active (non-done, non-project) kanban tag.
+  // Any unchecked descendant that has a tag in the configured "active" column group.
   function hasActiveKanban(subs: any[]): boolean {
     for (const s of subs ?? []) {
       if (isCheckboxItem(s) && !isCheckedItem(s)) {
         const tags: string[] = s.tags ?? [];
-        if (tags.some((t: string) => {
-          const norm = normalizeTag(t);
-          return config.normKanban.includes(norm) && norm !== config.normDone && !config.normProject.includes(norm);
-        })) return true;
+        if (tags.some((t: string) => config.normActive.includes(normalizeTag(t)))) return true;
       }
       if (s.subs?.length && hasActiveKanban(s.subs)) return true;
     }
     return false;
   }
+  // True when every unchecked descendant is tagged Later/Recurrent, or is itself
+  // a descendant of a sub-task tagged Later/Recurrent (inheritedCovered).
+  function allUncheckedInLaterOrRecurrent(subs: any[], inheritedCovered = false): boolean {
+    for (const s of subs ?? []) {
+      const tags: string[] = s.tags ?? [];
+      const selfCovered = tags.some((t: string) => {
+        const norm = normalizeTag(t);
+        return norm === config.normLater || norm === config.normRecurrent;
+      });
+      const covered = inheritedCovered || selfCovered;
+      if (isCheckboxItem(s) && !isCheckedItem(s) && !covered) return false;
+      if (s.subs?.length && !allUncheckedInLaterOrRecurrent(s.subs, covered)) return false;
+    }
+    return true;
+  }
 
   const hasCheckboxSubs = hasAnyCheckbox(item.item.subs);
   // Green: has checkboxes and all are checked.
   const allSubsChecked   = hasCheckboxSubs && !hasUnchecked(item.item.subs);
-  // Red: only in project columns — has unchecked checkboxes but none are tracked as a non-done, non-project kanban card.
+  // Red: only in project columns — has unchecked checkboxes, none in an active column, and not all deferred to Later/Recurrent.
   const isProjectColumn  = config.normProject.includes(currentNorm);
-  const hasUnmanagedWork = isProjectColumn && hasCheckboxSubs && hasUnchecked(item.item.subs) && !hasActiveKanban(item.item.subs);
+  const hasUnmanagedWork = isProjectColumn && hasCheckboxSubs && hasUnchecked(item.item.subs)
+    && !hasActiveKanban(item.item.subs) && !allUncheckedInLaterOrRecurrent(item.item.subs);
 
   function renderSub(sub: any, depth: number): string {
     const parentTag =

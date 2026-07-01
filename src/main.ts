@@ -13,6 +13,7 @@ export interface KanbanSettings {
   allChildrenDoneColor: string;
   allCheckedColor: string;
   projectColumns: string[];
+  activeColumns: string[];
   projectsDocument: string;
   // Colors — empty string means "use Obsidian theme default"
   columnColors: string[];
@@ -40,6 +41,7 @@ export const DEFAULT_SETTINGS: KanbanSettings = {
   allChildrenDoneColor: "#e03e3e",
   allCheckedColor: "#2db55d",
   projectColumns: [],
+  activeColumns: ["#next", "#important", "#today"],
   projectsDocument: "",
   columnColors: [],
   colorCardBg: "",
@@ -310,6 +312,24 @@ class KanbanSettingTab extends PluginSettingTab {
           .setValue((this.plugin.settings.projectColumns || []).join(", "))
           .onChange(async (value) => {
             this.plugin.settings.projectColumns = value
+              .split(",")
+              .map((t) => t.trim())
+              .filter(Boolean);
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Active columns")
+      .setDesc(
+        "Comma-separated tags for columns considered 'active' work. A project card is highlighted as unmanaged work only when none of its sub-tasks are in one of these columns, and not all of its sub-tasks are in the Later or Recurrent columns."
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("#next, #important, #today")
+          .setValue((this.plugin.settings.activeColumns || []).join(", "))
+          .onChange(async (value) => {
+            this.plugin.settings.activeColumns = value
               .split(",")
               .map((t) => t.trim())
               .filter(Boolean);
