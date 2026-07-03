@@ -1249,6 +1249,12 @@ function formatNoteLines(cardIndent, notesText) {
     return `${cardIndent}  ${relIndent}${bulleted}`;
   });
 }
+function appendToFirstLine(text, suffix) {
+  const idx = text.indexOf("\n");
+  if (idx === -1)
+    return `${text} ${suffix}`;
+  return `${text.slice(0, idx)} ${suffix}${text.slice(idx)}`;
+}
 function checklistButtonHtml(id, title) {
   const style = "padding:3px 10px;border-radius:12px;border:1px solid var(--background-modifier-border);background:none;cursor:pointer;font-size:1em;line-height:1;display:inline-flex;align-items:center;gap:6px;color:inherit;margin-bottom:10px;";
   return `<button type="button" id="${id}" title="${title}" style="${style}">Insert &#9744;</button>`;
@@ -1569,32 +1575,38 @@ function showRecurrentTriggerDialog(onSubmit, existingTriggers = []) {
 }
 function showSubtaskDialog(onSubmit) {
   const { dialog, close } = makeOverlay("kanban-subtask-dialog");
+  const prefill = "- [ ] ";
   dialog.innerHTML = `<h3 style="margin:0 0 10px;font-size:1.1em;">Add subtask</h3>
-    <input id="k-text" type="text" placeholder="Enter subtask text..." style="${inputStyle()}" autofocus>
-    <div style="display:flex;gap:10px;justify-content:center;">${buttonHtml("Add", true)}${buttonHtml("Cancel", false)}</div>`;
-  const [addBtn, cancelBtn] = dialog.querySelectorAll("button");
+    <textarea id="k-text" placeholder="Enter subtask text..." style="${textareaStyle()}">${prefill}</textarea>
+    <div style="text-align:left;">${checklistButtonHtml("k-text-checklist", "Insert checklist item")}</div>
+    <div id="k-actions" style="display:flex;gap:10px;justify-content:center;">${buttonHtml("Add", true)}${buttonHtml("Cancel", false)}</div>`;
+  const [addBtn, cancelBtn] = dialog.querySelectorAll("#k-actions button");
   const input = dialog.querySelector("#k-text");
+  const checklistBtn = dialog.querySelector("#k-text-checklist");
   const submit = () => {
-    const v = input.value.trim();
+    const v = input.value;
     close();
-    if (v)
+    if (v.trim())
       onSubmit(v);
   };
   addBtn.onclick = submit;
   cancelBtn.onclick = close;
+  checklistBtn.onclick = () => insertChecklistPrefix(input);
   input.onkeydown = (e) => {
-    if (e.key === "Enter")
-      submit();
     if (e.key === "Escape")
       close();
   };
   input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
 }
 async function addSubtaskToCard(app, filePath, afterLine, cardLine, text) {
   try {
     const { tFile, lines } = await readFileLines(app, filePath);
     const cardIndent = (lines[cardLine - 1]?.match(/^(\s*)/) ?? ["", ""])[1];
-    lines.splice(afterLine, 0, `${cardIndent}  - [ ] ${text}`);
+    const subLines = formatNoteLines(cardIndent, text);
+    if (!subLines.length)
+      return false;
+    lines.splice(afterLine, 0, ...subLines);
     await writeFileLines(app, tFile, lines);
     return true;
   } catch {
@@ -2377,14 +2389,14 @@ function attachListeners(boardEl, config, app, refresh) {
       if (isLater) {
         const defDate = getDefaultDate().toISOString().split("T")[0];
         showDateDialog("Set date for subtask", defDate, async (dateStr) => {
-          await doAdd(dateStr ? `${text} ${dateStr}` : text);
+          await doAdd(dateStr ? appendToFirstLine(text, dateStr) : text);
         });
       } else if (isRecurrent) {
         showRecurrentTriggerDialog(async (triggerStr) => {
           const n = new Date();
           const skipStr = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
           const triggerPart = triggerStr ? ` ${triggerStr}` : "";
-          await doAdd(`${text} @${config.normRecurrent}${triggerPart} %% @skip:${skipStr} %%`);
+          await doAdd(appendToFirstLine(text, `@${config.normRecurrent}${triggerPart} %% @skip:${skipStr} %%`));
         });
       } else {
         await doAdd(text);
