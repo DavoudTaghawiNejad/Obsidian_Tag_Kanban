@@ -1221,10 +1221,12 @@ function inputStyle() {
 function textareaStyle() {
   return inputStyle() + "min-height:70px;resize:vertical;font-family:inherit;white-space:pre;";
 }
+var CHECKLIST_MARK = "\u2610";
 function formatNoteLines(cardIndent, notesText) {
   if (!notesText || !notesText.trim())
     return [];
-  const rawLines = notesText.replace(/\r\n/g, "\n").split("\n");
+  const expanded = notesText.split(CHECKLIST_MARK).join("- [ ] ");
+  const rawLines = expanded.replace(/\r\n/g, "\n").split("\n");
   while (rawLines.length && rawLines[0].trim() === "")
     rawLines.shift();
   while (rawLines.length && rawLines[rawLines.length - 1].trim() === "")
@@ -1269,7 +1271,7 @@ function insertChecklistPrefix(textarea) {
   })();
   const leadingWs = (value.slice(lineStart, lineEnd).match(/^[ \t]*/) || [""])[0];
   const insertPos = lineStart + leadingWs.length;
-  const prefix = "- [ ] ";
+  const prefix = CHECKLIST_MARK;
   textarea.value = value.slice(0, insertPos) + prefix + value.slice(insertPos);
   const newPos = Math.max(pos, insertPos) + prefix.length;
   textarea.focus();
@@ -1575,7 +1577,7 @@ function showRecurrentTriggerDialog(onSubmit, existingTriggers = []) {
 }
 function showSubtaskDialog(onSubmit) {
   const { dialog, close } = makeOverlay("kanban-subtask-dialog");
-  const prefill = "- [ ] ";
+  const prefill = CHECKLIST_MARK;
   dialog.innerHTML = `<h3 style="margin:0 0 10px;font-size:1.1em;">Add subtask</h3>
     <textarea id="k-text" placeholder="Enter subtask text..." style="${textareaStyle()}">${prefill}</textarea>
     <div style="text-align:left;">${checklistButtonHtml("k-text-checklist", "Insert checklist item")}</div>

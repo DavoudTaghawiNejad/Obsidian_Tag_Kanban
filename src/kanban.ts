@@ -1565,13 +1565,18 @@ function textareaStyle() {
   return inputStyle() + "min-height:70px;resize:vertical;font-family:inherit;white-space:pre;";
 }
 
+// Placeholder glyph shown on the checklist-insert button; expanded to "- [ ] "
+// before a note/subtask line is otherwise processed.
+const CHECKLIST_MARK = "☐"; // ☐
+
 // Turns pasted/typed notes text into sub-bullet lines under a newly created card.
 // Lines already formatted as "- text" or "- [ ]"/"- [x]" checkboxes are kept as-is;
 // anything else gets turned into a plain "-" bullet. Relative indentation between
 // lines is preserved, shifted one level (two spaces) under the card's own indent.
 function formatNoteLines(cardIndent: string, notesText: string): string[] {
   if (!notesText || !notesText.trim()) return [];
-  const rawLines = notesText.replace(/\r\n/g, "\n").split("\n");
+  const expanded = notesText.split(CHECKLIST_MARK).join("- [ ] ");
+  const rawLines = expanded.replace(/\r\n/g, "\n").split("\n");
   while (rawLines.length && rawLines[0].trim() === "") rawLines.shift();
   while (rawLines.length && rawLines[rawLines.length - 1].trim() === "") rawLines.pop();
   if (!rawLines.length) return [];
@@ -1606,8 +1611,9 @@ function checklistButtonHtml(id: string, title: string) {
   return `<button type="button" id="${id}" title="${title}" style="${style}">Insert &#9744;</button>`;
 }
 
-// Inserts "- [ ] " at the start of the line the cursor is currently on, after
-// any existing leading whitespace so the line's indentation is preserved.
+// Inserts the checklist placeholder glyph at the start of the line the cursor is
+// currently on, after any existing leading whitespace so indentation is preserved.
+// The glyph is expanded to "- [ ] " by formatNoteLines when the card/subtask is saved.
 function insertChecklistPrefix(textarea: HTMLTextAreaElement) {
   const value = textarea.value;
   const pos = textarea.selectionStart ?? value.length;
@@ -1615,7 +1621,7 @@ function insertChecklistPrefix(textarea: HTMLTextAreaElement) {
   const lineEnd = (() => { const i = value.indexOf("\n", lineStart); return i === -1 ? value.length : i; })();
   const leadingWs = (value.slice(lineStart, lineEnd).match(/^[ \t]*/) || [""])[0];
   const insertPos = lineStart + leadingWs.length;
-  const prefix = "- [ ] ";
+  const prefix = CHECKLIST_MARK;
   textarea.value = value.slice(0, insertPos) + prefix + value.slice(insertPos);
   const newPos = Math.max(pos, insertPos) + prefix.length;
   textarea.focus();
@@ -1943,7 +1949,7 @@ function showRecurrentTriggerDialog(onSubmit: (trigger: string) => void, existin
 
 function showSubtaskDialog(onSubmit: (text: string) => void) {
   const { dialog, close } = makeOverlay("kanban-subtask-dialog");
-  const prefill = "- [ ] ";
+  const prefill = CHECKLIST_MARK;
   dialog.innerHTML = `<h3 style="margin:0 0 10px;font-size:1.1em;">Add subtask</h3>
     <textarea id="k-text" placeholder="Enter subtask text..." style="${textareaStyle()}">${prefill}</textarea>
     <div style="text-align:left;">${checklistButtonHtml("k-text-checklist", "Insert checklist item")}</div>
