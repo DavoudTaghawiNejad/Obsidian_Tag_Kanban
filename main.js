@@ -738,11 +738,12 @@ async function moveToColumn(app, filePath, lineNum, originalTags, targetTag, isD
     return false;
   }
 }
-async function addNewItem(app, rawInsertTarget, columnTag, userText, dateStr, config, createDoc = false) {
+async function addNewItem(app, rawInsertTarget, columnTag, userText, dateStr, config, createDoc = false, notesText = "") {
   try {
     if (!userText?.trim())
       return false;
     let cardText = userText.trim();
+    const noteLines = formatNoteLines("", notesText);
     if (createDoc) {
       const safeTitle = cardText.replace(/\s*%%[\s\S]*?%%/g, "").replace(/@\S+/g, "").replace(/[\\/:*?"<>|#\[\]]/g, " ").replace(/\s+/g, " ").trim();
       const docPath = `${safeTitle}.md`;
@@ -765,7 +766,7 @@ async function addNewItem(app, rawInsertTarget, columnTag, userText, dateStr, co
         }
       }
       const projLines = (await app.vault.read(projFile)).split("\n");
-      projLines.splice(afterFrontMatter(projLines), 0, newLine2);
+      projLines.splice(afterFrontMatter(projLines), 0, newLine2, ...noteLines);
       await app.vault.modify(projFile, projLines.join("\n"));
       const masterDocName = config.projectsDocument.trim();
       if (masterDocName) {
@@ -835,7 +836,7 @@ async function addNewItem(app, rawInsertTarget, columnTag, userText, dateStr, co
     let insertAt = afterFrontMatter(targetLines);
     if (targetLines[insertAt]?.match(/^#\s/))
       insertAt++;
-    targetLines.splice(insertAt, 0, newLine);
+    targetLines.splice(insertAt, 0, newLine, ...noteLines);
     await app.vault.modify(targetFile, targetLines.join("\n"));
     new import_obsidian.Notice(`Added "${userText}" to ${columnTag.replace(/^#/, "").toUpperCase()}.`);
     return true;
@@ -1217,6 +1218,57 @@ function makeOverlay(id) {
 function inputStyle() {
   return "width:100%;padding:8px;margin-bottom:10px;border:1px solid var(--background-modifier-border);border-radius:4px;box-sizing:border-box;background:var(--background-secondary);color:var(--text-normal);";
 }
+function textareaStyle() {
+  return inputStyle() + "min-height:70px;resize:vertical;font-family:inherit;white-space:pre;";
+}
+function formatNoteLines(cardIndent, notesText) {
+  if (!notesText || !notesText.trim())
+    return [];
+  const rawLines = notesText.replace(/\r\n/g, "\n").split("\n");
+  while (rawLines.length && rawLines[0].trim() === "")
+    rawLines.shift();
+  while (rawLines.length && rawLines[rawLines.length - 1].trim() === "")
+    rawLines.pop();
+  if (!rawLines.length)
+    return [];
+  let minIndent = Infinity;
+  for (const line of rawLines) {
+    if (line.trim() === "")
+      continue;
+    minIndent = Math.min(minIndent, (line.match(/^(\s*)/) || [""])[0].length);
+  }
+  if (!isFinite(minIndent))
+    minIndent = 0;
+  return rawLines.map((line) => {
+    if (line.trim() === "")
+      return "";
+    const stripped = line.slice(minIndent);
+    const relIndent = (stripped.match(/^(\s*)/) || [""])[0];
+    const content = stripped.slice(relIndent.length);
+    const bulleted = /^-\s/.test(content) ? content : `- ${content}`;
+    return `${cardIndent}  ${relIndent}${bulleted}`;
+  });
+}
+function checklistButtonHtml(id, title) {
+  const style = "padding:3px 10px;border-radius:12px;border:1px solid var(--background-modifier-border);background:none;cursor:pointer;font-size:1em;line-height:1;display:inline-flex;align-items:center;gap:6px;color:inherit;margin-bottom:10px;";
+  return `<button type="button" id="${id}" title="${title}" style="${style}">Insert &#9744;</button>`;
+}
+function insertChecklistPrefix(textarea) {
+  const value = textarea.value;
+  const pos = textarea.selectionStart ?? value.length;
+  const lineStart = value.lastIndexOf("\n", pos - 1) + 1;
+  const lineEnd = (() => {
+    const i = value.indexOf("\n", lineStart);
+    return i === -1 ? value.length : i;
+  })();
+  const leadingWs = (value.slice(lineStart, lineEnd).match(/^[ \t]*/) || [""])[0];
+  const insertPos = lineStart + leadingWs.length;
+  const prefix = "- [ ] ";
+  textarea.value = value.slice(0, insertPos) + prefix + value.slice(insertPos);
+  const newPos = Math.max(pos, insertPos) + prefix.length;
+  textarea.focus();
+  textarea.setSelectionRange(newPos, newPos);
+}
 function buttonHtml(label, accent) {
   const bg = accent ? "var(--interactive-accent)" : "var(--background-modifier-border)";
   const color = accent ? "var(--text-on-accent)" : "var(--text-normal)";
@@ -1261,25 +1313,35 @@ function showInputDialog(title, defaultCreateDoc, onSubmit) {
   const chk = defaultCreateDoc ? "checked" : "";
   dialog.innerHTML = `<h3 style="margin:0 0 10px;font-size:1.1em;">${title}</h3>
     <input id="k-text" type="text" placeholder="Enter new item text..." style="${inputStyle()}" autofocus>
+    <textarea id="k-notes" placeholder="Additional notes (optional)..." style="${textareaStyle()}"></textarea>
+    <div style="text-align:left;">${checklistButtonHtml("k-notes-checklist", "Insert checklist item")}</div>
     <label style="display:flex;align-items:center;gap:8px;margin-bottom:12px;cursor:pointer;font-size:.9em;">
       <input id="k-doc" type="checkbox" ${chk}> Create new document
     </label>
-    <div style="display:flex;gap:10px;justify-content:center;">${buttonHtml("Add", true)}${buttonHtml("Cancel", false)}</div>`;
-  const [addBtn, cancelBtn] = dialog.querySelectorAll("button");
+    <div id="k-actions" style="display:flex;gap:10px;justify-content:center;">${buttonHtml("Add", true)}${buttonHtml("Cancel", false)}</div>`;
+  const [addBtn, cancelBtn] = dialog.querySelectorAll("#k-actions button");
   const input = dialog.querySelector("#k-text");
+  const notesInput = dialog.querySelector("#k-notes");
+  const checklistBtn = dialog.querySelector("#k-notes-checklist");
   const docCheck = dialog.querySelector("#k-doc");
   const submit = () => {
     const v = input.value.trim();
     const createDoc = docCheck.checked;
+    const notes = notesInput.value;
     close();
     if (v)
-      onSubmit(v, createDoc);
+      onSubmit(v, createDoc, notes);
   };
   addBtn.onclick = submit;
   cancelBtn.onclick = close;
+  checklistBtn.onclick = () => insertChecklistPrefix(notesInput);
   input.onkeydown = (e) => {
     if (e.key === "Enter")
       submit();
+    if (e.key === "Escape")
+      close();
+  };
+  notesInput.onkeydown = (e) => {
     if (e.key === "Escape")
       close();
   };
@@ -1296,6 +1358,8 @@ function showDateDialog(title, defaultDate, onSubmit, opts = {}) {
   ).join("");
   dialog.innerHTML = `<h3 style="margin:0 0 10px;font-size:1.1em;">${title}</h3>
     ${withText ? `<input id="k-text" type="text" placeholder="Enter new item text..." style="${inputStyle()}" autofocus>` : ""}
+    ${withText ? `<textarea id="k-notes" placeholder="Additional notes (optional)..." style="${textareaStyle()}"></textarea>` : ""}
+    ${withText ? `<div style="text-align:left;">${checklistButtonHtml("k-notes-checklist", "Insert checklist item")}</div>` : ""}
     <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:center;margin-bottom:8px;">${presetBtnsHtml}</div>
     <input id="k-date" type="date" value="${defaultDate}" style="${inputStyle()}" ${withText ? "" : "autofocus"}>
     ${withText ? `<label style="display:flex;align-items:center;gap:8px;margin-bottom:12px;cursor:pointer;font-size:.9em;">
@@ -1304,8 +1368,13 @@ function showDateDialog(title, defaultDate, onSubmit, opts = {}) {
     <div id="k-date-actions" style="display:flex;gap:10px;justify-content:center;">${buttonHtml(withText ? "Add" : "Set", true)}${buttonHtml("No date", false)}${buttonHtml("Cancel", false)}</div>`;
   const [actionBtn, noDateBtn, cancelBtn] = dialog.querySelectorAll("#k-date-actions button");
   const textInput = withText ? dialog.querySelector("#k-text") : null;
+  const notesInput = withText ? dialog.querySelector("#k-notes") : null;
+  const checklistBtn = withText ? dialog.querySelector("#k-notes-checklist") : null;
   const dateInput = dialog.querySelector("#k-date");
   const docCheck = withText ? dialog.querySelector("#k-doc") : null;
+  if (checklistBtn && notesInput) {
+    checklistBtn.onclick = () => insertChecklistPrefix(notesInput);
+  }
   const presetBtns = dialog.querySelectorAll(".kb-date-preset");
   presetBtns.forEach((btn) => {
     const preset = DATE_PRESETS.find(([key]) => key === btn.dataset.preset);
@@ -1322,8 +1391,9 @@ function showDateDialog(title, defaultDate, onSubmit, opts = {}) {
     if (withText && !t)
       return;
     const d = useDate ? dateInput.value : "";
+    const notes = notesInput?.value ?? "";
     close();
-    onSubmit(d ? "@" + d : null, withText ? t : void 0, docCheck?.checked);
+    onSubmit(d ? "@" + d : null, withText ? t : void 0, docCheck?.checked, withText ? notes : void 0);
   };
   actionBtn.onclick = () => submit(true);
   noDateBtn.onclick = () => submit(false);
@@ -1335,6 +1405,10 @@ function showDateDialog(title, defaultDate, onSubmit, opts = {}) {
       if (e.key === "Escape")
         close();
     });
+  });
+  notesInput?.addEventListener("keydown", (e) => {
+    if (e.key === "Escape")
+      close();
   });
   (textInput ?? dateInput).focus();
 }
@@ -2956,24 +3030,24 @@ function attachListeners(boardEl, config, app, refresh) {
     const isProject = config.normProject.includes(norm);
     if (norm === config.normLater) {
       const defDate = getDefaultDate().toISOString().split("T")[0];
-      showDateDialog(title, defDate, async (dateStr, text, createDoc) => {
-        if (text && await addNewItem(app, config.newTaskInsert, tag, text, dateStr, config, !!createDoc))
+      showDateDialog(title, defDate, async (dateStr, text, createDoc, notes) => {
+        if (text && await addNewItem(app, config.newTaskInsert, tag, text, dateStr, config, !!createDoc, notes))
           requestAnimationFrame(() => setTimeout(refresh, 50));
       }, { withText: true, defaultCreateDoc: isProject });
     } else if (config.normRecurrent && norm === config.normRecurrent) {
-      showInputDialog(title, isProject, (text, createDoc) => {
+      showInputDialog(title, isProject, (text, createDoc, notes) => {
         showRecurrentTriggerDialog(async (triggerStr) => {
           const n = new Date();
           const skipStr = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
           const triggerPart = triggerStr ? ` ${triggerStr}` : "";
           const annotated = `${text} @${config.normRecurrent}${triggerPart} %% @skip:${skipStr} %%`;
-          if (await addNewItem(app, config.newTaskInsert, tag, annotated, null, config, createDoc))
+          if (await addNewItem(app, config.newTaskInsert, tag, annotated, null, config, createDoc, notes))
             requestAnimationFrame(() => setTimeout(refresh, 50));
         });
       });
     } else {
-      showInputDialog(title, isProject, async (text, createDoc) => {
-        if (await addNewItem(app, config.newTaskInsert, tag, text, null, config, createDoc))
+      showInputDialog(title, isProject, async (text, createDoc, notes) => {
+        if (await addNewItem(app, config.newTaskInsert, tag, text, null, config, createDoc, notes))
           requestAnimationFrame(() => setTimeout(refresh, 50));
       });
     }
