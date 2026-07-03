@@ -521,6 +521,20 @@ function getNextWeekend(): Date {
   return d;
 }
 
+function getInSevenDays(): Date {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() + 7);
+  return d;
+}
+
+function getInThirtyDays(): Date {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() + 30);
+  return d;
+}
+
 function getNextMonth(): Date {
   const d = new Date();
   d.setHours(0, 0, 0, 0);
@@ -532,7 +546,9 @@ const DATE_PRESETS: [key: string, label: string, fn: () => Date][] = [
   ["tomorrow", "Tomorrow", getTomorrow],
   ["weekend", "Next weekend", getNextWeekend],
   ["monday", "Next monday", getNextMonday],
+  ["sevendays", "In 7 days", getInSevenDays],
   ["month", "Next month", getNextMonth],
+  ["thirtydays", "In 30 days", getInThirtyDays],
 ];
 
 function getDefaultDate(existing: Date | null = null): Date {

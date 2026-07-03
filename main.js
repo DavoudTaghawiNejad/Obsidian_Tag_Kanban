@@ -427,6 +427,18 @@ function getNextWeekend() {
   d.setDate(d.getDate() + diff);
   return d;
 }
+function getInSevenDays() {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() + 7);
+  return d;
+}
+function getInThirtyDays() {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() + 30);
+  return d;
+}
 function getNextMonth() {
   const d = new Date();
   d.setHours(0, 0, 0, 0);
@@ -437,7 +449,9 @@ var DATE_PRESETS = [
   ["tomorrow", "Tomorrow", getTomorrow],
   ["weekend", "Next weekend", getNextWeekend],
   ["monday", "Next monday", getNextMonday],
-  ["month", "Next month", getNextMonth]
+  ["sevendays", "In 7 days", getInSevenDays],
+  ["month", "Next month", getNextMonth],
+  ["thirtydays", "In 30 days", getInThirtyDays]
 ];
 function getDefaultDate(existing = null) {
   if (!(existing instanceof Date) || isNaN(existing.getTime()))
