@@ -1632,7 +1632,7 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
   const addSubBtnStyle = `width:24px;height:24px;border-radius:50%;border:1px solid var(--background-modifier-border);background:none;cursor:pointer;font-size:1.1em;line-height:1;display:inline-flex;align-items:center;justify-content:center;color:inherit;`;
   const addSubBtn = `<button class="kb-add-sub" style="${addSubBtnStyle}">+</button>`;
   const bodyHTML = hasSubs ? `<div style="position:relative;">
-         <div class="card-title" style="padding:6px 32px 6px 0;font-weight:600;cursor:pointer;color:var(--kb-text);"
+         <div class="card-title" style="padding:6px 32px 6px 0;font-weight:600;cursor:pointer;color:var(--kb-text);text-align:left;"
               onclick="this.closest('.kanban-card').querySelector('details').toggleAttribute('open')">
            ${mainContent}
            <span style="position:absolute;top:6px;right:8px;font-size:1.4em;color:var(--kb-accent);user-select:none;">${isExpanded ? "\u25B2" : "\u25BC"}</span>
@@ -1643,7 +1643,7 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
            <div style="display:flex;justify-content:flex-end;margin-top:4px;">${addSubBtn}</div>
          </details>
        </div>` : `<div style="position:relative;">
-         <div class="card-title" style="padding:6px 36px 6px 0;font-weight:600;color:var(--kb-text);">${mainContent}</div>
+         <div class="card-title" style="padding:6px 36px 6px 0;font-weight:600;color:var(--kb-text);text-align:left;">${mainContent}</div>
          <button class="kb-add-sub" style="${addSubBtnStyle}position:absolute;top:4px;right:0;">+</button>
        </div>`;
   const border = isMulti ? "background:var(--background-modifier-error-hover);border:1px solid var(--background-modifier-error);" : hasUnmanagedWork ? `border:2px solid var(--kb-children-done);background:color-mix(in srgb,var(--kb-children-done) 20%,var(--kb-card-bg));` : allSubsChecked ? `border:2px solid var(--kb-all-checked);background:color-mix(in srgb,var(--kb-all-checked) 20%,var(--kb-card-bg));` : "border:1px solid var(--background-modifier-border);";
@@ -1664,7 +1664,7 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
     data-subs='${JSON.stringify(item.item.subs.map((s) => ({ line: s.line, text: s.text, subs: s.subs || [] }))).replace(/'/g, "&#39;")}'
     data-is-promoted="${item.isPromoted || false}"
     style="padding:10px 14px;margin:8px 0;border-radius:10px;background:var(--kb-card-bg);color:var(--kb-text);
-           box-shadow:0 2px 8px rgba(0,0,0,.12);${border};cursor:move;position:relative;">
+           box-shadow:0 2px 8px rgba(0,0,0,.12);${border};cursor:move;position:relative;text-align:left;">
     ${item.indent > 0 ? '<span class="demote-btn" style="position:absolute;top:4px;left:6px;font-size:0.75em;color:var(--kb-accent);line-height:1;cursor:pointer;">&#x25B6;</span>' : ""}
     ${bodyHTML}
     ${badge}

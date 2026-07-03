@@ -2022,7 +2022,7 @@ function createCardHTML(
 
   const bodyHTML = hasSubs
     ? `<div style="position:relative;">
-         <div class="card-title" style="padding:6px 32px 6px 0;font-weight:600;cursor:pointer;color:var(--kb-text);"
+         <div class="card-title" style="padding:6px 32px 6px 0;font-weight:600;cursor:pointer;color:var(--kb-text);text-align:left;"
               onclick="this.closest('.kanban-card').querySelector('details').toggleAttribute('open')">
            ${mainContent}
            <span style="position:absolute;top:6px;right:8px;font-size:1.4em;color:var(--kb-accent);user-select:none;">${isExpanded ? "▲" : "▼"}</span>
@@ -2034,7 +2034,7 @@ function createCardHTML(
          </details>
        </div>`
     : `<div style="position:relative;">
-         <div class="card-title" style="padding:6px 36px 6px 0;font-weight:600;color:var(--kb-text);">${mainContent}</div>
+         <div class="card-title" style="padding:6px 36px 6px 0;font-weight:600;color:var(--kb-text);text-align:left;">${mainContent}</div>
          <button class="kb-add-sub" style="${addSubBtnStyle}position:absolute;top:4px;right:0;">+</button>
        </div>`;
 
@@ -2065,7 +2065,7 @@ function createCardHTML(
     data-subs='${JSON.stringify(item.item.subs.map((s: any) => ({ line: s.line, text: s.text, subs: s.subs || [] }))).replace(/'/g, "&#39;")}'
     data-is-promoted="${item.isPromoted || false}"
     style="padding:10px 14px;margin:8px 0;border-radius:10px;background:var(--kb-card-bg);color:var(--kb-text);
-           box-shadow:0 2px 8px rgba(0,0,0,.12);${border};cursor:move;position:relative;">
+           box-shadow:0 2px 8px rgba(0,0,0,.12);${border};cursor:move;position:relative;text-align:left;">
     ${item.indent > 0 ? '<span class="demote-btn" style="position:absolute;top:4px;left:6px;font-size:0.75em;color:var(--kb-accent);line-height:1;cursor:pointer;">&#x25B6;</span>' : ''}
     ${bodyHTML}
     ${badge}
