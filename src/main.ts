@@ -17,6 +17,10 @@ export interface KanbanSettings {
   projectsDocument: string;
   // Colors — empty string means "use Obsidian theme default"
   columnColors: string[];
+  // Per-column max card count, index-aligned with `kanban`. 0 / undefined = no limit.
+  columnMaxCards: number[];
+  // Shared warning color used when any column exceeds its max card count.
+  colorColumnOverLimit: string;
   colorCardBg: string;
   colorColumnBg: string;
   colorText: string;
@@ -44,6 +48,8 @@ export const DEFAULT_SETTINGS: KanbanSettings = {
   activeColumns: ["#next", "#important", "#today"],
   projectsDocument: "",
   columnColors: [],
+  columnMaxCards: [],
+  colorColumnOverLimit: "#5c1a1a",
   colorCardBg: "",
   colorColumnBg: "",
   colorText: "",
@@ -558,15 +564,29 @@ class KanbanSettingTab extends PluginSettingTab {
       (v) => { this.plugin.settings.allCheckedColor = v; }
     );
 
-    containerEl.createEl("h4", { text: "Per-column colors" });
+    fixedColor(
+      "Column over-limit warning",
+      "Background color for a column that has more cards than its configured maximum. Shared by all columns.",
+      () => this.plugin.settings.colorColumnOverLimit,
+      (v) => { this.plugin.settings.colorColumnOverLimit = v; }
+    );
+
+    containerEl.createEl("h4", { text: "Per-column settings" });
     containerEl.createEl("p", {
-      text: "Background color for each column and its narrow-mode tab. ↺ removes the custom color.",
+      text: "For each column: a background color (↺ removes the custom color) and an optional max card count. When a column exceeds its max, it turns the warning color above. Toggle \"No limit\" to disable the cap.",
       attr: { style: "color:var(--text-muted);font-size:.85em;margin-top:-6px;" },
     });
-
     this.plugin.settings.kanban.forEach((tag, i) => {
       const currentColor = (this.plugin.settings.columnColors || [])[i] || "";
-      new Setting(containerEl)
+      const currentMax = (this.plugin.settings.columnMaxCards || [])[i] || 0;
+      let numberInputEl: HTMLInputElement;
+
+      // Obsidian's own grouped-card look: a .setting-group > .setting-items wrapper
+      // renders its .setting-item children as one rounded box with dividers between them.
+      const settingGroup = containerEl.createDiv({ cls: "setting-group" });
+      const settingItems = settingGroup.createDiv({ cls: "setting-items" });
+
+      new Setting(settingItems)
         .setName(tag.replace(/^#/, "").toUpperCase())
         .addColorPicker((cp) =>
           cp
@@ -588,6 +608,44 @@ class KanbanSettingTab extends PluginSettingTab {
               this.display();
             })
         );
+
+      new Setting(settingItems)
+        .setName("Max cards")
+        .addToggle((toggle) =>
+          toggle
+            .setTooltip("No limit")
+            .setValue(currentMax === 0)
+            .onChange(async (noLimit) => {
+              numberInputEl.disabled = noLimit;
+              numberInputEl.style.opacity = noLimit ? "0.4" : "1";
+              if (!this.plugin.settings.columnMaxCards) this.plugin.settings.columnMaxCards = [];
+              if (noLimit) {
+                this.plugin.settings.columnMaxCards[i] = 0;
+              } else {
+                const n = parseInt(numberInputEl.value.trim(), 10);
+                this.plugin.settings.columnMaxCards[i] = Number.isFinite(n) && n > 0 ? n : 1;
+                numberInputEl.value = String(this.plugin.settings.columnMaxCards[i]);
+              }
+              await this.plugin.saveSettings();
+            })
+        )
+        .addText((text) => {
+          numberInputEl = text.inputEl;
+          text.inputEl.type = "number";
+          text.inputEl.min = "1";
+          text.inputEl.style.width = "5em";
+          const noLimit = currentMax === 0;
+          text.inputEl.disabled = noLimit;
+          text.inputEl.style.opacity = noLimit ? "0.4" : "1";
+          text
+            .setValue(currentMax > 0 ? String(currentMax) : "")
+            .onChange(async (value) => {
+              if (!this.plugin.settings.columnMaxCards) this.plugin.settings.columnMaxCards = [];
+              const n = parseInt(value.trim(), 10);
+              this.plugin.settings.columnMaxCards[i] = Number.isFinite(n) && n > 0 ? n : 1;
+              await this.plugin.saveSettings();
+            });
+        });
     });
 
     new Setting(containerEl)

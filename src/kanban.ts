@@ -36,6 +36,10 @@ export interface KanbanConfig {
   allCheckedColor: string;
   // Colors (empty string → fall back to Obsidian theme variable)
   columnColors: Record<string, string>;
+  // Per-column max card count keyed by normalized tag. 0 = no limit.
+  columnMaxCards: Record<string, number>;
+  // Shared warning background for columns that exceed their max card count.
+  colorColumnOverLimit: string;
   colorCardBg: string;
   colorColumnBg: string;
   colorText: string;
@@ -75,6 +79,10 @@ export function buildConfig(settings: KanbanSettings): KanbanConfig {
     columnColors: Object.fromEntries(
       (settings.kanban || []).map((tag, i) => [normalizeTag(tag), (settings.columnColors || [])[i] || ""])
     ),
+    columnMaxCards: Object.fromEntries(
+      (settings.kanban || []).map((tag, i) => [normalizeTag(tag), (settings.columnMaxCards || [])[i] || 0])
+    ),
+    colorColumnOverLimit: settings.colorColumnOverLimit || "#5c1a1a",
     colorCardBg: settings.colorCardBg || "",
     colorColumnBg: settings.colorColumnBg || "",
     colorText: settings.colorText || "",
@@ -2065,28 +2073,23 @@ function textOnBg(bgHex: string, lightText: string, darkText: string): string {
   return hexLuminance(bgHex) > 0.179 ? darkText : lightText;
 }
 
-function darkenHex(hex: string, factor: number): string {
-  const clean = hex.replace(/^#/, "");
-  if (clean.length !== 6) return hex;
-  const r = Math.round(parseInt(clean.slice(0, 2), 16) * factor);
-  const g = Math.round(parseInt(clean.slice(2, 4), 16) * factor);
-  const b = Math.round(parseInt(clean.slice(4, 6), 16) * factor);
-  return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
-}
-
 function buildColorCSS(config: KanbanConfig): string {
   const cv = (val: string, fb: string) => (val && val.trim()) ? val.trim() : fb;
   const configuredDarkText = (config.colorText && config.colorText.trim()) ? config.colorText.trim() : "#1a1a1a";
-  const perColRules = Object.entries(config.columnColors)
+  const overLimit = cv(config.colorColumnOverLimit, "#5c1a1a");
+  const overText = textOnBg(overLimit, "#ffffff", configuredDarkText);
+  // Per-column color only applies while that column is over its max card count —
+  // it overrides the shared warning color for that specific column.
+  const perColOverLimitRules = Object.entries(config.columnColors)
     .filter(([, c]) => c)
     .map(([norm, color]) => {
-      const activeBg = darkenHex(color, 0.75);
-      const textNorm = textOnBg(color, "#ffffff", configuredDarkText);
-      const textActive = textOnBg(activeBg, "#ffffff", configuredDarkText);
+      const text = textOnBg(color, "#ffffff", configuredDarkText);
       return `
-      #kanban-wrapper [data-col-container="${norm}"]{background:${color};}
-      #kanban-wrapper [data-col-norm="${norm}"]{background:${color};color:${textNorm};}
-      #kanban-wrapper [data-col-norm="${norm}"][data-col-active="1"]{background:${activeBg};color:${textActive};}
+      #kanban-wrapper [data-col-container="${norm}"][data-col-overlimit="1"]{background:${color}!important;}
+      #kanban-wrapper [data-col-container="${norm}"][data-col-overlimit="1"] h4,
+      #kanban-wrapper [data-col-container="${norm}"][data-col-overlimit="1"] .kb-col-count,
+      #kanban-wrapper [data-col-container="${norm}"][data-col-overlimit="1"] .kb-col-add-btn{color:${text}!important;}
+      #kanban-wrapper [data-col-norm="${norm}"][data-col-overlimit="1"]{background:${color}!important;color:${text}!important;}
     `;
     }).join("");
   return `
@@ -2110,7 +2113,12 @@ function buildColorCSS(config: KanbanConfig): string {
     #kanban-wrapper [data-col-norm]{background:var(--kb-col-bg);color:var(--kb-text);}
     #kanban-wrapper [data-col-norm][data-col-active="1"]{background:var(--kb-accent);color:var(--text-on-accent);font-weight:600;}
     #kanban-wrapper .kanban-card,.card-title{color:var(--kb-text);}
-    ${perColRules}`;
+    #kanban-wrapper [data-col-container][data-col-overlimit="1"]{background:${overLimit}!important;}
+    #kanban-wrapper [data-col-container][data-col-overlimit="1"] h4,
+    #kanban-wrapper [data-col-container][data-col-overlimit="1"] .kb-col-count,
+    #kanban-wrapper [data-col-container][data-col-overlimit="1"] .kb-col-add-btn{color:${overText}!important;}
+    #kanban-wrapper [data-col-norm][data-col-overlimit="1"]{background:${overLimit}!important;color:${overText}!important;}
+    ${perColOverLimitRules}`;
 }
 
 async function tagUntaggedRecurrentCards(app: App, paths: string[], config: KanbanConfig): Promise<void> {
@@ -2355,6 +2363,10 @@ export async function buildBoard(
       });
       (tab as HTMLButtonElement).dataset.colNorm = norm;
       (tab as HTMLButtonElement).dataset.colActive = isActive ? "1" : "0";
+      const tabMax = config.columnMaxCards[norm] || 0;
+      if (tabMax > 0 && col.cards.length > tabMax) {
+        (tab as HTMLButtonElement).dataset.colOverlimit = "1";
+      }
     }
   }
 
@@ -2367,7 +2379,10 @@ export async function buildBoard(
     const colStyle = isNarrow
       ? `width:calc(100% - 16px);margin:0 8px 20px;padding:10px;`
       : `flex:1;min-width:200px;max-width:260px;padding:10px 0 10px 0;margin:0;display:flex;flex-direction:column;`;
-    const colDiv = scroll.createEl("div", { attr: { style: colStyle, "data-col-container": norm } });
+    const colMax = config.columnMaxCards[norm] || 0;
+    const colAttr: Record<string, string> = { style: colStyle, "data-col-container": norm };
+    if (colMax > 0 && col.cards.length > colMax) colAttr["data-col-overlimit"] = "1";
+    const colDiv = scroll.createEl("div", { attr: colAttr });
 
     const header = colDiv.createEl("div", {
       attr: { style: "display:flex;align-items:center;margin-bottom:10px;padding:0 4px;" },
@@ -2378,13 +2393,14 @@ export async function buildBoard(
     });
     header.createEl("span", {
       text: String(col.cards.length),
-      attr: { style: "margin-right:6px;font-size:.75em;color:var(--kb-text);background:transparent;border:1px solid var(--background-modifier-border);border-radius:50%;width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;" },
+      attr: { class: "kb-col-count", style: "margin-right:6px;font-size:.75em;color:var(--kb-text);background:transparent;border:1px solid var(--background-modifier-border);border-radius:50%;width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;" },
     });
 
     if (norm !== config.normDone) {
       const btn = header.createEl("button", {
         text: "+",
         attr: {
+          class: "kb-col-add-btn",
           style:
             "width:24px;height:24px;border-radius:50%;border:1px solid var(--background-modifier-border);background:none;cursor:pointer;display:flex;align-items:center;justify-content:center;color:var(--kb-text);",
         },
@@ -2395,6 +2411,7 @@ export async function buildBoard(
       const btn = header.createEl("button", {
         text: "Archive",
         attr: {
+          class: "kb-col-add-btn",
           style:
             "height:24px;padding:0 8px;border-radius:12px;border:1px solid var(--background-modifier-border);background:none;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:0.75em;color:var(--kb-text);",
         },

@@ -54,6 +54,10 @@ function buildConfig(settings) {
     columnColors: Object.fromEntries(
       (settings.kanban || []).map((tag, i) => [normalizeTag(tag), (settings.columnColors || [])[i] || ""])
     ),
+    columnMaxCards: Object.fromEntries(
+      (settings.kanban || []).map((tag, i) => [normalizeTag(tag), (settings.columnMaxCards || [])[i] || 0])
+    ),
+    colorColumnOverLimit: settings.colorColumnOverLimit || "#5c1a1a",
     colorCardBg: settings.colorCardBg || "",
     colorColumnBg: settings.colorColumnBg || "",
     colorText: settings.colorText || "",
@@ -1666,26 +1670,19 @@ function hexLuminance(hex) {
 function textOnBg(bgHex, lightText, darkText) {
   return hexLuminance(bgHex) > 0.179 ? darkText : lightText;
 }
-function darkenHex(hex, factor) {
-  const clean = hex.replace(/^#/, "");
-  if (clean.length !== 6)
-    return hex;
-  const r = Math.round(parseInt(clean.slice(0, 2), 16) * factor);
-  const g = Math.round(parseInt(clean.slice(2, 4), 16) * factor);
-  const b = Math.round(parseInt(clean.slice(4, 6), 16) * factor);
-  return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
-}
 function buildColorCSS(config) {
   const cv = (val, fb) => val && val.trim() ? val.trim() : fb;
   const configuredDarkText = config.colorText && config.colorText.trim() ? config.colorText.trim() : "#1a1a1a";
-  const perColRules = Object.entries(config.columnColors).filter(([, c]) => c).map(([norm, color]) => {
-    const activeBg = darkenHex(color, 0.75);
-    const textNorm = textOnBg(color, "#ffffff", configuredDarkText);
-    const textActive = textOnBg(activeBg, "#ffffff", configuredDarkText);
+  const overLimit = cv(config.colorColumnOverLimit, "#5c1a1a");
+  const overText = textOnBg(overLimit, "#ffffff", configuredDarkText);
+  const perColOverLimitRules = Object.entries(config.columnColors).filter(([, c]) => c).map(([norm, color]) => {
+    const text = textOnBg(color, "#ffffff", configuredDarkText);
     return `
-      #kanban-wrapper [data-col-container="${norm}"]{background:${color};}
-      #kanban-wrapper [data-col-norm="${norm}"]{background:${color};color:${textNorm};}
-      #kanban-wrapper [data-col-norm="${norm}"][data-col-active="1"]{background:${activeBg};color:${textActive};}
+      #kanban-wrapper [data-col-container="${norm}"][data-col-overlimit="1"]{background:${color}!important;}
+      #kanban-wrapper [data-col-container="${norm}"][data-col-overlimit="1"] h4,
+      #kanban-wrapper [data-col-container="${norm}"][data-col-overlimit="1"] .kb-col-count,
+      #kanban-wrapper [data-col-container="${norm}"][data-col-overlimit="1"] .kb-col-add-btn{color:${text}!important;}
+      #kanban-wrapper [data-col-norm="${norm}"][data-col-overlimit="1"]{background:${color}!important;color:${text}!important;}
     `;
   }).join("");
   return `
@@ -1709,7 +1706,12 @@ function buildColorCSS(config) {
     #kanban-wrapper [data-col-norm]{background:var(--kb-col-bg);color:var(--kb-text);}
     #kanban-wrapper [data-col-norm][data-col-active="1"]{background:var(--kb-accent);color:var(--text-on-accent);font-weight:600;}
     #kanban-wrapper .kanban-card,.card-title{color:var(--kb-text);}
-    ${perColRules}`;
+    #kanban-wrapper [data-col-container][data-col-overlimit="1"]{background:${overLimit}!important;}
+    #kanban-wrapper [data-col-container][data-col-overlimit="1"] h4,
+    #kanban-wrapper [data-col-container][data-col-overlimit="1"] .kb-col-count,
+    #kanban-wrapper [data-col-container][data-col-overlimit="1"] .kb-col-add-btn{color:${overText}!important;}
+    #kanban-wrapper [data-col-norm][data-col-overlimit="1"]{background:${overLimit}!important;color:${overText}!important;}
+    ${perColOverLimitRules}`;
 }
 async function tagUntaggedRecurrentCards(app, paths, config) {
   const annotationRe = new RegExp(`@${config.normRecurrent}\\b`, "i");
@@ -1953,6 +1955,10 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
       });
       tab.dataset.colNorm = norm;
       tab.dataset.colActive = isActive ? "1" : "0";
+      const tabMax = config.columnMaxCards[norm] || 0;
+      if (tabMax > 0 && col.cards.length > tabMax) {
+        tab.dataset.colOverlimit = "1";
+      }
     }
   }
   const colKeys = isNarrow ? [activeNorm] : allNorms;
@@ -1961,7 +1967,11 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
     if (!col)
       continue;
     const colStyle = isNarrow ? `width:calc(100% - 16px);margin:0 8px 20px;padding:10px;` : `flex:1;min-width:200px;max-width:260px;padding:10px 0 10px 0;margin:0;display:flex;flex-direction:column;`;
-    const colDiv = scroll.createEl("div", { attr: { style: colStyle, "data-col-container": norm } });
+    const colMax = config.columnMaxCards[norm] || 0;
+    const colAttr = { style: colStyle, "data-col-container": norm };
+    if (colMax > 0 && col.cards.length > colMax)
+      colAttr["data-col-overlimit"] = "1";
+    const colDiv = scroll.createEl("div", { attr: colAttr });
     const header = colDiv.createEl("div", {
       attr: { style: "display:flex;align-items:center;margin-bottom:10px;padding:0 4px;" }
     });
@@ -1971,12 +1981,13 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
     });
     header.createEl("span", {
       text: String(col.cards.length),
-      attr: { style: "margin-right:6px;font-size:.75em;color:var(--kb-text);background:transparent;border:1px solid var(--background-modifier-border);border-radius:50%;width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;" }
+      attr: { class: "kb-col-count", style: "margin-right:6px;font-size:.75em;color:var(--kb-text);background:transparent;border:1px solid var(--background-modifier-border);border-radius:50%;width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;" }
     });
     if (norm !== config.normDone) {
       const btn = header.createEl("button", {
         text: "+",
         attr: {
+          class: "kb-col-add-btn",
           style: "width:24px;height:24px;border-radius:50%;border:1px solid var(--background-modifier-border);background:none;cursor:pointer;display:flex;align-items:center;justify-content:center;color:var(--kb-text);"
         }
       });
@@ -1986,6 +1997,7 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
       const btn = header.createEl("button", {
         text: "Archive",
         attr: {
+          class: "kb-col-add-btn",
           style: "height:24px;padding:0 8px;border-radius:12px;border:1px solid var(--background-modifier-border);background:none;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:0.75em;color:var(--kb-text);"
         }
       });
@@ -3206,6 +3218,8 @@ var DEFAULT_SETTINGS = {
   activeColumns: ["#next", "#important", "#today"],
   projectsDocument: "",
   columnColors: [],
+  columnMaxCards: [],
+  colorColumnOverLimit: "#5c1a1a",
   colorCardBg: "",
   colorColumnBg: "",
   colorText: "",
@@ -3568,14 +3582,26 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
         this.plugin.settings.allCheckedColor = v;
       }
     );
-    containerEl.createEl("h4", { text: "Per-column colors" });
+    fixedColor(
+      "Column over-limit warning",
+      "Background color for a column that has more cards than its configured maximum. Shared by all columns.",
+      () => this.plugin.settings.colorColumnOverLimit,
+      (v) => {
+        this.plugin.settings.colorColumnOverLimit = v;
+      }
+    );
+    containerEl.createEl("h4", { text: "Per-column settings" });
     containerEl.createEl("p", {
-      text: "Background color for each column and its narrow-mode tab. \u21BA removes the custom color.",
+      text: 'For each column: a background color (\u21BA removes the custom color) and an optional max card count. When a column exceeds its max, it turns the warning color above. Toggle "No limit" to disable the cap.',
       attr: { style: "color:var(--text-muted);font-size:.85em;margin-top:-6px;" }
     });
     this.plugin.settings.kanban.forEach((tag, i) => {
       const currentColor = (this.plugin.settings.columnColors || [])[i] || "";
-      new import_obsidian3.Setting(containerEl).setName(tag.replace(/^#/, "").toUpperCase()).addColorPicker(
+      const currentMax = (this.plugin.settings.columnMaxCards || [])[i] || 0;
+      let numberInputEl;
+      const settingGroup = containerEl.createDiv({ cls: "setting-group" });
+      const settingItems = settingGroup.createDiv({ cls: "setting-items" });
+      new import_obsidian3.Setting(settingItems).setName(tag.replace(/^#/, "").toUpperCase()).addColorPicker(
         (cp) => cp.setValue(currentColor || "#1e1e1e").onChange(async (value) => {
           if (!this.plugin.settings.columnColors)
             this.plugin.settings.columnColors = [];
@@ -3591,6 +3617,37 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
           this.display();
         })
       );
+      new import_obsidian3.Setting(settingItems).setName("Max cards").addToggle(
+        (toggle) => toggle.setTooltip("No limit").setValue(currentMax === 0).onChange(async (noLimit) => {
+          numberInputEl.disabled = noLimit;
+          numberInputEl.style.opacity = noLimit ? "0.4" : "1";
+          if (!this.plugin.settings.columnMaxCards)
+            this.plugin.settings.columnMaxCards = [];
+          if (noLimit) {
+            this.plugin.settings.columnMaxCards[i] = 0;
+          } else {
+            const n = parseInt(numberInputEl.value.trim(), 10);
+            this.plugin.settings.columnMaxCards[i] = Number.isFinite(n) && n > 0 ? n : 1;
+            numberInputEl.value = String(this.plugin.settings.columnMaxCards[i]);
+          }
+          await this.plugin.saveSettings();
+        })
+      ).addText((text) => {
+        numberInputEl = text.inputEl;
+        text.inputEl.type = "number";
+        text.inputEl.min = "1";
+        text.inputEl.style.width = "5em";
+        const noLimit = currentMax === 0;
+        text.inputEl.disabled = noLimit;
+        text.inputEl.style.opacity = noLimit ? "0.4" : "1";
+        text.setValue(currentMax > 0 ? String(currentMax) : "").onChange(async (value) => {
+          if (!this.plugin.settings.columnMaxCards)
+            this.plugin.settings.columnMaxCards = [];
+          const n = parseInt(value.trim(), 10);
+          this.plugin.settings.columnMaxCards[i] = Number.isFinite(n) && n > 0 ? n : 1;
+          await this.plugin.saveSettings();
+        });
+      });
     });
     new import_obsidian3.Setting(containerEl).setName("Open board").addButton(
       (btn) => btn.setButtonText("Open Kanban Board").onClick(() => {
