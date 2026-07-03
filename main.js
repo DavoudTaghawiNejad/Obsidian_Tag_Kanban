@@ -1631,11 +1631,14 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
   }
   const addSubBtnStyle = `width:24px;height:24px;border-radius:50%;border:1px solid var(--background-modifier-border);background:none;cursor:pointer;font-size:1.1em;line-height:1;display:inline-flex;align-items:center;justify-content:center;color:inherit;`;
   const addSubBtn = `<button class="kb-add-sub" style="${addSubBtnStyle}">+</button>`;
+  const TITLE_LINE_H = 1.5;
+  const iconSpacer = (width) => `<span aria-hidden="true" style="float:right;width:${width}px;height:${TITLE_LINE_H}em;"></span>`;
+  const titleStyle = `padding:6px 0;font-weight:600;color:var(--kb-text);text-align:left;line-height:${TITLE_LINE_H};`;
   const bodyHTML = hasSubs ? `<div style="position:relative;">
-         <div class="card-title" style="padding:6px 32px 6px 0;font-weight:600;cursor:pointer;color:var(--kb-text);text-align:left;"
+         <div class="card-title" style="${titleStyle}cursor:pointer;"
               onclick="this.closest('.kanban-card').querySelector('details').toggleAttribute('open')">
-           ${mainContent}
-           <span style="position:absolute;top:6px;right:8px;font-size:1.4em;color:var(--kb-accent);user-select:none;">${isExpanded ? "\u25B2" : "\u25BC"}</span>
+           ${iconSpacer(18)}${mainContent}
+           <span style="position:absolute;top:6px;right:2px;font-size:1.1em;line-height:1;color:var(--kb-accent);user-select:none;">${isExpanded ? "\u25B2" : "\u25BC"}</span>
          </div>
          <details ${isExpanded ? "open" : ""} style="margin:4px 0 0 0;">
            <summary style="display:none;"></summary>
@@ -1643,7 +1646,7 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
            <div style="display:flex;justify-content:flex-end;margin-top:4px;">${addSubBtn}</div>
          </details>
        </div>` : `<div style="position:relative;">
-         <div class="card-title" style="padding:6px 36px 6px 0;font-weight:600;color:var(--kb-text);text-align:left;">${mainContent}</div>
+         <div class="card-title" style="${titleStyle}">${iconSpacer(26)}${mainContent}</div>
          <button class="kb-add-sub" style="${addSubBtnStyle}position:absolute;top:4px;right:0;">+</button>
        </div>`;
   const border = isMulti ? "background:var(--background-modifier-error-hover);border:1px solid var(--background-modifier-error);" : hasUnmanagedWork ? `border:2px solid var(--kb-children-done);background:color-mix(in srgb,var(--kb-children-done) 20%,var(--kb-card-bg));` : allSubsChecked ? `border:2px solid var(--kb-all-checked);background:color-mix(in srgb,var(--kb-all-checked) 20%,var(--kb-card-bg));` : "border:1px solid var(--background-modifier-border);";
