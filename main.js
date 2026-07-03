@@ -1626,6 +1626,30 @@ function maxSubLine(subs) {
   }
   return max;
 }
+function isCheckboxItem(s) {
+  return /^[-*+]\s+\[[ xX]\]/.test((s.text ?? "").trim());
+}
+function isCheckedItem(s) {
+  return /^[-*+]\s+\[[xX]\]/.test((s.text ?? "").trim());
+}
+function hasAnyCheckbox(subs) {
+  for (const s of subs ?? []) {
+    if (isCheckboxItem(s))
+      return true;
+    if (s.subs?.length && hasAnyCheckbox(s.subs))
+      return true;
+  }
+  return false;
+}
+function hasUnchecked(subs) {
+  for (const s of subs ?? []) {
+    if (isCheckboxItem(s) && !isCheckedItem(s))
+      return true;
+    if (s.subs?.length && hasUnchecked(s.subs))
+      return true;
+  }
+  return false;
+}
 function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
   let display = item.item.text;
   display = display.replace(/\s*%%[\s\S]*?%%/g, "").replace(/\s*✅\d{4}-\d{2}-\d{2}/, "").trim();
@@ -1638,30 +1662,6 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
   const mainContent = linksToHtml(formatCardDateAnnotation(formatTriggerAnnotations(rawText, config.normRecurrent)), vaultName);
   const hasSubs = item.item.subs.length > 0;
   const isExpanded = item.state === "expanded";
-  function isCheckboxItem(s) {
-    return /^[-*+]\s+\[[ xX]\]/.test((s.text ?? "").trim());
-  }
-  function isCheckedItem(s) {
-    return /^[-*+]\s+\[[xX]\]/.test((s.text ?? "").trim());
-  }
-  function hasAnyCheckbox(subs) {
-    for (const s of subs ?? []) {
-      if (isCheckboxItem(s))
-        return true;
-      if (s.subs?.length && hasAnyCheckbox(s.subs))
-        return true;
-    }
-    return false;
-  }
-  function hasUnchecked(subs) {
-    for (const s of subs ?? []) {
-      if (isCheckboxItem(s) && !isCheckedItem(s))
-        return true;
-      if (s.subs?.length && hasUnchecked(s.subs))
-        return true;
-    }
-    return false;
-  }
   function hasActiveKanban(subs) {
     for (const s of subs ?? []) {
       if (isCheckboxItem(s) && !isCheckedItem(s)) {
@@ -3075,11 +3075,26 @@ function attachListeners(boardEl, config, app, refresh) {
       return;
     const cards = Array.from(zone.querySelectorAll(".kanban-card")).sort((a, b) => parseInt(b.dataset.line, 10) - parseInt(a.dataset.line, 10));
     let count = 0;
+    let opened = 0;
     for (const card of cards) {
       let subs = [];
       try {
         subs = JSON.parse(card.dataset.subs || "[]");
       } catch {
+      }
+      const alreadyOpen = card.dataset.state === "expanded";
+      if (hasUnchecked(subs) && !alreadyOpen) {
+        await updateFileOrderComment(
+          app,
+          card.dataset.file,
+          parseInt(card.dataset.line, 10),
+          card.dataset.digits || "00000",
+          "expanded"
+        );
+        card.dataset.state = "expanded";
+        card.querySelector("details")?.setAttribute("open", "");
+        opened++;
+        continue;
       }
       const ok = await archiveToSection(
         app,
@@ -3092,8 +3107,13 @@ function attachListeners(boardEl, config, app, refresh) {
       if (ok)
         count++;
     }
-    if (count) {
-      new import_obsidian.Notice(`Archived ${count} items.`);
+    if (count || opened) {
+      const parts = [];
+      if (count)
+        parts.push(`Archived ${count} item${count === 1 ? "" : "s"}.`);
+      if (opened)
+        parts.push(`Opened ${opened} card${opened === 1 ? "" : "s"} with open subtasks.`);
+      new import_obsidian.Notice(parts.join(" "));
       requestAnimationFrame(() => setTimeout(refresh, 50));
     }
   }

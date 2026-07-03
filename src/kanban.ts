@@ -1992,6 +1992,30 @@ function maxSubLine(subs: any[]): number {
   return max;
 }
 
+// Only checkbox items (- [ ] or - [x]) are tasks; plain bullet points are not.
+function isCheckboxItem(s: any): boolean {
+  return /^[-*+]\s+\[[ xX]\]/.test((s.text ?? "").trim());
+}
+function isCheckedItem(s: any): boolean {
+  return /^[-*+]\s+\[[xX]\]/.test((s.text ?? "").trim());
+}
+// Any checkbox descendant (checked or unchecked).
+function hasAnyCheckbox(subs: any[]): boolean {
+  for (const s of subs ?? []) {
+    if (isCheckboxItem(s)) return true;
+    if (s.subs?.length && hasAnyCheckbox(s.subs)) return true;
+  }
+  return false;
+}
+// Any unchecked checkbox descendant.
+function hasUnchecked(subs: any[]): boolean {
+  for (const s of subs ?? []) {
+    if (isCheckboxItem(s) && !isCheckedItem(s)) return true;
+    if (s.subs?.length && hasUnchecked(s.subs)) return true;
+  }
+  return false;
+}
+
 // ─── CARD HTML ────────────────────────────────────────────────────────────────
 
 function createCardHTML(
@@ -2022,29 +2046,6 @@ function createCardHTML(
   const hasSubs = item.item.subs.length > 0; // structural (any subs at all, for expand/collapse)
   const isExpanded = item.state === "expanded";
 
-  // Only checkbox items (- [ ] or - [x]) are tasks; plain bullet points are not.
-  function isCheckboxItem(s: any): boolean {
-    return /^[-*+]\s+\[[ xX]\]/.test((s.text ?? "").trim());
-  }
-  function isCheckedItem(s: any): boolean {
-    return /^[-*+]\s+\[[xX]\]/.test((s.text ?? "").trim());
-  }
-  // Any checkbox descendant (checked or unchecked).
-  function hasAnyCheckbox(subs: any[]): boolean {
-    for (const s of subs ?? []) {
-      if (isCheckboxItem(s)) return true;
-      if (s.subs?.length && hasAnyCheckbox(s.subs)) return true;
-    }
-    return false;
-  }
-  // Any unchecked checkbox descendant.
-  function hasUnchecked(subs: any[]): boolean {
-    for (const s of subs ?? []) {
-      if (isCheckboxItem(s) && !isCheckedItem(s)) return true;
-      if (s.subs?.length && hasUnchecked(s.subs)) return true;
-    }
-    return false;
-  }
   // Any unchecked descendant that has a tag in the configured "active" column group.
   function hasActiveKanban(subs: any[]): boolean {
     for (const s of subs ?? []) {
@@ -3604,9 +3605,29 @@ export function attachListeners(
       .sort((a, b) => parseInt(b.dataset.line!, 10) - parseInt(a.dataset.line!, 10));
 
     let count = 0;
+    let opened = 0;
     for (const card of cards) {
       let subs: any[] = [];
       try { subs = JSON.parse(card.dataset.subs || "[]"); } catch { /* ignore malformed subs */ }
+
+      // A card with open (unchecked) subtasks shouldn't be archived silently —
+      // expand it instead so the open work is visible. Once the user has
+      // already opened it (acknowledging the open subtasks), archive anyway.
+      const alreadyOpen = card.dataset.state === "expanded";
+      if (hasUnchecked(subs) && !alreadyOpen) {
+        await updateFileOrderComment(
+          app,
+          card.dataset.file!,
+          parseInt(card.dataset.line!, 10),
+          card.dataset.digits || "00000",
+          "expanded"
+        );
+        card.dataset.state = "expanded";
+        card.querySelector("details")?.setAttribute("open", "");
+        opened++;
+        continue;
+      }
+
       const ok = await archiveToSection(
         app,
         card.dataset.file!,
@@ -3617,8 +3638,11 @@ export function attachListeners(
       );
       if (ok) count++;
     }
-    if (count) {
-      new Notice(`Archived ${count} items.`);
+    if (count || opened) {
+      const parts: string[] = [];
+      if (count) parts.push(`Archived ${count} item${count === 1 ? "" : "s"}.`);
+      if (opened) parts.push(`Opened ${opened} card${opened === 1 ? "" : "s"} with open subtasks.`);
+      new Notice(parts.join(" "));
       requestAnimationFrame(() => setTimeout(refresh, 50));
     }
   }
