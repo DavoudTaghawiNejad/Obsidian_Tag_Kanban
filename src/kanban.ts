@@ -2527,6 +2527,13 @@ export function attachListeners(
   const subsHasLine = (subs: any[], line: number): boolean =>
     subs.some((s: any) => s.line === line);
 
+  // Recurses into nested subs so ancestry/family checks can cross multiple
+  // levels of outline nesting (e.g. project → phase → task), not just the
+  // immediate level — intermediate outline levels often have no kanban tag
+  // and thus no card of their own to "hop through".
+  const subsHasLineDeep = (subs: any[], line: number): boolean =>
+    subs.some((s: any) => s.line === line || subsHasLineDeep(s.subs || [], line));
+
   const applyHighlights = (card: HTMLElement) => {
     clearHighlights();
     const file = card.dataset.file!;
@@ -2538,7 +2545,7 @@ export function attachListeners(
       const tpLine = parseInt(topParent.dataset.line!, 10);
       const parent = allCards.find(
         (o) => o !== topParent && o.dataset.file === file &&
-          subsHasLine(JSON.parse(o.dataset.subs || "[]"), tpLine)
+          subsHasLineDeep(JSON.parse(o.dataset.subs || "[]"), tpLine)
       );
       if (!parent) break;
       topParent = parent;
@@ -2552,7 +2559,7 @@ export function attachListeners(
       const subs = JSON.parse(curr.dataset.subs || "[]");
       for (const other of allCards) {
         if (family.has(other) || other.dataset.file !== file) continue;
-        if (subsHasLine(subs, parseInt(other.dataset.line!, 10))) {
+        if (subsHasLineDeep(subs, parseInt(other.dataset.line!, 10))) {
           family.add(other);
           queue.push(other);
         }

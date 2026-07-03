@@ -2089,6 +2089,7 @@ function attachListeners(boardEl, config, app, refresh) {
     );
   };
   const subsHasLine = (subs, line) => subs.some((s) => s.line === line);
+  const subsHasLineDeep = (subs, line) => subs.some((s) => s.line === line || subsHasLineDeep(s.subs || [], line));
   const applyHighlights = (card) => {
     clearHighlights();
     const file = card.dataset.file;
@@ -2097,7 +2098,7 @@ function attachListeners(boardEl, config, app, refresh) {
     for (let safety = 0; safety < 20; safety++) {
       const tpLine = parseInt(topParent.dataset.line, 10);
       const parent = allCards.find(
-        (o) => o !== topParent && o.dataset.file === file && subsHasLine(JSON.parse(o.dataset.subs || "[]"), tpLine)
+        (o) => o !== topParent && o.dataset.file === file && subsHasLineDeep(JSON.parse(o.dataset.subs || "[]"), tpLine)
       );
       if (!parent)
         break;
@@ -2111,7 +2112,7 @@ function attachListeners(boardEl, config, app, refresh) {
       for (const other of allCards) {
         if (family.has(other) || other.dataset.file !== file)
           continue;
-        if (subsHasLine(subs, parseInt(other.dataset.line, 10))) {
+        if (subsHasLineDeep(subs, parseInt(other.dataset.line, 10))) {
           family.add(other);
           queue.push(other);
         }
