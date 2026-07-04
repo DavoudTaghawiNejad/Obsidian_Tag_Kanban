@@ -108,8 +108,7 @@ function parseOrderComment(text) {
   const state = stateChar === "x" ? "expanded" : stateChar === "c" ? "collapsed" : null;
   if (!state)
     return null;
-  const order = parseFloat("0." + m[1]);
-  return order > 0 && order < 1 ? { order, digits: m[1], state, len: m[1].length } : null;
+  return /[1-9]/.test(m[1]) ? { digits: m[1], state, len: m[1].length } : null;
 }
 function parseTaskLine(raw) {
   const indent = (raw.match(/^(\s*)/) || ["", ""])[1];
@@ -196,6 +195,22 @@ async function updateFileOrderComment(app, filePath, lineNum, newDigits, newStat
     return false;
   }
 }
+function compareDigits(a, b) {
+  const l = Math.max(a.length, b.length);
+  const pa = a.padEnd(l, "0");
+  const pb = b.padEnd(l, "0");
+  return pa < pb ? -1 : pa > pb ? 1 : 0;
+}
+function compareCardsByDigits(a, b) {
+  if (a.digits == null && b.digits == null)
+    return (a.discoveryIndex || 0) - (b.discoveryIndex || 0);
+  if (a.digits == null)
+    return 1;
+  if (b.digits == null)
+    return -1;
+  const c = compareDigits(a.digits, b.digits);
+  return c !== 0 ? c : (a.discoveryIndex || 0) - (b.discoveryIndex || 0);
+}
 function calcMidDigits(prev, next, isEnd) {
   const l = Math.max(prev.len || 1, next?.len || 1);
   const a = BigInt(prev.digits.padEnd(l, "0"));
@@ -203,19 +218,15 @@ function calcMidDigits(prev, next, isEnd) {
   const sum = a + b;
   const mid = sum / 2n;
   if (sum % 2n === 0n) {
-    return {
-      order: parseFloat("0." + mid.toString().padStart(l, "0")),
-      digits: mid.toString().padStart(l, "0"),
-      len: l
-    };
+    return { digits: mid.toString().padStart(l, "0"), len: l };
   }
   const digs = (mid * 10n + 5n).toString().padStart(l + 1, "0");
-  return { order: parseFloat("0." + digs), digits: digs, len: l + 1 };
+  return { digits: digs, len: l + 1 };
 }
 function calcInsertOrder(siblingData, insertIndex, isMulti = false) {
   const n = siblingData.length;
   if (insertIndex === 0 || isMulti) {
-    return n === 0 ? { order: 0.5, digits: "5", len: 1 } : calcMidDigits({ digits: "0", len: 1, order: 0 }, siblingData[0], false);
+    return n === 0 ? { digits: "5", len: 1 } : calcMidDigits({ digits: "0", len: 1 }, siblingData[0], false);
   }
   if (insertIndex >= n)
     return calcMidDigits(siblingData[n - 1], null, true);
@@ -595,7 +606,7 @@ function renderCheckbox(text, opts = {}) {
     enablePromotion = false,
     subLine = null,
     parentTag = null,
-    parentOrder = null
+    parentDigits = null
   } = opts;
   let content = text.trim();
   let cbHtml = "";
@@ -616,8 +627,8 @@ function renderCheckbox(text, opts = {}) {
   if (vaultName)
     content = linksToHtml(content, vaultName);
   content = formatInlineEmphasis(content);
-  const promoteHtml = enablePromotion && isSub && subLine && parentTag && parentOrder !== null ? `<span class="promote-icon" style="margin-left:6px;font-size:1.2em;cursor:pointer;color:var(--kb-accent);"
-           data-line="${subLine}" data-parent-tag="${parentTag}" data-parent-order="${parentOrder}">&#9655</span>` : "";
+  const promoteHtml = enablePromotion && isSub && subLine && parentTag && parentDigits !== null ? `<span class="promote-icon" style="margin-left:6px;font-size:1.2em;cursor:pointer;color:var(--kb-accent);"
+           data-line="${subLine}" data-parent-tag="${parentTag}" data-parent-digits="${parentDigits}">&#9655</span>` : "";
   return `${cbHtml}${content}${promoteHtml}`;
 }
 async function readFileLines(app, filePath) {
@@ -952,21 +963,20 @@ async function archiveToSection(app, filePath, mainLineNum, subLines, config, _i
     return false;
   }
 }
-async function promoteSubToChild(app, filePath, subLineNum, parentTag, parentOrder, config, refresh) {
+async function promoteSubToChild(app, filePath, subLineNum, parentTag, parentDigits, config, refresh) {
   try {
     const normParent = normalizeTag(parentTag);
     const targetPaths = await getTargetFilePaths(app, config);
     const allItems = await collectItems(app, targetPaths, config);
     const columns = groupByColumns(allItems, config);
-    const parentCard = (columns[normParent]?.cards || []).find((c) => c.order !== null && Math.abs(c.order - parentOrder) < 1e-10);
-    const prevSibling = parentCard ? { digits: parentCard.digits || "0", len: parentCard.len || 1, order: parentOrder } : { digits: parentOrder.toString().split(".")[1] || "0", len: (parentOrder.toString().split(".")[1] || "0").length, order: parentOrder };
-    const higher = (columns[normParent]?.cards || []).filter((c) => c.order !== null && c.order > parentOrder).sort((a, b) => a.order - b.order);
+    const parentCard = (columns[normParent]?.cards || []).find((c) => c.digits != null && c.digits === parentDigits);
+    const prevSibling = parentCard ? { digits: parentCard.digits || "0", len: parentCard.len || 1 } : { digits: parentDigits || "0", len: (parentDigits || "0").length };
+    const higher = (columns[normParent]?.cards || []).filter((c) => c.digits != null && compareDigits(c.digits, parentDigits) > 0).sort((a, b) => compareDigits(a.digits, b.digits));
     let newCalc;
     if (higher.length) {
       newCalc = calcMidDigits(prevSibling, higher[0], false);
     } else {
-      const fallback = Math.min(0.999, parentOrder + 0.1);
-      newCalc = { digits: fallback.toFixed(Math.max(prevSibling.len, 3)).split(".")[1], len: Math.max(prevSibling.len, 3) };
+      newCalc = { digits: prevSibling.digits + "9", len: prevSibling.len + 1 };
     }
     const newState = [config.normDone, config.normLater].includes(normParent) ? "collapsed" : "expanded";
     const { tFile, lines } = await readFileLines(app, filePath);
@@ -1084,7 +1094,6 @@ async function collectItems(app, targetFilePaths, config) {
             item: { text: hMatch[2].trim(), tags, line: i + 1 + start, subs: [] },
             source: { path: filePath },
             filePath,
-            order: parsed2?.order ?? null,
             state: parsed2?.state ?? "collapsed",
             digits: parsed2?.digits ?? null,
             len: parsed2?.len ?? null,
@@ -1110,7 +1119,6 @@ async function collectItems(app, targetFilePaths, config) {
         item: { text: trim, tags: ownTags, line: i + 1 + start, subs: [] },
         source: { path: filePath },
         filePath,
-        order: parsed?.order ?? null,
         state: parsed?.state ?? "collapsed",
         digits: parsed?.digits ?? null,
         len: parsed?.len ?? null,
@@ -1158,11 +1166,7 @@ function groupByColumns(items, config) {
       columns[norm].cards.push({ ...item });
     }
   }
-  const cmp = (a, b) => {
-    const oa = a.order ?? 999, ob = b.order ?? 999;
-    return Math.abs(oa - ob) < 1e-10 ? (a.discoveryIndex || 0) - (b.discoveryIndex || 0) : oa - ob;
-  };
-  Object.values(columns).forEach((col) => col.cards.sort(cmp));
+  Object.values(columns).forEach((col) => col.cards.sort(compareCardsByDigits));
   return columns;
 }
 async function assignInitialOrders(app, columns, _config) {
@@ -1184,23 +1188,24 @@ async function assignInitialOrders(app, columns, _config) {
     }
     for (const col of Object.values(columns)) {
       col.cards = col.cards.map(
-        (c) => `${c.filePath}:${c.item.line}` === key ? { ...c, order: 0, digits: "0" } : c
+        (c) => `${c.filePath}:${c.item.line}` === key ? { ...c, digits: "0" } : c
       );
     }
   }
   for (const col of Object.values(columns)) {
     const ordered = col.cards.filter(
-      (c) => c.order !== null && !c.multiTag
+      (c) => c.digits != null && !c.multiTag
     );
-    const unordered = col.cards.filter((c) => c.order === null && !c.multiTag).sort((a, b) => a.discoveryIndex - b.discoveryIndex);
+    const unordered = col.cards.filter((c) => c.digits == null && !c.multiTag).sort((a, b) => a.discoveryIndex - b.discoveryIndex);
     if (!unordered.length)
       continue;
-    const high = ordered.length ? ordered[0].order : 0.9;
-    const maxLen = ordered.length ? ordered[0].len || 1 : 1;
-    const spacing = high / (unordered.length + 1);
+    const highDigits = ordered.length ? ordered[0].digits || "9" : "9";
+    const baseLen = ordered.length ? ordered[0].len || highDigits.length : 1;
+    const len = baseLen + String(unordered.length + 1).length;
+    const highBig = BigInt(highDigits.padEnd(len, "0"));
+    const stepBig = highBig / BigInt(unordered.length + 1);
     for (let i = 0; i < unordered.length; i++) {
-      const order = (i + 1) * spacing;
-      const digits = order.toFixed(maxLen).split(".")[1];
+      const digits = (stepBig * BigInt(i + 1)).toString().padStart(len, "0");
       await updateFileOrderComment(
         app,
         unordered[i].filePath,
@@ -1208,10 +1213,9 @@ async function assignInitialOrders(app, columns, _config) {
         digits,
         "collapsed"
       );
-      Object.assign(unordered[i], { order, digits, len: maxLen, state: "collapsed" });
+      Object.assign(unordered[i], { digits, len, state: "collapsed" });
     }
-    const cmp = (a, b) => (a.order ?? 999) - (b.order ?? 999) || (a.discoveryIndex || 0) - (b.discoveryIndex || 0);
-    col.cards.sort(cmp);
+    col.cards.sort(compareCardsByDigits);
   }
 }
 var _dialogDoc = document;
@@ -1728,7 +1732,7 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
       enablePromotion: hasCheckbox && !isChecked && !alreadyTagged,
       subLine: sub.line,
       parentTag,
-      parentOrder: item.order
+      parentDigits: item.digits
     });
     return `<div style="margin:4px 0;line-height:1.5;">${indent}${rendered}</div>`;
   }
@@ -1766,7 +1770,6 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
     data-line="${item.item.line}"
     data-last-sub-line="${lastSubLn}"
     data-raw="${rawText.replace(/"/g, "&quot;")}"
-    data-order="${item.order || ""}"
     data-digits="${item.digits || ""}"
     data-state="${item.state}"
     data-tags='${JSON.stringify(item.item.tags).replace(/'/g, "&#39;")}'
@@ -2171,7 +2174,6 @@ function attachListeners(boardEl, config, app, refresh) {
       filePath: c.dataset.file,
       lineNum: parseInt(c.dataset.line, 10),
       originalTags: JSON.parse(c.dataset.tags),
-      order: parseFloat(c.dataset.order) || null,
       state: c.dataset.state,
       isPromoted: c.dataset.isPromoted === "true",
       subs: c.dataset.subs ? JSON.parse(c.dataset.subs) : [],
@@ -2179,12 +2181,9 @@ function attachListeners(boardEl, config, app, refresh) {
     };
   };
   const siblingDataFrom = (zone) => Array.from(zone.querySelectorAll(".kanban-card")).map((c) => {
-    const ord = c.dataset.order;
-    if (!ord)
-      return { order: 999, digits: "99999", len: 5 };
-    const dec = ord.split(".")[1] || "0";
-    return { order: parseFloat(ord), digits: dec, len: dec.length };
-  }).sort((a, b) => a.order - b.order);
+    const digits = c.dataset.digits || "99999";
+    return { digits, len: digits.length };
+  }).sort((a, b) => compareDigits(a.digits, b.digits));
   const highlightNearestSlot = (zone, clientY) => {
     const rect = zone.getBoundingClientRect();
     const y = clientY - rect.top;
@@ -2439,7 +2438,7 @@ function attachListeners(boardEl, config, app, refresh) {
       card.dataset.file,
       parseInt(icon.dataset.line, 10),
       icon.dataset.parentTag,
-      parseFloat(icon.dataset.parentOrder) || 0,
+      icon.dataset.parentDigits || "0",
       config,
       refresh
     );
