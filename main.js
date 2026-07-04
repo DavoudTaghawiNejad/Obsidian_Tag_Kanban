@@ -1241,13 +1241,16 @@ function makeOverlay(id) {
   overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.5);z-index:10000;display:flex;align-items:center;justify-content:center;";
   doc.body.appendChild(overlay);
   const dialog = doc.createElement("div");
-  dialog.style.cssText = "background:var(--background-primary);color:var(--kb-dialog-text,var(--text-normal));padding:20px;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,.15);min-width:300px;max-width:400px;text-align:center;";
+  dialog.style.cssText = "background:var(--background-primary);color:var(--kb-dialog-text,var(--text-normal));padding:20px;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,.15);min-width:300px;max-width:400px;max-height:90vh;overflow-y:auto;text-align:center;";
   overlay.appendChild(dialog);
   const close = () => overlay.remove();
   return { overlay, dialog, close };
 }
 function inputStyle() {
   return "width:100%;padding:8px;margin-bottom:10px;border:1px solid var(--background-modifier-border);border-radius:4px;box-sizing:border-box;background:var(--background-secondary);color:var(--text-normal);";
+}
+function dateInputStyle() {
+  return "width:auto;max-width:160px;padding:8px;margin:0 auto 10px;display:block;border:1px solid var(--background-modifier-border);border-radius:4px;box-sizing:border-box;background:var(--background-secondary);color:var(--text-normal);";
 }
 function textareaStyle() {
   return inputStyle() + "min-height:70px;resize:vertical;font-family:inherit;white-space:pre;";
@@ -1405,7 +1408,7 @@ function showDateDialog(title, defaultDate, onSubmit, opts = {}) {
     ${withText ? `<textarea id="k-notes" placeholder="Additional notes (optional)..." style="${textareaStyle()}"></textarea>` : ""}
     ${withText ? `<div style="text-align:left;">${checklistButtonHtml("k-notes-checklist", "Insert checklist item")}</div>` : ""}
     <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:center;margin-bottom:8px;">${presetBtnsHtml}</div>
-    <input id="k-date" type="date" value="${defaultDate}" style="${inputStyle()}" ${withText ? "" : "autofocus"}>
+    <input id="k-date" type="date" value="${defaultDate}" style="${dateInputStyle()}" ${withText ? "" : "autofocus"}>
     ${withText ? `<label style="display:flex;align-items:center;gap:8px;margin-bottom:12px;cursor:pointer;font-size:.9em;">
       <input id="k-doc" type="checkbox" ${chk}> Create new document
     </label>` : ""}

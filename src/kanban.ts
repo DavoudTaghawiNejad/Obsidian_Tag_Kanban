@@ -1604,7 +1604,7 @@ function makeOverlay(id: string) {
   doc.body.appendChild(overlay);
   const dialog = doc.createElement("div");
   dialog.style.cssText =
-    "background:var(--background-primary);color:var(--kb-dialog-text,var(--text-normal));padding:20px;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,.15);min-width:300px;max-width:400px;text-align:center;";
+    "background:var(--background-primary);color:var(--kb-dialog-text,var(--text-normal));padding:20px;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,.15);min-width:300px;max-width:400px;max-height:90vh;overflow-y:auto;text-align:center;";
   overlay.appendChild(dialog);
   const close = () => overlay.remove();
   return { overlay, dialog, close };
@@ -1612,6 +1612,14 @@ function makeOverlay(id: string) {
 
 function inputStyle() {
   return "width:100%;padding:8px;margin-bottom:10px;border:1px solid var(--background-modifier-border);border-radius:4px;box-sizing:border-box;background:var(--background-secondary);color:var(--text-normal);";
+}
+
+// Narrower than inputStyle()'s full width on purpose: a full-width native
+// <input type="date"> gives iPadOS Safari enough room to switch from its
+// compact picker to an expanded inline calendar grid, which grows the dialog
+// tall enough to push the action buttons off-screen.
+function dateInputStyle() {
+  return "width:auto;max-width:160px;padding:8px;margin:0 auto 10px;display:block;border:1px solid var(--background-modifier-border);border-radius:4px;box-sizing:border-box;background:var(--background-secondary);color:var(--text-normal);";
 }
 
 function textareaStyle() {
@@ -1790,7 +1798,7 @@ function showDateDialog(
     ${withText ? `<textarea id="k-notes" placeholder="Additional notes (optional)..." style="${textareaStyle()}"></textarea>` : ""}
     ${withText ? `<div style="text-align:left;">${checklistButtonHtml("k-notes-checklist", "Insert checklist item")}</div>` : ""}
     <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:center;margin-bottom:8px;">${presetBtnsHtml}</div>
-    <input id="k-date" type="date" value="${defaultDate}" style="${inputStyle()}" ${withText ? "" : "autofocus"}>
+    <input id="k-date" type="date" value="${defaultDate}" style="${dateInputStyle()}" ${withText ? "" : "autofocus"}>
     ${withText ? `<label style="display:flex;align-items:center;gap:8px;margin-bottom:12px;cursor:pointer;font-size:.9em;">
       <input id="k-doc" type="checkbox" ${chk}> Create new document
     </label>` : ""}
