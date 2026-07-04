@@ -3206,6 +3206,16 @@ export function attachListeners(
     if (!titleDiv) return;
     const card = titleDiv.closest(".kanban-card") as HTMLElement | null;
     if (!card) return;
+    if (isNarrowNow()) {
+      showCardMenu(card);
+      return;
+    }
+    await startTitleEdit(card, titleDiv);
+  }
+
+  async function startTitleEdit(card: HTMLElement, titleDivArg?: HTMLElement | null) {
+    const titleDiv = titleDivArg ?? (card.querySelector(".card-title") as HTMLElement | null);
+    if (!titleDiv) return;
     if (titleDiv.querySelector(".card-edit-input")) return;
 
     const raw = card.dataset.raw || "";
@@ -3374,8 +3384,7 @@ export function attachListeners(
   let touchTimer: ReturnType<typeof setTimeout> | null = null;
   let selectedCard: HTMLElement | null = null;
   let colPickerOverlay: HTMLElement | null = null;
-  const HOLD_DELAY = 450,
-    DRAG_DELAY = 450,
+  const DRAG_DELAY = 450,
     MOVE_THRESHOLD = 8;
   let touchStartX = 0,
     touchStartY = 0;
@@ -3410,8 +3419,13 @@ export function attachListeners(
     });
   };
 
-  const showColumnPicker = (savedCard: ReturnType<typeof cardDataFrom>) => {
+  const showCardMenu = (card: HTMLElement) => {
     closeColPicker();
+    const savedCard = cardDataFrom(card)!;
+    selectedCard = card;
+    card.style.outline = "2px solid var(--kb-accent)";
+    card.style.transform = "scale(1.02)";
+
     const doc = ownerDoc();
     const overlay = doc.createElement("div");
     overlay.id = "kanban-col-picker";
@@ -3455,6 +3469,36 @@ export function attachListeners(
       });
       list.appendChild(btn);
     }
+
+    const editBtn = doc.createElement("button");
+    editBtn.textContent = "Edit";
+    editBtn.style.cssText =
+      "margin-top:12px;padding:14px;border-radius:10px;border:1px solid var(--background-modifier-border);background:var(--background-secondary);color:var(--text-normal);width:100%;cursor:pointer;font-size:1em;font-weight:500;";
+    editBtn.addEventListener("click", () => {
+      closeColPicker();
+      clearSelection();
+      touchCard = null;
+      startTitleEdit(card);
+    });
+    sheet.appendChild(editBtn);
+
+    const deleteBtn = doc.createElement("button");
+    deleteBtn.textContent = "Delete";
+    deleteBtn.style.cssText =
+      "margin-top:8px;padding:14px;border-radius:10px;border:1px solid var(--background-modifier-border);background:var(--background-secondary);color:var(--text-error, #e03e3e);width:100%;cursor:pointer;font-size:1em;font-weight:500;";
+    deleteBtn.addEventListener("click", async () => {
+      closeColPicker();
+      clearSelection();
+      touchCard = null;
+      const confirmed = await showConfirmDialog("Delete this card?");
+      if (!confirmed) return;
+      const filePath = card.dataset.file!;
+      const lineNum = parseInt(card.dataset.line!, 10);
+      const lastLine = parseInt(card.dataset.lastSubLine || `${lineNum}`, 10);
+      await deleteLineRange(app, filePath, lineNum, lastLine);
+      requestAnimationFrame(() => setTimeout(refresh, 50));
+    });
+    sheet.appendChild(deleteBtn);
 
     const cancelBtn = doc.createElement("button");
     cancelBtn.textContent = "Cancel";
@@ -3547,48 +3591,27 @@ export function attachListeners(
     touchStartX = e.touches[0].clientX;
     touchStartY = e.touches[0].clientY;
 
-    if (isNarrowNow()) {
-      const tappedTab = (e.target as Element).closest("[data-col-norm]");
-      if (tappedTab && selectedCard) return;
-      if (!card && selectedCard) {
-        clearSelection();
-        return;
-      }
-      if (!card) return;
-
-      clearSelection();
-      touchCard = card;
-      draggedCard = cardDataFrom(card);
-      touchTimer = setTimeout(() => {
-        if (!selectedCard) {
-          selectedCard = card;
-          card.style.outline = "2px solid var(--kb-accent)";
-          card.style.transform = "scale(1.02)";
-          showColumnPicker(draggedCard);
-        }
-      }, HOLD_DELAY);
-    } else {
-      if (!card) {
-        isPanning = true;
-        panStartX = e.touches[0].clientX;
-        panStartY = e.touches[0].clientY;
-        const scrollEl = ownerDoc().getElementById("kanban-scroll");
-        panScrollStart = scrollEl ? scrollEl.scrollLeft : 0;
-        const vertEl = boardEl.closest<HTMLElement>(".view-content") ?? ownerDoc().documentElement;
-        panScrollTopStart = vertEl.scrollTop;
-        return;
-      }
-      touchCard = card;
-      draggedCard = cardDataFrom(card);
-      touchTimer = setTimeout(() => {
-        if (!isTouchDrag) {
-          isTouchDrag = true;
-          ghost = makeGhost(card);
-          collapseCardEl(card);
-          card.style.opacity = ".35";
-        }
-      }, DRAG_DELAY);
+    if (!card) {
+      if (isNarrowNow()) return; // let the browser handle native vertical scroll
+      isPanning = true;
+      panStartX = e.touches[0].clientX;
+      panStartY = e.touches[0].clientY;
+      const scrollEl = ownerDoc().getElementById("kanban-scroll");
+      panScrollStart = scrollEl ? scrollEl.scrollLeft : 0;
+      const vertEl = boardEl.closest<HTMLElement>(".view-content") ?? ownerDoc().documentElement;
+      panScrollTopStart = vertEl.scrollTop;
+      return;
     }
+    touchCard = card;
+    draggedCard = cardDataFrom(card);
+    touchTimer = setTimeout(() => {
+      if (!isTouchDrag) {
+        isTouchDrag = true;
+        ghost = makeGhost(card);
+        collapseCardEl(card);
+        card.style.opacity = ".35";
+      }
+    }, DRAG_DELAY);
   }
 
   function onTouchMove(e: TouchEvent) {
@@ -3605,32 +3628,6 @@ export function attachListeners(
     const { clientX, clientY } = e.touches[0];
     const dx = Math.abs(clientX - touchStartX);
     const dy = Math.abs(clientY - touchStartY);
-
-    if (isNarrowNow()) {
-      if (dx > MOVE_THRESHOLD || dy > MOVE_THRESHOLD) {
-        if (touchTimer) clearTimeout(touchTimer);
-        if (!selectedCard) {
-          touchCard = null;
-          draggedCard = null;
-        }
-      }
-      if (selectedCard && isTouchDrag) {
-        if (ghost) {
-          ghost.style.left = clientX - ghost.offsetWidth / 2 + "px";
-          ghost.style.top = clientY - ghost.offsetHeight / 2 - 20 + "px";
-        }
-        const { zone } = targetFromPoint(clientX, clientY);
-        boardEl.querySelectorAll<HTMLElement>(".drop-zone").forEach(
-          (z) => (z.style.borderColor = "var(--background-modifier-border)")
-        );
-        if (zone) {
-          zone.style.borderColor = "var(--kb-accent)";
-          highlightNearestSlot(zone, clientY);
-        }
-        e.preventDefault();
-      }
-      return;
-    }
 
     if (!isTouchDrag) {
       if (dy > dx * 2 && dy > MOVE_THRESHOLD) {
@@ -3682,18 +3679,6 @@ export function attachListeners(
     }
 
     const { clientX, clientY } = e.changedTouches[0];
-
-    if (isNarrowNow()) {
-      // If the column picker dialog is open, the finger lift is the end of the
-      // hold gesture — leave the dialog alone, it manages its own lifecycle.
-      if (colPickerOverlay) {
-        touchCard = null;
-        return;
-      }
-
-      touchCard = null;
-      return;
-    }
 
     if (!isTouchDrag || !draggedCard) {
       clearTouch();

@@ -2660,6 +2660,16 @@ function attachListeners(boardEl, config, app, refresh) {
     const card = titleDiv.closest(".kanban-card");
     if (!card)
       return;
+    if (isNarrowNow()) {
+      showCardMenu(card);
+      return;
+    }
+    await startTitleEdit(card, titleDiv);
+  }
+  async function startTitleEdit(card, titleDivArg) {
+    const titleDiv = titleDivArg ?? card.querySelector(".card-title");
+    if (!titleDiv)
+      return;
     if (titleDiv.querySelector(".card-edit-input"))
       return;
     const raw = card.dataset.raw || "";
@@ -2709,17 +2719,17 @@ function attachListeners(boardEl, config, app, refresh) {
         titleDiv.innerHTML = savedHTML;
       }
     };
-    input.addEventListener("keydown", async (e2) => {
-      if (e2.key === "Enter") {
-        e2.preventDefault();
+    input.addEventListener("keydown", async (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
         await finishEdit(true);
       }
-      if (e2.key === "Escape")
+      if (e.key === "Escape")
         await finishEdit(false);
     });
     input.addEventListener("input", autoResize);
     input.addEventListener("blur", () => finishEdit(true));
-    input.addEventListener("dblclick", (e2) => e2.stopPropagation());
+    input.addEventListener("dblclick", (e) => e.stopPropagation());
     requestAnimationFrame(() => requestAnimationFrame(() => {
       autoResize();
       input.focus();
@@ -2817,7 +2827,7 @@ function attachListeners(boardEl, config, app, refresh) {
   let touchTimer = null;
   let selectedCard = null;
   let colPickerOverlay = null;
-  const HOLD_DELAY = 450, DRAG_DELAY = 450, MOVE_THRESHOLD = 8;
+  const DRAG_DELAY = 450, MOVE_THRESHOLD = 8;
   let touchStartX = 0, touchStartY = 0;
   let isPanning = false;
   let panStartX = 0;
@@ -2846,8 +2856,12 @@ function attachListeners(boardEl, config, app, refresh) {
       t.style.background = "";
     });
   };
-  const showColumnPicker = (savedCard) => {
+  const showCardMenu = (card) => {
     closeColPicker();
+    const savedCard = cardDataFrom(card);
+    selectedCard = card;
+    card.style.outline = "2px solid var(--kb-accent)";
+    card.style.transform = "scale(1.02)";
     const doc = ownerDoc();
     const overlay = doc.createElement("div");
     overlay.id = "kanban-col-picker";
@@ -2881,6 +2895,33 @@ function attachListeners(boardEl, config, app, refresh) {
       });
       list.appendChild(btn);
     }
+    const editBtn = doc.createElement("button");
+    editBtn.textContent = "Edit";
+    editBtn.style.cssText = "margin-top:12px;padding:14px;border-radius:10px;border:1px solid var(--background-modifier-border);background:var(--background-secondary);color:var(--text-normal);width:100%;cursor:pointer;font-size:1em;font-weight:500;";
+    editBtn.addEventListener("click", () => {
+      closeColPicker();
+      clearSelection();
+      touchCard = null;
+      startTitleEdit(card);
+    });
+    sheet.appendChild(editBtn);
+    const deleteBtn = doc.createElement("button");
+    deleteBtn.textContent = "Delete";
+    deleteBtn.style.cssText = "margin-top:8px;padding:14px;border-radius:10px;border:1px solid var(--background-modifier-border);background:var(--background-secondary);color:var(--text-error, #e03e3e);width:100%;cursor:pointer;font-size:1em;font-weight:500;";
+    deleteBtn.addEventListener("click", async () => {
+      closeColPicker();
+      clearSelection();
+      touchCard = null;
+      const confirmed = await showConfirmDialog("Delete this card?");
+      if (!confirmed)
+        return;
+      const filePath = card.dataset.file;
+      const lineNum = parseInt(card.dataset.line, 10);
+      const lastLine = parseInt(card.dataset.lastSubLine || `${lineNum}`, 10);
+      await deleteLineRange(app, filePath, lineNum, lastLine);
+      requestAnimationFrame(() => setTimeout(refresh, 50));
+    });
+    sheet.appendChild(deleteBtn);
     const cancelBtn = doc.createElement("button");
     cancelBtn.textContent = "Cancel";
     cancelBtn.style.cssText = "margin-top:12px;padding:14px;border-radius:10px;border:1px solid var(--background-modifier-border);background:none;color:var(--text-muted);width:100%;cursor:pointer;font-size:1em;";
@@ -2967,49 +3008,28 @@ function attachListeners(boardEl, config, app, refresh) {
     const card = e.target.closest(".kanban-card");
     touchStartX = e.touches[0].clientX;
     touchStartY = e.touches[0].clientY;
-    if (isNarrowNow()) {
-      const tappedTab = e.target.closest("[data-col-norm]");
-      if (tappedTab && selectedCard)
+    if (!card) {
+      if (isNarrowNow())
         return;
-      if (!card && selectedCard) {
-        clearSelection();
-        return;
-      }
-      if (!card)
-        return;
-      clearSelection();
-      touchCard = card;
-      draggedCard = cardDataFrom(card);
-      touchTimer = setTimeout(() => {
-        if (!selectedCard) {
-          selectedCard = card;
-          card.style.outline = "2px solid var(--kb-accent)";
-          card.style.transform = "scale(1.02)";
-          showColumnPicker(draggedCard);
-        }
-      }, HOLD_DELAY);
-    } else {
-      if (!card) {
-        isPanning = true;
-        panStartX = e.touches[0].clientX;
-        panStartY = e.touches[0].clientY;
-        const scrollEl = ownerDoc().getElementById("kanban-scroll");
-        panScrollStart = scrollEl ? scrollEl.scrollLeft : 0;
-        const vertEl = boardEl.closest(".view-content") ?? ownerDoc().documentElement;
-        panScrollTopStart = vertEl.scrollTop;
-        return;
-      }
-      touchCard = card;
-      draggedCard = cardDataFrom(card);
-      touchTimer = setTimeout(() => {
-        if (!isTouchDrag) {
-          isTouchDrag = true;
-          ghost = makeGhost(card);
-          collapseCardEl(card);
-          card.style.opacity = ".35";
-        }
-      }, DRAG_DELAY);
+      isPanning = true;
+      panStartX = e.touches[0].clientX;
+      panStartY = e.touches[0].clientY;
+      const scrollEl = ownerDoc().getElementById("kanban-scroll");
+      panScrollStart = scrollEl ? scrollEl.scrollLeft : 0;
+      const vertEl = boardEl.closest(".view-content") ?? ownerDoc().documentElement;
+      panScrollTopStart = vertEl.scrollTop;
+      return;
     }
+    touchCard = card;
+    draggedCard = cardDataFrom(card);
+    touchTimer = setTimeout(() => {
+      if (!isTouchDrag) {
+        isTouchDrag = true;
+        ghost = makeGhost(card);
+        collapseCardEl(card);
+        card.style.opacity = ".35";
+      }
+    }, DRAG_DELAY);
   }
   function onTouchMove(e) {
     if (isPanning && e.touches.length === 1) {
@@ -3027,32 +3047,6 @@ function attachListeners(boardEl, config, app, refresh) {
     const { clientX, clientY } = e.touches[0];
     const dx = Math.abs(clientX - touchStartX);
     const dy = Math.abs(clientY - touchStartY);
-    if (isNarrowNow()) {
-      if (dx > MOVE_THRESHOLD || dy > MOVE_THRESHOLD) {
-        if (touchTimer)
-          clearTimeout(touchTimer);
-        if (!selectedCard) {
-          touchCard = null;
-          draggedCard = null;
-        }
-      }
-      if (selectedCard && isTouchDrag) {
-        if (ghost) {
-          ghost.style.left = clientX - ghost.offsetWidth / 2 + "px";
-          ghost.style.top = clientY - ghost.offsetHeight / 2 - 20 + "px";
-        }
-        const { zone: zone2 } = targetFromPoint(clientX, clientY);
-        boardEl.querySelectorAll(".drop-zone").forEach(
-          (z) => z.style.borderColor = "var(--background-modifier-border)"
-        );
-        if (zone2) {
-          zone2.style.borderColor = "var(--kb-accent)";
-          highlightNearestSlot(zone2, clientY);
-        }
-        e.preventDefault();
-      }
-      return;
-    }
     if (!isTouchDrag) {
       if (dy > dx * 2 && dy > MOVE_THRESHOLD) {
         clearTouch();
@@ -3102,14 +3096,6 @@ function attachListeners(boardEl, config, app, refresh) {
       return;
     }
     const { clientX, clientY } = e.changedTouches[0];
-    if (isNarrowNow()) {
-      if (colPickerOverlay) {
-        touchCard = null;
-        return;
-      }
-      touchCard = null;
-      return;
-    }
     if (!isTouchDrag || !draggedCard) {
       clearTouch();
       return;
