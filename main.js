@@ -247,8 +247,43 @@ function hasRecurrentAnnotation(text, normRecurrent) {
   return new RegExp(`@${normRecurrent}\\b`, "i").test(text);
 }
 function extractTriggerAnnotations(text, normRecurrent) {
-  const matches = text.match(/@([a-zA-Z][a-zA-Z_]*(?:[+-]\d+)?|\d{1,2})\b/g) || [];
+  const cleaned = text.replace(/%%[\s\S]*?%%/g, "").replace(/@repeat:\d+(?:day|week|month|year)s?\b/gi, "");
+  const matches = cleaned.match(/@([a-zA-Z][a-zA-Z_]*(?:[+-]\d+)?|\d{1,2})\b/g) || [];
   return matches.map((m) => m.slice(1).toLowerCase()).filter((m) => m !== normRecurrent);
+}
+function extractRepeatSpec(text) {
+  const m = text.match(/@repeat:(\d+)(day|week|month|year)s?\b/i);
+  if (!m)
+    return null;
+  return { count: parseInt(m[1], 10), unit: m[2].toLowerCase() };
+}
+function formatRepeatAnnotation(spec) {
+  return `@repeat:${spec.count}${spec.unit}`;
+}
+function formatRepeatLabel(spec) {
+  const plural = spec.count === 1 ? spec.unit : `${spec.unit}s`;
+  return `every ${spec.count} ${plural}`;
+}
+function formatDateAnnotation(d) {
+  return `@${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+function addRepeatInterval(base, spec) {
+  const d = new Date(base);
+  switch (spec.unit) {
+    case "day":
+      d.setDate(d.getDate() + spec.count);
+      break;
+    case "week":
+      d.setDate(d.getDate() + spec.count * 7);
+      break;
+    case "month":
+      d.setMonth(d.getMonth() + spec.count);
+      break;
+    case "year":
+      d.setFullYear(d.getFullYear() + spec.count);
+      break;
+  }
+  return d;
 }
 function lastDayOfMonth(date) {
   return new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
@@ -324,7 +359,7 @@ function isValidTriggerToken(t) {
   return TRIGGER_WEEKDAYS_SHORT.includes(t) || TRIGGER_WEEKDAYS_FULL.includes(t) || TRIGGER_MONTHS_SHORT.includes(t) || TRIGGER_MONTHS_FULL.includes(t) || /^\d{1,2}$/.test(t) && parseInt(t, 10) >= 1 && parseInt(t, 10) <= 31;
 }
 function hasValidTriggers(text, normRecurrent) {
-  return extractTriggerAnnotations(text, normRecurrent).some(isValidTriggerToken);
+  return extractRepeatSpec(text) !== null || extractTriggerAnnotations(text, normRecurrent).some(isValidTriggerToken);
 }
 function extractSkipDate(rawLine) {
   const m = rawLine.match(/%% @skip:(\d{4}-\d{2}-\d{2}) %%/);
@@ -389,7 +424,9 @@ async function triggerRecurrentSubs(app, subs, filePath, config, today, todayStr
   let changed = false;
   for (const sub of subs) {
     if (!sub.tags.some((t) => config.normKanban.includes(normalizeTag(t)))) {
-      if (hasRecurrentAnnotation(sub.text, config.normRecurrent) && matchesTriggerAnnotations(extractTriggerAnnotations(sub.text, config.normRecurrent), today) && extractSkipDate(sub.text) !== todayStr) {
+      const repeatDate = parseCardDate(sub.text);
+      const fires = repeatDate ? repeatDate <= today : matchesTriggerAnnotations(extractTriggerAnnotations(sub.text, config.normRecurrent), today);
+      if (hasRecurrentAnnotation(sub.text, config.normRecurrent) && fires && extractSkipDate(sub.text) !== todayStr) {
         await addTagAndSkipDate(app, filePath, sub.line, config.todayColumn, todayStr);
         changed = true;
       }
@@ -518,6 +555,10 @@ function formatTriggerAnnotations(text, normRecurrent, clickable = true) {
   const triggers = [];
   text = text.replace(new RegExp(`@${normRecurrent}\\b`, "gi"), () => {
     hasRecurrent = true;
+    return "";
+  });
+  text = text.replace(/@repeat:(\d+)(day|week|month|year)s?\b/gi, (_match, count, unit) => {
+    triggers.push(formatRepeatLabel({ count: parseInt(count, 10), unit: unit.toLowerCase() }));
     return "";
   });
   text = text.replace(/@([a-zA-Z][a-zA-Z_]*(?:[+-]\d+)?|\d{1,2})\b/g, (match, token) => {
@@ -654,15 +695,20 @@ async function updateCardTriggers(app, filePath, lineNum, normRecurrent, newTrig
   if (lineNum < 1 || lineNum > lines.length)
     return;
   const parsed = parseTaskLine(lines[lineNum - 1]);
-  parsed.text = parsed.text.replace(/@([a-zA-Z][a-zA-Z_]*(?:[+-]\d+)?|\d{1,2})\b/g, (match, token) => {
+  parsed.text = parsed.text.replace(/@repeat:\d+(?:day|week|month|year)s?\b/gi, "").replace(/@([a-zA-Z][a-zA-Z_]*(?:[+-]\d+)?|\d{1,2})\b/g, (match, token) => {
     const t = token.toLowerCase();
     if (t === normRecurrent)
       return match;
     return isValidTriggerToken(t) ? "" : match;
   }).replace(/\s{2,}/g, " ").trim();
+  parsed.date = null;
   for (const tok of newTriggerStr.trim().split(/\s+/)) {
     if (!tok)
       continue;
+    if (/^@\d{4}-\d{2}-\d{2}$/.test(tok)) {
+      parsed.date = tok;
+      continue;
+    }
     const key = tok.replace(/^@/, "");
     if (!new RegExp(`@${key}\\b`, "i").test(parsed.text))
       parsed.text = parsed.text.trimEnd() + " " + tok;
@@ -931,10 +977,13 @@ async function archiveToSection(app, filePath, mainLineNum, subLines, config, _i
       parsed.orderState = null;
       if (config.normRecurrent && hasRecurrentAnnotation(lines[idx], config.normRecurrent)) {
         hasRecurrentInBlock = true;
+        const repeatSpec = extractRepeatSpec(lines[idx]);
+        const completedOn = parsed.doneDate ? new Date(parsed.doneDate + "T00:00:00") : new Date();
         if (parsed.checked !== null)
           parsed.checked = false;
         parsed.doneDate = null;
         parsed.tags.push(config.recurrentColumn);
+        parsed.date = repeatSpec ? formatDateAnnotation(addRepeatInterval(completedOn, repeatSpec)) : null;
         lines[idx] = serializeTaskLine(parsed);
         const n = new Date();
         const skipStr = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
@@ -1459,7 +1508,7 @@ function showDateDialog(title, defaultDate, onSubmit, opts = {}) {
   });
   (textInput ?? dateInput).focus();
 }
-function showRecurrentTriggerDialog(onSubmit, existingTriggers = []) {
+function showRecurrentTriggerDialog(onSubmit, existingTriggers = [], existingRepeatSpec = null) {
   const { dialog, close } = makeOverlay("kanban-recurrent-trigger-dialog");
   const WD_KEYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
   const WD_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -1472,6 +1521,10 @@ function showRecurrentTriggerDialog(onSubmit, existingTriggers = []) {
     existingTriggers.filter((t) => t === "quarterly+2" || t === "quarterly+3" || t === "q+2" || t === "q+3").map((t) => t === "q+2" ? "quarterly+2" : t === "q+3" ? "quarterly+3" : t)
   );
   let quarterlyActive = existingTriggers.includes("quarterly") || existingTriggers.includes("q+1");
+  const YEAR_SENTINEL = "year1";
+  let repeatEnabled = existingRepeatSpec !== null;
+  let initRepeatUnit = existingRepeatSpec?.unit === "year" ? "month" : existingRepeatSpec?.unit ?? "week";
+  let initRepeatCountVal = existingRepeatSpec?.unit === "year" || existingRepeatSpec?.unit === "month" && existingRepeatSpec.count === 12 ? YEAR_SENTINEL : String(existingRepeatSpec?.count ?? 1);
   const wdStyle = (active) => `height:24px;padding:0 8px;border-radius:12px;border:1px solid var(--background-modifier-border);cursor:pointer;font-size:.75em;display:inline-flex;align-items:center;justify-content:center;` + (active ? `background:var(--interactive-accent);color:var(--text-on-accent);` : `background:none;color:inherit;`);
   const selectedChipStyle = wdStyle(true);
   const wdBtns = WD_KEYS.map(
@@ -1483,6 +1536,19 @@ function showRecurrentTriggerDialog(onSubmit, existingTriggers = []) {
   const lblStyle = `font-size:.8em;color:inherit;opacity:.75;`;
   dialog.innerHTML = `
     <h3 style="margin:0 0 12px;font-size:1.1em;">Set recurrence trigger</h3>
+    <div style="margin-bottom:12px;">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:.9em;margin-bottom:6px;">
+        <input id="k-repeat-enable" type="checkbox" ${repeatEnabled ? "checked" : ""}> Repeat after
+      </label>
+      <div id="k-repeat-controls" style="display:${repeatEnabled ? "flex" : "none"};gap:6px;align-items:center;">
+        <select id="k-repeat-count" style="${selStyle}"></select>
+        <select id="k-repeat-unit" style="${selStyle}">
+          <option value="day">Days</option>
+          <option value="week">Weeks</option>
+          <option value="month">Months</option>
+        </select>
+      </div>
+    </div>
     <div style="margin-bottom:12px;">
       <span style="${lblStyle}display:block;margin-bottom:4px;">Weekday</span>
       <div id="k-wd-wrap" style="display:flex;gap:4px;flex-wrap:wrap;">${wdBtns}</div>
@@ -1509,6 +1575,10 @@ function showRecurrentTriggerDialog(onSubmit, existingTriggers = []) {
     <div id="k-month-rows" style="display:flex;flex-wrap:wrap;gap:4px;min-height:4px;margin-bottom:10px;"></div>
     <p id="k-trigger-err" style="margin:2px 0 8px;font-size:.82em;color:#e03e3e;min-height:1.2em;"></p>
     <div id="k-recur-actions" style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">${buttonHtml("Set", true)}${buttonHtml("No trigger", false)}${buttonHtml("Cancel", false)}</div>`;
+  const repeatEnableChk = dialog.querySelector("#k-repeat-enable");
+  const repeatControls = dialog.querySelector("#k-repeat-controls");
+  const repeatCountSel = dialog.querySelector("#k-repeat-count");
+  const repeatUnitSel = dialog.querySelector("#k-repeat-unit");
   const wdWrap = dialog.querySelector("#k-wd-wrap");
   const qWrap = dialog.querySelector(".kb-q-btn").parentElement;
   const domSel = dialog.querySelector("#k-dom");
@@ -1529,8 +1599,58 @@ function showRecurrentTriggerDialog(onSubmit, existingTriggers = []) {
   };
   renderDomRows();
   renderMoRows();
+  const populateRepeatCountOptions = (unit, selectValue) => {
+    let opts;
+    if (unit === "day") {
+      opts = Array.from({ length: 30 }, (_, i) => [String(i + 1), `${i + 1} day${i > 0 ? "s" : ""}`]);
+    } else if (unit === "week") {
+      opts = Array.from({ length: 8 }, (_, i) => [String(i + 1), `${i + 1} week${i > 0 ? "s" : ""}`]);
+    } else {
+      opts = Array.from({ length: 11 }, (_, i) => [String(i + 1), `${i + 1} month${i > 0 ? "s" : ""}`]);
+      opts.push([YEAR_SENTINEL, "1 year"]);
+    }
+    repeatCountSel.innerHTML = opts.map(([v, l]) => `<option value="${v}">${l}</option>`).join("");
+    if (selectValue && opts.some(([v]) => v === selectValue))
+      repeatCountSel.value = selectValue;
+  };
+  repeatUnitSel.value = initRepeatUnit;
+  populateRepeatCountOptions(initRepeatUnit, initRepeatCountVal);
+  const readRepeatSpec = () => {
+    const val = repeatCountSel.value;
+    if (val === YEAR_SENTINEL)
+      return { count: 1, unit: "year" };
+    return { count: parseInt(val, 10), unit: repeatUnitSel.value };
+  };
+  const clearCalendarTriggers = () => {
+    activeWD.clear();
+    wdWrap.querySelectorAll(".kb-wd-btn").forEach((b) => b.style.cssText = wdStyle(false));
+    quarterlyActive = false;
+    quarterlyBtn.style.cssText = wdStyle(false);
+    activeQuarterly.clear();
+    qWrap.querySelectorAll(".kb-q-btn").forEach((b) => b.style.cssText = wdStyle(false));
+    selectedDays.length = 0;
+    renderDomRows();
+    selectedMonths.length = 0;
+    renderMoRows();
+  };
+  const clearRepeatSelection = () => {
+    if (!repeatEnableChk.checked)
+      return;
+    repeatEnableChk.checked = false;
+    repeatControls.style.display = "none";
+  };
+  repeatEnableChk.addEventListener("change", () => {
+    if (repeatEnableChk.checked) {
+      clearCalendarTriggers();
+      repeatControls.style.display = "flex";
+    } else {
+      repeatControls.style.display = "none";
+    }
+  });
+  repeatUnitSel.addEventListener("change", () => populateRepeatCountOptions(repeatUnitSel.value));
   const quarterlyBtn = dialog.querySelector("#k-quarterly-btn");
   quarterlyBtn.addEventListener("click", () => {
+    clearRepeatSelection();
     quarterlyActive = !quarterlyActive;
     quarterlyBtn.style.cssText = wdStyle(quarterlyActive);
   });
@@ -1538,6 +1658,7 @@ function showRecurrentTriggerDialog(onSubmit, existingTriggers = []) {
     const btn = e.target.closest(".kb-q-btn");
     if (!btn)
       return;
+    clearRepeatSelection();
     const q = btn.dataset.q;
     if (activeQuarterly.has(q)) {
       activeQuarterly.delete(q);
@@ -1551,6 +1672,7 @@ function showRecurrentTriggerDialog(onSubmit, existingTriggers = []) {
     const btn = e.target.closest(".kb-wd-btn");
     if (!btn)
       return;
+    clearRepeatSelection();
     const day = btn.dataset.day;
     if (activeWD.has(day)) {
       activeWD.delete(day);
@@ -1565,6 +1687,7 @@ function showRecurrentTriggerDialog(onSubmit, existingTriggers = []) {
     domSel.value = "";
     if (!val || val === "last_day" || selectedDays.includes(val))
       return;
+    clearRepeatSelection();
     selectedDays.push(val);
     selectedDays.sort((a, b) => parseInt(a) - parseInt(b));
     renderDomRows();
@@ -1574,6 +1697,7 @@ function showRecurrentTriggerDialog(onSubmit, existingTriggers = []) {
     moSel.value = "";
     if (!val || selectedMonths.includes(val))
       return;
+    clearRepeatSelection();
     selectedMonths.push(val);
     selectedMonths.sort((a, b) => MO_KEYS.indexOf(a) - MO_KEYS.indexOf(b));
     renderMoRows();
@@ -1593,6 +1717,13 @@ function showRecurrentTriggerDialog(onSubmit, existingTriggers = []) {
     renderMoRows();
   });
   const submit = () => {
+    if (repeatEnableChk.checked) {
+      close();
+      const spec = readRepeatSpec();
+      const nextDate = formatDateAnnotation(addRepeatInterval(new Date(), spec));
+      onSubmit(`${formatRepeatAnnotation(spec)} ${nextDate}`);
+      return;
+    }
     const tokens = [...activeWD, ...quarterlyActive ? ["quarterly"] : [], ...["quarterly+2", "quarterly+3"].filter((q) => activeQuarterly.has(q)), ...selectedDays, ...selectedMonths];
     if (!tokens.length) {
       errEl.textContent = "Select at least one trigger.";
@@ -2006,6 +2137,9 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
         return false;
       if (extractSkipDate(i.item.text) === todayStr)
         return false;
+      const repeatDate = parseCardDate(i.item.text);
+      if (repeatDate)
+        return repeatDate <= today;
       const triggers = extractTriggerAnnotations(i.item.text, config.normRecurrent);
       if (triggers.length === 0)
         return !i.item.subs || i.item.subs.length === 0;
@@ -2013,7 +2147,7 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
     });
     if (recurrentToMove.length) {
       for (const item of recurrentToMove)
-        await moveToColumn(app, item.filePath, item.item.line, item.item.tags, config.todayColumn, false, config);
+        await moveToColumn(app, item.filePath, item.item.line, item.item.tags, config.todayColumn, false, config, null, null, null, null, true);
       items = await collectItems(app, paths, config);
     }
     let anySubTriggered = false;
@@ -2327,7 +2461,7 @@ function attachListeners(boardEl, config, app, refresh) {
         showRecurrentTriggerDialog(async (trigger) => {
           await moveToColumn(app, card.filePath, card.lineNum, card.originalTags, targetTag, false, config, null, newCalc.digits, newState, trigger);
           requestAnimationFrame(() => setTimeout(refresh, 50));
-        });
+        }, [], extractRepeatSpec(lineTxt));
         return;
       }
       const ok = await moveToColumn(app, card.filePath, card.lineNum, card.originalTags, targetTag, false, config, null, newCalc.digits, newState);
@@ -2515,7 +2649,7 @@ function attachListeners(boardEl, config, app, refresh) {
     showRecurrentTriggerDialog(async (newTriggerStr) => {
       await updateCardTriggers(app, card.dataset.file, parseInt(card.dataset.line, 10), config.normRecurrent, newTriggerStr);
       requestAnimationFrame(() => setTimeout(refresh, 50));
-    }, existing);
+    }, existing, extractRepeatSpec(rawText));
   }
   async function onDblClick(e) {
     if (e.target.closest("a,button,.promote-icon,.demote-btn,.kb-date-label,.kb-trigger-label"))

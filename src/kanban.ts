@@ -356,13 +356,55 @@ function hasRecurrentAnnotation(text: string, normRecurrent: string): boolean {
   return new RegExp(`@${normRecurrent}\\b`, 'i').test(text);
 }
 
-// Extracts @word and @1-2-digit-number annotations, skipping @YYYY-MM-DD and @recurrent itself.
-// Supports underscores in words (e.g. @last_day).
+// Extracts @word and @1-2-digit-number annotations, skipping @YYYY-MM-DD, @recurrent,
+// @repeat:N<unit>, and any %% ... %% structural comment (e.g. %% @skip:YYYY-MM-DD %%,
+// whose "@skip" would otherwise be misread as a trigger token). Supports underscores
+// in words (e.g. @last_day).
 function extractTriggerAnnotations(text: string, normRecurrent: string): string[] {
-  const matches = text.match(/@([a-zA-Z][a-zA-Z_]*(?:[+-]\d+)?|\d{1,2})\b/g) || [];
+  const cleaned = text.replace(/%%[\s\S]*?%%/g, '').replace(/@repeat:\d+(?:day|week|month|year)s?\b/gi, '');
+  const matches = cleaned.match(/@([a-zA-Z][a-zA-Z_]*(?:[+-]\d+)?|\d{1,2})\b/g) || [];
   return matches
     .map((m: string) => m.slice(1).toLowerCase())
     .filter((m: string) => m !== normRecurrent);
+}
+
+// Interval-based recurrence: "@repeat:N<unit>" (e.g. "@repeat:2week", "@repeat:1year")
+// stores the repeat interval for a #recurrent card whose next-fire date is tracked via
+// a plain @YYYY-MM-DD annotation (same field/logic as the #later date trigger — it just
+// jumps the card to Today).
+type RepeatUnit = "day" | "week" | "month" | "year";
+interface RepeatSpec { count: number; unit: RepeatUnit; }
+
+function extractRepeatSpec(text: string): RepeatSpec | null {
+  const m = text.match(/@repeat:(\d+)(day|week|month|year)s?\b/i);
+  if (!m) return null;
+  return { count: parseInt(m[1], 10), unit: m[2].toLowerCase() as RepeatUnit };
+}
+
+function formatRepeatAnnotation(spec: RepeatSpec): string {
+  return `@repeat:${spec.count}${spec.unit}`;
+}
+
+function formatRepeatLabel(spec: RepeatSpec): string {
+  const plural = spec.count === 1 ? spec.unit : `${spec.unit}s`;
+  return `every ${spec.count} ${plural}`;
+}
+
+function formatDateAnnotation(d: Date): string {
+  return `@${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+// Exact calendar-based arithmetic (not a fixed-day approximation): weeks are 7-day
+// multiples, months/years roll forward via the calendar's own varying day counts.
+function addRepeatInterval(base: Date, spec: RepeatSpec): Date {
+  const d = new Date(base);
+  switch (spec.unit) {
+    case "day": d.setDate(d.getDate() + spec.count); break;
+    case "week": d.setDate(d.getDate() + spec.count * 7); break;
+    case "month": d.setMonth(d.getMonth() + spec.count); break;
+    case "year": d.setFullYear(d.getFullYear() + spec.count); break;
+  }
+  return d;
 }
 
 function lastDayOfMonth(date: Date): number {
@@ -417,7 +459,7 @@ function isValidTriggerToken(t: string): boolean {
 }
 
 function hasValidTriggers(text: string, normRecurrent: string): boolean {
-  return extractTriggerAnnotations(text, normRecurrent).some(isValidTriggerToken);
+  return extractRepeatSpec(text) !== null || extractTriggerAnnotations(text, normRecurrent).some(isValidTriggerToken);
 }
 
 function extractSkipDate(rawLine: string): string | null {
@@ -484,9 +526,13 @@ async function triggerRecurrentSubs(
   let changed = false;
   for (const sub of subs) {
     if (!sub.tags.some((t: string) => config.normKanban.includes(normalizeTag(t)))) {
+      const repeatDate = parseCardDate(sub.text);
+      const fires = repeatDate
+        ? repeatDate <= today
+        : matchesTriggerAnnotations(extractTriggerAnnotations(sub.text, config.normRecurrent), today);
       if (
         hasRecurrentAnnotation(sub.text, config.normRecurrent) &&
-        matchesTriggerAnnotations(extractTriggerAnnotations(sub.text, config.normRecurrent), today) &&
+        fires &&
         extractSkipDate(sub.text) !== todayStr
       ) {
         await addTagAndSkipDate(app, filePath, sub.line, config.todayColumn, todayStr);
@@ -626,6 +672,10 @@ function formatTriggerAnnotations(text: string, normRecurrent: string, clickable
   const triggers: string[] = [];
 
   text = text.replace(new RegExp(`@${normRecurrent}\\b`, 'gi'), () => { hasRecurrent = true; return ''; });
+  text = text.replace(/@repeat:(\d+)(day|week|month|year)s?\b/gi, (_match, count, unit) => {
+    triggers.push(formatRepeatLabel({ count: parseInt(count, 10), unit: unit.toLowerCase() }));
+    return '';
+  });
   text = text.replace(/@([a-zA-Z][a-zA-Z_]*(?:[+-]\d+)?|\d{1,2})\b/g, (match, token) => {
     const t = token.toLowerCase();
     if (!isValidTriggerToken(t)) return match;
@@ -827,15 +877,21 @@ async function updateCardTriggers(
   const { tFile, lines } = await readFileLines(app, filePath);
   if (lineNum < 1 || lineNum > lines.length) return;
   const parsed = parseTaskLine(lines[lineNum - 1]);
-  // Remove old trigger tokens but keep @recurrent annotation
-  parsed.text = parsed.text.replace(/@([a-zA-Z][a-zA-Z_]*(?:[+-]\d+)?|\d{1,2})\b/g, (match, token) => {
-    const t = token.toLowerCase();
-    if (t === normRecurrent) return match;
-    return isValidTriggerToken(t) ? '' : match;
-  }).replace(/\s{2,}/g, ' ').trim();
-  // Append new triggers (avoid duplicates)
+  // Remove old trigger tokens and repeat annotation, but keep @recurrent annotation
+  parsed.text = parsed.text
+    .replace(/@repeat:\d+(?:day|week|month|year)s?\b/gi, '')
+    .replace(/@([a-zA-Z][a-zA-Z_]*(?:[+-]\d+)?|\d{1,2})\b/g, (match, token) => {
+      const t = token.toLowerCase();
+      if (t === normRecurrent) return match;
+      return isValidTriggerToken(t) ? '' : match;
+    }).replace(/\s{2,}/g, ' ').trim();
+  // A stale next-fire date only applies to the previous trigger set; drop it unless
+  // the new trigger set supplies its own @YYYY-MM-DD (interval-based recurrence).
+  parsed.date = null;
+  // Append new triggers (avoid duplicates); a bare @YYYY-MM-DD token sets the date field.
   for (const tok of newTriggerStr.trim().split(/\s+/)) {
     if (!tok) continue;
+    if (/^@\d{4}-\d{2}-\d{2}$/.test(tok)) { parsed.date = tok; continue; }
     const key = tok.replace(/^@/, '');
     if (!new RegExp(`@${key}\\b`, 'i').test(parsed.text)) parsed.text = parsed.text.trimEnd() + ' ' + tok;
   }
@@ -1195,10 +1251,16 @@ async function archiveToSection(
       parsed.orderState = null;
       if (config.normRecurrent && hasRecurrentAnnotation(lines[idx], config.normRecurrent)) {
         hasRecurrentInBlock = true;
+        // Interval-based recurrence: push the next-fire date out by the repeat interval,
+        // counted from the day the card was actually completed (not from whenever it
+        // happens to get archived).
+        const repeatSpec = extractRepeatSpec(lines[idx]);
+        const completedOn = parsed.doneDate ? new Date(parsed.doneDate + "T00:00:00") : new Date();
         // Reset recurrent card: uncheck, clear done-date, restore #recurrent tag
         if (parsed.checked !== null) parsed.checked = false;
         parsed.doneDate = null;
         parsed.tags.push(config.recurrentColumn);
+        parsed.date = repeatSpec ? formatDateAnnotation(addRepeatInterval(completedOn, repeatSpec)) : null;
         lines[idx] = serializeTaskLine(parsed);
         const n = new Date();
         const skipStr = `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;
@@ -1848,7 +1910,11 @@ function showDateDialog(
   (textInput ?? dateInput).focus();
 }
 
-function showRecurrentTriggerDialog(onSubmit: (trigger: string) => void, existingTriggers: string[] = []) {
+function showRecurrentTriggerDialog(
+  onSubmit: (trigger: string) => void,
+  existingTriggers: string[] = [],
+  existingRepeatSpec: RepeatSpec | null = null
+) {
   const { dialog, close } = makeOverlay("kanban-recurrent-trigger-dialog");
 
   const WD_KEYS   = ['sun','mon','tue','wed','thu','fri','sat'];
@@ -1865,6 +1931,17 @@ function showRecurrentTriggerDialog(onSubmit: (trigger: string) => void, existin
       .map(t => t === 'q+2' ? 'quarterly+2' : t === 'q+3' ? 'quarterly+3' : t)
   );
   let quarterlyActive = existingTriggers.includes('quarterly') || existingTriggers.includes('q+1');
+
+  // Interval-based recurrence: a count dropdown whose options depend on the chosen
+  // unit. The month dropdown's 12th slot is relabelled "1 year" and stored as a
+  // @repeat:1year annotation rather than @repeat:12month.
+  const YEAR_SENTINEL = "year1";
+  let repeatEnabled = existingRepeatSpec !== null;
+  let initRepeatUnit: RepeatUnit = existingRepeatSpec?.unit === "year" ? "month" : (existingRepeatSpec?.unit ?? "week");
+  let initRepeatCountVal =
+    existingRepeatSpec?.unit === "year" || (existingRepeatSpec?.unit === "month" && existingRepeatSpec.count === 12)
+      ? YEAR_SENTINEL
+      : String(existingRepeatSpec?.count ?? 1);
 
   const wdStyle = (active: boolean) =>
     `height:24px;padding:0 8px;border-radius:12px;border:1px solid var(--background-modifier-border);cursor:pointer;font-size:.75em;display:inline-flex;align-items:center;justify-content:center;` +
@@ -1888,6 +1965,19 @@ function showRecurrentTriggerDialog(onSubmit: (trigger: string) => void, existin
 
   dialog.innerHTML = `
     <h3 style="margin:0 0 12px;font-size:1.1em;">Set recurrence trigger</h3>
+    <div style="margin-bottom:12px;">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:.9em;margin-bottom:6px;">
+        <input id="k-repeat-enable" type="checkbox" ${repeatEnabled ? "checked" : ""}> Repeat after
+      </label>
+      <div id="k-repeat-controls" style="display:${repeatEnabled ? "flex" : "none"};gap:6px;align-items:center;">
+        <select id="k-repeat-count" style="${selStyle}"></select>
+        <select id="k-repeat-unit" style="${selStyle}">
+          <option value="day">Days</option>
+          <option value="week">Weeks</option>
+          <option value="month">Months</option>
+        </select>
+      </div>
+    </div>
     <div style="margin-bottom:12px;">
       <span style="${lblStyle}display:block;margin-bottom:4px;">Weekday</span>
       <div id="k-wd-wrap" style="display:flex;gap:4px;flex-wrap:wrap;">${wdBtns}</div>
@@ -1915,6 +2005,10 @@ function showRecurrentTriggerDialog(onSubmit: (trigger: string) => void, existin
     <p id="k-trigger-err" style="margin:2px 0 8px;font-size:.82em;color:#e03e3e;min-height:1.2em;"></p>
     <div id="k-recur-actions" style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">${buttonHtml("Set", true)}${buttonHtml("No trigger", false)}${buttonHtml("Cancel", false)}</div>`;
 
+  const repeatEnableChk = dialog.querySelector("#k-repeat-enable") as HTMLInputElement;
+  const repeatControls  = dialog.querySelector("#k-repeat-controls") as HTMLElement;
+  const repeatCountSel  = dialog.querySelector("#k-repeat-count") as HTMLSelectElement;
+  const repeatUnitSel   = dialog.querySelector("#k-repeat-unit") as HTMLSelectElement;
   const wdWrap   = dialog.querySelector("#k-wd-wrap") as HTMLElement;
   const qWrap    = dialog.querySelector(".kb-q-btn")!.parentElement as HTMLElement;
   const domSel   = dialog.querySelector("#k-dom") as HTMLSelectElement;
@@ -1939,9 +2033,61 @@ function showRecurrentTriggerDialog(onSubmit: (trigger: string) => void, existin
   renderDomRows();
   renderMoRows();
 
+  // Interval-based recurrence (the "Repeat after" checkbox) and calendar-based
+  // triggers (weekday/quarterly/day-of-month/month) are mutually exclusive —
+  // a card recurs off exactly one of these.
+  const populateRepeatCountOptions = (unit: string, selectValue?: string) => {
+    let opts: [string, string][];
+    if (unit === "day") {
+      opts = Array.from({ length: 30 }, (_, i) => [String(i + 1), `${i + 1} day${i > 0 ? "s" : ""}`]);
+    } else if (unit === "week") {
+      opts = Array.from({ length: 8 }, (_, i) => [String(i + 1), `${i + 1} week${i > 0 ? "s" : ""}`]);
+    } else {
+      opts = Array.from({ length: 11 }, (_, i) => [String(i + 1), `${i + 1} month${i > 0 ? "s" : ""}`]);
+      opts.push([YEAR_SENTINEL, "1 year"]);
+    }
+    repeatCountSel.innerHTML = opts.map(([v, l]) => `<option value="${v}">${l}</option>`).join('');
+    if (selectValue && opts.some(([v]) => v === selectValue)) repeatCountSel.value = selectValue;
+  };
+  repeatUnitSel.value = initRepeatUnit;
+  populateRepeatCountOptions(initRepeatUnit, initRepeatCountVal);
+
+  const readRepeatSpec = (): RepeatSpec => {
+    const val = repeatCountSel.value;
+    if (val === YEAR_SENTINEL) return { count: 1, unit: "year" };
+    return { count: parseInt(val, 10), unit: repeatUnitSel.value as RepeatUnit };
+  };
+
+  const clearCalendarTriggers = () => {
+    activeWD.clear();
+    wdWrap.querySelectorAll<HTMLButtonElement>(".kb-wd-btn").forEach((b) => b.style.cssText = wdStyle(false));
+    quarterlyActive = false;
+    quarterlyBtn.style.cssText = wdStyle(false);
+    activeQuarterly.clear();
+    qWrap.querySelectorAll<HTMLButtonElement>(".kb-q-btn").forEach((b) => b.style.cssText = wdStyle(false));
+    selectedDays.length = 0; renderDomRows();
+    selectedMonths.length = 0; renderMoRows();
+  };
+  const clearRepeatSelection = () => {
+    if (!repeatEnableChk.checked) return;
+    repeatEnableChk.checked = false;
+    repeatControls.style.display = "none";
+  };
+
+  repeatEnableChk.addEventListener("change", () => {
+    if (repeatEnableChk.checked) {
+      clearCalendarTriggers();
+      repeatControls.style.display = "flex";
+    } else {
+      repeatControls.style.display = "none";
+    }
+  });
+  repeatUnitSel.addEventListener("change", () => populateRepeatCountOptions(repeatUnitSel.value));
+
   // Quarterly toggle (plain)
   const quarterlyBtn = dialog.querySelector("#k-quarterly-btn") as HTMLButtonElement;
   quarterlyBtn.addEventListener("click", () => {
+    clearRepeatSelection();
     quarterlyActive = !quarterlyActive;
     quarterlyBtn.style.cssText = wdStyle(quarterlyActive);
   });
@@ -1950,6 +2096,7 @@ function showRecurrentTriggerDialog(onSubmit: (trigger: string) => void, existin
   qWrap.addEventListener("click", (e) => {
     const btn = (e.target as Element).closest(".kb-q-btn") as HTMLButtonElement | null;
     if (!btn) return;
+    clearRepeatSelection();
     const q = btn.dataset.q!;
     if (activeQuarterly.has(q)) { activeQuarterly.delete(q); btn.style.cssText = wdStyle(false); }
     else                        { activeQuarterly.add(q);    btn.style.cssText = wdStyle(true);  }
@@ -1959,6 +2106,7 @@ function showRecurrentTriggerDialog(onSubmit: (trigger: string) => void, existin
   wdWrap.addEventListener("click", (e) => {
     const btn = (e.target as Element).closest(".kb-wd-btn") as HTMLButtonElement | null;
     if (!btn) return;
+    clearRepeatSelection();
     const day = btn.dataset.day!;
     if (activeWD.has(day)) { activeWD.delete(day); btn.style.cssText = wdStyle(false); }
     else                   { activeWD.add(day);    btn.style.cssText = wdStyle(true);  }
@@ -1969,6 +2117,7 @@ function showRecurrentTriggerDialog(onSubmit: (trigger: string) => void, existin
     const val = domSel.value;
     domSel.value = "";
     if (!val || val === 'last_day' || selectedDays.includes(val)) return;
+    clearRepeatSelection();
     selectedDays.push(val);
     selectedDays.sort((a, b) => parseInt(a) - parseInt(b));
     renderDomRows();
@@ -1979,6 +2128,7 @@ function showRecurrentTriggerDialog(onSubmit: (trigger: string) => void, existin
     const val = moSel.value;
     moSel.value = "";
     if (!val || selectedMonths.includes(val)) return;
+    clearRepeatSelection();
     selectedMonths.push(val);
     selectedMonths.sort((a, b) => MO_KEYS.indexOf(a) - MO_KEYS.indexOf(b));
     renderMoRows();
@@ -2000,6 +2150,13 @@ function showRecurrentTriggerDialog(onSubmit: (trigger: string) => void, existin
   });
 
   const submit = () => {
+    if (repeatEnableChk.checked) {
+      close();
+      const spec = readRepeatSpec();
+      const nextDate = formatDateAnnotation(addRepeatInterval(new Date(), spec));
+      onSubmit(`${formatRepeatAnnotation(spec)} ${nextDate}`);
+      return;
+    }
     const tokens = [...activeWD, ...(quarterlyActive ? ['quarterly'] : []), ...['quarterly+2','quarterly+3'].filter(q => activeQuarterly.has(q)), ...selectedDays, ...selectedMonths];
     if (!tokens.length) { errEl.textContent = "Select at least one trigger."; return; }
     close();
@@ -2463,18 +2620,22 @@ export async function buildBoard(
   // Step B: move triggered #recurrent cards → today column
   if (config.normRecurrent) {
     const todayStr = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}`;
-    // A card with no trigger annotations fires every day; a card with triggers fires on matching days.
+    // A card with a literal @date (interval-based recurrence) fires once that date
+    // arrives; otherwise a card with no trigger annotations fires every day, and a
+    // card with weekday/month/day-of-month triggers fires on matching days.
     const recurrentToMove = items.filter((i) => {
       if (!i.item.tags.some((t: string) => normalizeTag(t) === config.normRecurrent)) return false;
       if (!hasRecurrentAnnotation(i.item.text, config.normRecurrent)) return false;
       if (extractSkipDate(i.item.text) === todayStr) return false;
+      const repeatDate = parseCardDate(i.item.text);
+      if (repeatDate) return repeatDate <= today;
       const triggers = extractTriggerAnnotations(i.item.text, config.normRecurrent);
       if (triggers.length === 0) return !i.item.subs || i.item.subs.length === 0;
       return matchesTriggerAnnotations(triggers, today);
     });
     if (recurrentToMove.length) {
       for (const item of recurrentToMove)
-        await moveToColumn(app, item.filePath, item.item.line, item.item.tags, config.todayColumn, false, config);
+        await moveToColumn(app, item.filePath, item.item.line, item.item.tags, config.todayColumn, false, config, null, null, null, null, true);
       items = await collectItems(app, paths, config);
     }
     // Step C: add #today to subtasks of #recurrent cards whose trigger fires today
@@ -2843,7 +3004,7 @@ export function attachListeners(
         showRecurrentTriggerDialog(async (trigger) => {
           await moveToColumn(app, card.filePath, card.lineNum, card.originalTags, targetTag, false, config, null, newCalc.digits, newState, trigger);
           requestAnimationFrame(() => setTimeout(refresh, 50));
-        });
+        }, [], extractRepeatSpec(lineTxt));
         return;
       }
       const ok = await moveToColumn(app, card.filePath, card.lineNum, card.originalTags, targetTag, false, config, null, newCalc.digits, newState);
@@ -3035,7 +3196,7 @@ export function attachListeners(
     showRecurrentTriggerDialog(async (newTriggerStr) => {
       await updateCardTriggers(app, card.dataset.file!, parseInt(card.dataset.line!, 10), config.normRecurrent, newTriggerStr);
       requestAnimationFrame(() => setTimeout(refresh, 50));
-    }, existing);
+    }, existing, extractRepeatSpec(rawText));
   }
 
   // ── Inline card text editing ──
