@@ -50,6 +50,9 @@ export interface KanbanConfig {
   colorFamilySibling: string;
   colorDate: string;
   fontDate: string;
+  colorBold: string;
+  colorItalicStar: string;
+  colorItalicUnderscore: string;
 }
 
 export function buildConfig(settings: KanbanSettings): KanbanConfig {
@@ -93,6 +96,9 @@ export function buildConfig(settings: KanbanSettings): KanbanConfig {
     colorFamilySibling: settings.colorFamilySibling || "#4a90d9",
     colorDate: settings.colorDate || "#7ab8e8",
     fontDate: settings.fontDate || "monospace",
+    colorBold: settings.colorBold || "",
+    colorItalicStar: settings.colorItalicStar || "",
+    colorItalicUnderscore: settings.colorItalicUnderscore || "",
   };
 }
 
@@ -564,6 +570,7 @@ function getDefaultDate(existing: Date | null = null): Date {
 // ─── DATE FORMATTING ─────────────────────────────────────────────────────────
 
 const TRIGGER_LINE_STYLE = `display:block;font-size:.8em;color:var(--kb-date-color);font-family:var(--kb-date-font);margin-top:2px;`;
+const TITLE_FONT_WEIGHT = 600; // must match the font-weight applied to .card-title
 
 // Collapses mon-fri (+ sat/sun) trigger labels into "week day" / "week day+sat" /
 // "week day+sun" / "every day" so a full weekday recurrence doesn't list all 5-7 days.
@@ -661,6 +668,24 @@ function formatCardDateAnnotation(text: string, inline = false): string {
   });
 }
 
+// Inline **bold**, *italic*, and _italic_ markers. Applied after link conversion,
+// so matched content is required to exclude "<" — this stops a match from ever
+// spanning across an HTML tag boundary (e.g. two separate <a> hrefs that each
+// contain a single stray marker character).
+function formatInlineEmphasis(text: string, baseWeight = 400): string {
+  const boldWeight = Math.min(baseWeight * 2, 1000);
+  // Most UI fonts only ship a Regular and a Bold face, so any numeric weight
+  // above ~600 renders identically to the surrounding title (already semibold).
+  // A text-stroke fakes the extra weight the font itself can't provide.
+  const strokeWidth = (boldWeight - baseWeight) / 800; // px, scales with the requested jump
+  text = text.replace(/\*\*([^\n<]+?)\*\*/g, (_, inner) => `<strong style="font-weight:${boldWeight};-webkit-text-stroke:${strokeWidth}px currentColor;color:var(--kb-bold-color);">${inner}</strong>`);
+  text = text.replace(/\*([^\n<]+?)\*/g, (_, inner) => `<em style="color:var(--kb-italic-star-color);">${inner}</em>`);
+  // CommonMark-style rule: "_" only starts/ends emphasis at a word boundary, so
+  // snake_case_names aren't accidentally italicized.
+  text = text.replace(/(?<![\w_])_([^_\n<]+?)_(?![\w_])/g, (_, inner) => `<em style="color:var(--kb-italic-underscore-color);">${inner}</em>`);
+  return text;
+}
+
 // ─── LINK CONVERSION ─────────────────────────────────────────────────────────
 
 function linksToHtml(text: string, vaultName: string): string {
@@ -746,6 +771,7 @@ function renderCheckbox(
   }
 
   if (vaultName) content = linksToHtml(content, vaultName);
+  content = formatInlineEmphasis(content);
 
   const promoteHtml =
     enablePromotion && isSub && subLine && parentTag && parentOrder !== null
@@ -2048,7 +2074,7 @@ function createCardHTML(
     .replace(/^- \[[ xX]\] /, "")
     .replace(/^[-*+]\s+/, "")
     .trim();
-  const mainContent = linksToHtml(formatCardDateAnnotation(formatTriggerAnnotations(rawText, config.normRecurrent)), vaultName);
+  const mainContent = formatInlineEmphasis(linksToHtml(formatCardDateAnnotation(formatTriggerAnnotations(rawText, config.normRecurrent)), vaultName), TITLE_FONT_WEIGHT);
 
   const hasSubs = item.item.subs.length > 0; // structural (any subs at all, for expand/collapse)
   const isExpanded = item.state === "expanded";
@@ -2136,7 +2162,7 @@ function createCardHTML(
   const TITLE_LINE_H = 1.5; // em
   const iconSpacer = (width: number) =>
     `<span aria-hidden="true" style="float:right;width:${width}px;height:${TITLE_LINE_H}em;"></span>`;
-  const titleStyle = `padding:6px 0;font-weight:600;color:var(--kb-text);text-align:left;line-height:${TITLE_LINE_H};`;
+  const titleStyle = `padding:6px 0;font-weight:${TITLE_FONT_WEIGHT};color:var(--kb-text);text-align:left;line-height:${TITLE_LINE_H};`;
 
   const bodyHTML = hasSubs
     ? `<div style="position:relative;">
@@ -2241,6 +2267,9 @@ function buildColorCSS(config: KanbanConfig): string {
           --kb-all-checked:${config.allCheckedColor};
       --kb-date-color:${config.colorDate};
       --kb-date-font:${config.fontDate};
+      --kb-bold-color:${cv(config.colorBold, "color-mix(in srgb, var(--kb-text) 75%, black)")};
+      --kb-italic-star-color:${cv(config.colorItalicStar, "color-mix(in srgb, var(--kb-text) 85%, white)")};
+      --kb-italic-underscore-color:${cv(config.colorItalicUnderscore, "color-mix(in srgb, var(--kb-text) 55%, teal)")};
       color:var(--kb-text);
     }
     #kanban-wrapper [data-col-container]{background:var(--kb-col-bg);}

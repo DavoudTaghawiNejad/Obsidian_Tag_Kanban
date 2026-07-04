@@ -67,7 +67,10 @@ function buildConfig(settings) {
     colorFamilyParent: settings.colorFamilyParent || "#2db55d",
     colorFamilySibling: settings.colorFamilySibling || "#4a90d9",
     colorDate: settings.colorDate || "#7ab8e8",
-    fontDate: settings.fontDate || "monospace"
+    fontDate: settings.fontDate || "monospace",
+    colorBold: settings.colorBold || "",
+    colorItalicStar: settings.colorItalicStar || "",
+    colorItalicUnderscore: settings.colorItalicUnderscore || ""
   };
 }
 function validateConfig(settings) {
@@ -463,6 +466,7 @@ function getDefaultDate(existing = null) {
   return c <= today ? getNextMonday() : c;
 }
 var TRIGGER_LINE_STYLE = `display:block;font-size:.8em;color:var(--kb-date-color);font-family:var(--kb-date-font);margin-top:2px;`;
+var TITLE_FONT_WEIGHT = 600;
 function collapseWeekdayLabels(triggers) {
   const weekdayIndex = (label) => {
     const s = TRIGGER_WEEKDAYS_SHORT.indexOf(label);
@@ -545,6 +549,14 @@ function formatCardDateAnnotation(text, inline = false) {
     return `<span class="kb-date-label" data-date="${y}-${m}-${d}" style="display:${display};font-size:.8em;color:var(--kb-date-color);font-family:var(--kb-date-font);cursor:pointer;text-decoration:underline dotted;">${label}</span>`;
   });
 }
+function formatInlineEmphasis(text, baseWeight = 400) {
+  const boldWeight = Math.min(baseWeight * 2, 1e3);
+  const strokeWidth = (boldWeight - baseWeight) / 800;
+  text = text.replace(/\*\*([^\n<]+?)\*\*/g, (_, inner) => `<strong style="font-weight:${boldWeight};-webkit-text-stroke:${strokeWidth}px currentColor;color:var(--kb-bold-color);">${inner}</strong>`);
+  text = text.replace(/\*([^\n<]+?)\*/g, (_, inner) => `<em style="color:var(--kb-italic-star-color);">${inner}</em>`);
+  text = text.replace(/(?<![\w_])_([^_\n<]+?)_(?![\w_])/g, (_, inner) => `<em style="color:var(--kb-italic-underscore-color);">${inner}</em>`);
+  return text;
+}
 function linksToHtml(text, vaultName) {
   text = text.replace(
     /\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g,
@@ -603,6 +615,7 @@ function renderCheckbox(text, opts = {}) {
   }
   if (vaultName)
     content = linksToHtml(content, vaultName);
+  content = formatInlineEmphasis(content);
   const promoteHtml = enablePromotion && isSub && subLine && parentTag && parentOrder !== null ? `<span class="promote-icon" style="margin-left:6px;font-size:1.2em;cursor:pointer;color:var(--kb-accent);"
            data-line="${subLine}" data-parent-tag="${parentTag}" data-parent-order="${parentOrder}">&#9655</span>` : "";
   return `${cbHtml}${content}${promoteHtml}`;
@@ -1664,7 +1677,7 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
   if (tagToRemove)
     display = display.split(/\s+/).filter((w) => w !== tagToRemove).join(" ").trim();
   const rawText = display.replace(/^- \[[ xX]\] /, "").replace(/^[-*+]\s+/, "").trim();
-  const mainContent = linksToHtml(formatCardDateAnnotation(formatTriggerAnnotations(rawText, config.normRecurrent)), vaultName);
+  const mainContent = formatInlineEmphasis(linksToHtml(formatCardDateAnnotation(formatTriggerAnnotations(rawText, config.normRecurrent)), vaultName), TITLE_FONT_WEIGHT);
   const hasSubs = item.item.subs.length > 0;
   const isExpanded = item.state === "expanded";
   function hasActiveKanban(subs) {
@@ -1726,7 +1739,7 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
   const addSubBtn = `<button class="kb-add-sub" style="${addSubBtnStyle}">+</button>`;
   const TITLE_LINE_H = 1.5;
   const iconSpacer = (width) => `<span aria-hidden="true" style="float:right;width:${width}px;height:${TITLE_LINE_H}em;"></span>`;
-  const titleStyle = `padding:6px 0;font-weight:600;color:var(--kb-text);text-align:left;line-height:${TITLE_LINE_H};`;
+  const titleStyle = `padding:6px 0;font-weight:${TITLE_FONT_WEIGHT};color:var(--kb-text);text-align:left;line-height:${TITLE_LINE_H};`;
   const bodyHTML = hasSubs ? `<div style="position:relative;">
          <div class="card-title" style="${titleStyle}cursor:pointer;"
               onclick="this.closest('.kanban-card').querySelector('details').toggleAttribute('open')">
@@ -1810,6 +1823,9 @@ function buildColorCSS(config) {
           --kb-all-checked:${config.allCheckedColor};
       --kb-date-color:${config.colorDate};
       --kb-date-font:${config.fontDate};
+      --kb-bold-color:${cv(config.colorBold, "color-mix(in srgb, var(--kb-text) 75%, black)")};
+      --kb-italic-star-color:${cv(config.colorItalicStar, "color-mix(in srgb, var(--kb-text) 85%, white)")};
+      --kb-italic-underscore-color:${cv(config.colorItalicUnderscore, "color-mix(in srgb, var(--kb-text) 55%, teal)")};
       color:var(--kb-text);
     }
     #kanban-wrapper [data-col-container]{background:var(--kb-col-bg);}
@@ -3360,7 +3376,10 @@ var DEFAULT_SETTINGS = {
   colorFamilyParent: "#2db55d",
   colorFamilySibling: "#4a90d9",
   colorDate: "",
-  fontDate: ""
+  fontDate: "",
+  colorBold: "",
+  colorItalicStar: "",
+  colorItalicUnderscore: ""
 };
 var KanbanPlugin = class extends import_obsidian3.Plugin {
   constructor() {
@@ -3639,6 +3658,33 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
         this.plugin.settings.colorText = v;
       },
       "#ffffff"
+    );
+    themeColor(
+      "Bold color (**text**)",
+      "Color for card title text wrapped in **double asterisks**. Default: slightly darker than card text.",
+      () => this.plugin.settings.colorBold,
+      (v) => {
+        this.plugin.settings.colorBold = v;
+      },
+      "#b3b3b3"
+    );
+    themeColor(
+      "Italic color (*text*)",
+      "Color for card title text wrapped in single *asterisks*. Default: slightly lighter than card text.",
+      () => this.plugin.settings.colorItalicStar,
+      (v) => {
+        this.plugin.settings.colorItalicStar = v;
+      },
+      "#eeeeee"
+    );
+    themeColor(
+      "Italic color (_text_)",
+      "Color for card title text wrapped in _underscores_. Default: teal-shifted card text.",
+      () => this.plugin.settings.colorItalicUnderscore,
+      (v) => {
+        this.plugin.settings.colorItalicUnderscore = v;
+      },
+      "#4d9e99"
     );
     themeColor(
       "Accent / symbol color",

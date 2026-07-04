@@ -31,6 +31,9 @@ export interface KanbanSettings {
   colorFamilySibling: string;
   colorDate: string;
   fontDate: string;
+  colorBold: string;
+  colorItalicStar: string;
+  colorItalicUnderscore: string;
 }
 
 export const DEFAULT_SETTINGS: KanbanSettings = {
@@ -60,6 +63,9 @@ export const DEFAULT_SETTINGS: KanbanSettings = {
   colorFamilySibling: "#4a90d9",
   colorDate: "",
   fontDate: "",
+  colorBold: "",
+  colorItalicStar: "",
+  colorItalicUnderscore: "",
 };
 
 export default class KanbanPlugin extends Plugin {
@@ -490,6 +496,30 @@ class KanbanSettingTab extends PluginSettingTab {
       () => this.plugin.settings.colorText,
       (v) => { this.plugin.settings.colorText = v; },
       "#ffffff"
+    );
+
+    themeColor(
+      "Bold color (**text**)",
+      "Color for card title text wrapped in **double asterisks**. Default: slightly darker than card text.",
+      () => this.plugin.settings.colorBold,
+      (v) => { this.plugin.settings.colorBold = v; },
+      "#b3b3b3"
+    );
+
+    themeColor(
+      "Italic color (*text*)",
+      "Color for card title text wrapped in single *asterisks*. Default: slightly lighter than card text.",
+      () => this.plugin.settings.colorItalicStar,
+      (v) => { this.plugin.settings.colorItalicStar = v; },
+      "#eeeeee"
+    );
+
+    themeColor(
+      "Italic color (_text_)",
+      "Color for card title text wrapped in _underscores_. Default: teal-shifted card text.",
+      () => this.plugin.settings.colorItalicUnderscore,
+      (v) => { this.plugin.settings.colorItalicUnderscore = v; },
+      "#4d9e99"
     );
 
     themeColor(
