@@ -190,7 +190,7 @@ function parseTaskLine(raw: string): TaskLine {
   let skipDate: string | null = null;
   const sm = rest.match(/%% @skip:(\d{4}-\d{2}-\d{2}) %%/);
   if (sm) skipDate = sm[1];
-  rest = rest.replace(/\s*%%[\s\S]*?%%/g, "").trim();
+  rest = rest.replace(/\s*%%[\s\S]*?%%\s*/g, " ").trim();
 
   // Date annotation (@YYYY-MM-DD)
   let date: string | null = null;
@@ -1002,7 +1002,7 @@ async function addNewItem(
       // ── "Create new document" path ───────────────────────────────────────────
       // Task goes into the new project doc; a [[link]] is added to the master doc.
       const safeTitle = cardText
-        .replace(/\s*%%[\s\S]*?%%/g, "")
+        .replace(/\s*%%[\s\S]*?%%\s*/g, " ")
         .replace(/@\S+/g, "")
         .replace(/[\\/:*?"<>|#\[\]]/g, " ")
         .replace(/\s+/g, " ")
@@ -2086,7 +2086,7 @@ function createCardHTML(
   vaultName: string
 ): string {
   let display = item.item.text;
-  display = display.replace(/\s*%%[\s\S]*?%%/g, "").replace(/\s*✅\d{4}-\d{2}-\d{2}/, "").trim();
+  display = display.replace(/\s*%%[\s\S]*?%%\s*/g, " ").replace(/\s*✅\d{4}-\d{2}-\d{2}/, "").trim();
   const tagToRemove = extractTags(display).find(
     (t: string) => normalizeTag(t) === currentNorm
   );
@@ -2150,7 +2150,7 @@ function createCardHTML(
       config.normKanban.includes(normalizeTag(t))
     );
     let subText = sub.text
-      .replace(/\s*%%[\s\S]*?%%/g, "")
+      .replace(/\s*%%[\s\S]*?%%\s*/g, " ")
       .replace(/\s*✅\d{4}-\d{2}-\d{2}/, "")
       .trim()
       .split(/\s+/)

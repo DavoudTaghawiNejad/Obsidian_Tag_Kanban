@@ -124,7 +124,7 @@ function parseTaskLine(raw) {
   const sm = rest.match(/%% @skip:(\d{4}-\d{2}-\d{2}) %%/);
   if (sm)
     skipDate = sm[1];
-  rest = rest.replace(/\s*%%[\s\S]*?%%/g, "").trim();
+  rest = rest.replace(/\s*%%[\s\S]*?%%\s*/g, " ").trim();
   let date = null;
   const dm = rest.match(/(^|\s)(@\d{4}-\d{2}-\d{2})\b/);
   if (dm)
@@ -783,7 +783,7 @@ async function addNewItem(app, rawInsertTarget, columnTag, userText, dateStr, co
     let cardText = userText.trim();
     const noteLines = formatNoteLines("", notesText);
     if (createDoc) {
-      const safeTitle = cardText.replace(/\s*%%[\s\S]*?%%/g, "").replace(/@\S+/g, "").replace(/[\\/:*?"<>|#\[\]]/g, " ").replace(/\s+/g, " ").trim();
+      const safeTitle = cardText.replace(/\s*%%[\s\S]*?%%\s*/g, " ").replace(/@\S+/g, "").replace(/[\\/:*?"<>|#\[\]]/g, " ").replace(/\s+/g, " ").trim();
       const docPath = `${safeTitle}.md`;
       let projFile = app.vault.getAbstractFileByPath(docPath);
       if (!projFile) {
@@ -1688,7 +1688,7 @@ function hasUnchecked(subs) {
 }
 function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
   let display = item.item.text;
-  display = display.replace(/\s*%%[\s\S]*?%%/g, "").replace(/\s*✅\d{4}-\d{2}-\d{2}/, "").trim();
+  display = display.replace(/\s*%%[\s\S]*?%%\s*/g, " ").replace(/\s*✅\d{4}-\d{2}-\d{2}/, "").trim();
   const tagToRemove = extractTags(display).find(
     (t) => normalizeTag(t) === currentNorm
   );
@@ -1736,7 +1736,7 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
     const alreadyTagged = extractTags(sub.text).some(
       (t) => config.normKanban.includes(normalizeTag(t))
     );
-    let subText = sub.text.replace(/\s*%%[\s\S]*?%%/g, "").replace(/\s*✅\d{4}-\d{2}-\d{2}/, "").trim().split(/\s+/).filter((w) => !(w.startsWith("#") && config.normKanban.includes(normalizeTag(w)))).join(" ").trim();
+    let subText = sub.text.replace(/\s*%%[\s\S]*?%%\s*/g, " ").replace(/\s*✅\d{4}-\d{2}-\d{2}/, "").trim().split(/\s+/).filter((w) => !(w.startsWith("#") && config.normKanban.includes(normalizeTag(w)))).join(" ").trim();
     const subEditRaw = subText.replace(/^- \[[ xX]\] /, "").replace(/^[-*+]\s+/, "").trim();
     subText = formatCardDateAnnotation(formatTriggerAnnotations(subText, config.normRecurrent, false), true);
     const indent = "&nbsp;".repeat(depth * 3);
