@@ -879,6 +879,25 @@ async function editCardText(
   }
 }
 
+async function deleteLineRange(
+  app: App,
+  filePath: string,
+  startLine: number,
+  endLine: number
+): Promise<boolean> {
+  try {
+    const { tFile, lines } = await readFileLines(app, filePath);
+    if (startLine < 1 || startLine > lines.length) return false;
+    const end = Math.min(endLine, lines.length);
+    lines.splice(startLine - 1, end - startLine + 1);
+    await writeFileLines(app, tFile, lines);
+    return true;
+  } catch (e: any) {
+    console.error("deleteLineRange failed:", e);
+    return false;
+  }
+}
+
 async function moveToColumn(
   app: App,
   filePath: string,
@@ -2138,6 +2157,10 @@ function createCardHTML(
       .filter((w: string) => !(w.startsWith('#') && config.normKanban.includes(normalizeTag(w))))
       .join(" ")
       .trim();
+    const subEditRaw = subText
+      .replace(/^- \[[ xX]\] /, "")
+      .replace(/^[-*+]\s+/, "")
+      .trim();
     subText = formatCardDateAnnotation(formatTriggerAnnotations(subText, config.normRecurrent, false), true);
     const indent = "&nbsp;".repeat(depth * 3);
     const rendered = renderCheckbox(subText, {
@@ -2149,7 +2172,8 @@ function createCardHTML(
       parentTag,
       parentDigits: item.digits,
     });
-    return `<div style="margin:4px 0;line-height:1.5;">${indent}${rendered}</div>`;
+    const subLastLine = maxSubLine(sub.subs) || sub.line;
+    return `<div class="kb-sub-row" data-sub-line="${sub.line}" data-sub-last-line="${subLastLine}" data-sub-raw="${subEditRaw.replace(/"/g, "&quot;")}" style="margin:4px 0;line-height:1.5;">${indent}${rendered}</div>`;
   }
 
   function renderSubTree(subs: any[], depth = 0): string {
@@ -3055,12 +3079,86 @@ export function attachListeners(
             ?.toggleAttribute("open");
         };
       }
-      if (save && newText && newText !== raw) {
+      if (save && !newText) {
+        const lastLine = parseInt(card.dataset.lastSubLine || `${lineNum}`, 10);
+        await deleteLineRange(app, filePath, lineNum, lastLine);
+        requestAnimationFrame(() => setTimeout(refresh, 50));
+      } else if (save && newText !== raw) {
         card.dataset.raw = newText;
         await editCardText(app, filePath, lineNum, newText);
         requestAnimationFrame(() => setTimeout(refresh, 50));
       } else {
         titleDiv.innerHTML = savedHTML;
+      }
+    };
+
+    input.addEventListener("keydown", async (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        await finishEdit(true);
+      }
+      if (e.key === "Escape") await finishEdit(false);
+    });
+    input.addEventListener("input", autoResize);
+    input.addEventListener("blur", () => finishEdit(true));
+    input.addEventListener("dblclick", (e) => e.stopPropagation());
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      autoResize();
+      input.focus();
+      input.select();
+    }));
+  }
+
+  // ── Inline subtask text editing ──
+  async function onSubDblClick(e: MouseEvent) {
+    if ((e.target as Element).closest("a,button,.promote-icon,.demote-btn,.kb-date-label,.kb-trigger-label,.kb-sub-check")) return;
+    const subRow = (e.target as Element).closest(".kb-sub-row") as HTMLElement | null;
+    if (!subRow) return;
+    const card = subRow.closest(".kanban-card") as HTMLElement | null;
+    if (!card) return;
+    if (subRow.querySelector(".card-edit-input")) return;
+
+    const raw = subRow.dataset.subRaw || "";
+    const filePath = card.dataset.file!;
+    const lineNum = parseInt(subRow.dataset.subLine!, 10);
+    if (isNaN(lineNum)) return;
+
+    const savedHTML = subRow.innerHTML;
+
+    const input = ownerDoc().createElement("textarea");
+    input.value = raw;
+    input.className = "card-edit-input";
+    input.rows = 1;
+    input.style.cssText = `
+      width:100%;box-sizing:border-box;
+      background:var(--background-primary);
+      color:var(--text-normal);
+      border:none;border-bottom:2px solid var(--kb-accent);
+      outline:none;padding:2px 0;font-size:inherit;font-weight:inherit;
+      font-family:inherit;border-radius:0;
+      resize:none;overflow:hidden;line-height:inherit;display:block;`;
+
+    const autoResize = () => {
+      input.style.height = "0px";
+      input.style.height = input.scrollHeight + "px";
+    };
+
+    subRow.innerHTML = "";
+    subRow.appendChild(input);
+
+    const finishEdit = async (save: boolean) => {
+      if (!subRow.contains(input)) return;
+      const newText = input.value.trim();
+      if (save && !newText) {
+        const lastLine = parseInt(subRow.dataset.subLastLine || `${lineNum}`, 10);
+        await deleteLineRange(app, filePath, lineNum, lastLine);
+        requestAnimationFrame(() => setTimeout(refresh, 50));
+      } else if (save && newText !== raw) {
+        subRow.dataset.subRaw = newText;
+        await editCardText(app, filePath, lineNum, newText);
+        requestAnimationFrame(() => setTimeout(refresh, 50));
+      } else {
+        subRow.innerHTML = savedHTML;
       }
     };
 
@@ -3726,6 +3824,7 @@ export function attachListeners(
   boardEl.addEventListener("click", onAddClick);
   boardEl.addEventListener("click", onArchiveClick);
   boardEl.addEventListener("dblclick", onDblClick);
+  boardEl.addEventListener("dblclick", onSubDblClick);
   boardEl.addEventListener("toggle", onToggle, true);
   boardEl.addEventListener("touchstart", onTouchStart as unknown as EventListener, { passive: true });
   boardEl.addEventListener("touchmove", onTouchMove as unknown as EventListener, { passive: false });
@@ -3753,6 +3852,7 @@ export function attachListeners(
     boardEl.removeEventListener("click", onAddClick);
     boardEl.removeEventListener("click", onArchiveClick);
     boardEl.removeEventListener("dblclick", onDblClick);
+    boardEl.removeEventListener("dblclick", onSubDblClick);
     boardEl.removeEventListener("toggle", onToggle, true);
     boardEl.removeEventListener("touchstart", onTouchStart as unknown as EventListener);
     boardEl.removeEventListener("touchmove", onTouchMove as unknown as EventListener);

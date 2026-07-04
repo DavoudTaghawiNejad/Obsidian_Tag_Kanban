@@ -700,6 +700,20 @@ async function editCardText(app, filePath, lineNum, newText) {
     return false;
   }
 }
+async function deleteLineRange(app, filePath, startLine, endLine) {
+  try {
+    const { tFile, lines } = await readFileLines(app, filePath);
+    if (startLine < 1 || startLine > lines.length)
+      return false;
+    const end = Math.min(endLine, lines.length);
+    lines.splice(startLine - 1, end - startLine + 1);
+    await writeFileLines(app, tFile, lines);
+    return true;
+  } catch (e) {
+    console.error("deleteLineRange failed:", e);
+    return false;
+  }
+}
 async function moveToColumn(app, filePath, lineNum, originalTags, targetTag, isDone, config, dateStrToAppend = null, newDigits = null, newState = null, triggerAnnotation = null, clearDate = false) {
   try {
     const { tFile, lines } = await readFileLines(app, filePath);
@@ -1723,6 +1737,7 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
       (t) => config.normKanban.includes(normalizeTag(t))
     );
     let subText = sub.text.replace(/\s*%%[\s\S]*?%%/g, "").replace(/\s*✅\d{4}-\d{2}-\d{2}/, "").trim().split(/\s+/).filter((w) => !(w.startsWith("#") && config.normKanban.includes(normalizeTag(w)))).join(" ").trim();
+    const subEditRaw = subText.replace(/^- \[[ xX]\] /, "").replace(/^[-*+]\s+/, "").trim();
     subText = formatCardDateAnnotation(formatTriggerAnnotations(subText, config.normRecurrent, false), true);
     const indent = "&nbsp;".repeat(depth * 3);
     const rendered = renderCheckbox(subText, {
@@ -1734,7 +1749,8 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
       parentTag,
       parentDigits: item.digits
     });
-    return `<div style="margin:4px 0;line-height:1.5;">${indent}${rendered}</div>`;
+    const subLastLine = maxSubLine(sub.subs) || sub.line;
+    return `<div class="kb-sub-row" data-sub-line="${sub.line}" data-sub-last-line="${subLastLine}" data-sub-raw="${subEditRaw.replace(/"/g, "&quot;")}" style="margin:4px 0;line-height:1.5;">${indent}${rendered}</div>`;
   }
   function renderSubTree(subs, depth = 0) {
     return (subs || []).map((sub) => renderSub(sub, depth) + renderSubTree(sub.subs, depth + 1)).join("");
@@ -2544,12 +2560,84 @@ function attachListeners(boardEl, config, app, refresh) {
           this.closest(".kanban-card")?.querySelector("details")?.toggleAttribute("open");
         };
       }
-      if (save && newText && newText !== raw) {
+      if (save && !newText) {
+        const lastLine = parseInt(card.dataset.lastSubLine || `${lineNum}`, 10);
+        await deleteLineRange(app, filePath, lineNum, lastLine);
+        requestAnimationFrame(() => setTimeout(refresh, 50));
+      } else if (save && newText !== raw) {
         card.dataset.raw = newText;
         await editCardText(app, filePath, lineNum, newText);
         requestAnimationFrame(() => setTimeout(refresh, 50));
       } else {
         titleDiv.innerHTML = savedHTML;
+      }
+    };
+    input.addEventListener("keydown", async (e2) => {
+      if (e2.key === "Enter") {
+        e2.preventDefault();
+        await finishEdit(true);
+      }
+      if (e2.key === "Escape")
+        await finishEdit(false);
+    });
+    input.addEventListener("input", autoResize);
+    input.addEventListener("blur", () => finishEdit(true));
+    input.addEventListener("dblclick", (e2) => e2.stopPropagation());
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      autoResize();
+      input.focus();
+      input.select();
+    }));
+  }
+  async function onSubDblClick(e) {
+    if (e.target.closest("a,button,.promote-icon,.demote-btn,.kb-date-label,.kb-trigger-label,.kb-sub-check"))
+      return;
+    const subRow = e.target.closest(".kb-sub-row");
+    if (!subRow)
+      return;
+    const card = subRow.closest(".kanban-card");
+    if (!card)
+      return;
+    if (subRow.querySelector(".card-edit-input"))
+      return;
+    const raw = subRow.dataset.subRaw || "";
+    const filePath = card.dataset.file;
+    const lineNum = parseInt(subRow.dataset.subLine, 10);
+    if (isNaN(lineNum))
+      return;
+    const savedHTML = subRow.innerHTML;
+    const input = ownerDoc().createElement("textarea");
+    input.value = raw;
+    input.className = "card-edit-input";
+    input.rows = 1;
+    input.style.cssText = `
+      width:100%;box-sizing:border-box;
+      background:var(--background-primary);
+      color:var(--text-normal);
+      border:none;border-bottom:2px solid var(--kb-accent);
+      outline:none;padding:2px 0;font-size:inherit;font-weight:inherit;
+      font-family:inherit;border-radius:0;
+      resize:none;overflow:hidden;line-height:inherit;display:block;`;
+    const autoResize = () => {
+      input.style.height = "0px";
+      input.style.height = input.scrollHeight + "px";
+    };
+    subRow.innerHTML = "";
+    subRow.appendChild(input);
+    const finishEdit = async (save) => {
+      if (!subRow.contains(input))
+        return;
+      const newText = input.value.trim();
+      if (save && !newText) {
+        const lastLine = parseInt(subRow.dataset.subLastLine || `${lineNum}`, 10);
+        await deleteLineRange(app, filePath, lineNum, lastLine);
+        requestAnimationFrame(() => setTimeout(refresh, 50));
+      } else if (save && newText !== raw) {
+        subRow.dataset.subRaw = newText;
+        await editCardText(app, filePath, lineNum, newText);
+        requestAnimationFrame(() => setTimeout(refresh, 50));
+      } else {
+        subRow.innerHTML = savedHTML;
       }
     };
     input.addEventListener("keydown", async (e2) => {
@@ -3178,6 +3266,7 @@ function attachListeners(boardEl, config, app, refresh) {
   boardEl.addEventListener("click", onAddClick);
   boardEl.addEventListener("click", onArchiveClick);
   boardEl.addEventListener("dblclick", onDblClick);
+  boardEl.addEventListener("dblclick", onSubDblClick);
   boardEl.addEventListener("toggle", onToggle, true);
   boardEl.addEventListener("touchstart", onTouchStart, { passive: true });
   boardEl.addEventListener("touchmove", onTouchMove, { passive: false });
@@ -3204,6 +3293,7 @@ function attachListeners(boardEl, config, app, refresh) {
     boardEl.removeEventListener("click", onAddClick);
     boardEl.removeEventListener("click", onArchiveClick);
     boardEl.removeEventListener("dblclick", onDblClick);
+    boardEl.removeEventListener("dblclick", onSubDblClick);
     boardEl.removeEventListener("toggle", onToggle, true);
     boardEl.removeEventListener("touchstart", onTouchStart);
     boardEl.removeEventListener("touchmove", onTouchMove);
