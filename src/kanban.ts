@@ -1571,8 +1571,11 @@ const CHECKLIST_MARK = "☐"; // ☐
 
 // Turns pasted/typed notes text into sub-bullet lines under a newly created card.
 // Lines already formatted as "- text" or "- [ ]"/"- [x]" checkboxes are kept as-is;
-// anything else gets turned into a plain "-" bullet. Relative indentation between
-// lines is preserved, shifted one level (two spaces) under the card's own indent.
+// anything else gets turned into a plain "-" bullet. Nesting depth between lines
+// is derived from the hierarchy (each line's raw indent compared to its still-open
+// ancestors on a stack), not copied verbatim from however many spaces/tabs the
+// user happened to type — so depth normalizes to exactly one tab per level,
+// shifted one level under the card's own indent.
 function formatNoteLines(cardIndent: string, notesText: string): string[] {
   if (!notesText || !notesText.trim()) return [];
   const expanded = notesText.split(CHECKLIST_MARK).join("- [ ] ");
@@ -1588,13 +1591,17 @@ function formatNoteLines(cardIndent: string, notesText: string): string[] {
   }
   if (!isFinite(minIndent)) minIndent = 0;
 
+  const stack: number[] = [];
   return rawLines.map((line) => {
     if (line.trim() === "") return "";
     const stripped = line.slice(minIndent);
-    const relIndent = (stripped.match(/^(\s*)/) || [""])[0];
-    const content = stripped.slice(relIndent.length);
+    const rawIndentLen = (stripped.match(/^(\s*)/) || [""])[0].length;
+    const content = stripped.slice(rawIndentLen);
+    while (stack.length && stack[stack.length - 1] >= rawIndentLen) stack.pop();
+    stack.push(rawIndentLen);
+    const level = stack.length; // 1 = first level directly under the card
     const bulleted = /^-\s/.test(content) ? content : `- ${content}`;
-    return `${cardIndent}  ${relIndent}${bulleted}`;
+    return `${cardIndent}${"\t".repeat(level)}${bulleted}`;
   });
 }
 

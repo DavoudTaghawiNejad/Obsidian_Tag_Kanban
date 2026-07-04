@@ -1241,14 +1241,19 @@ function formatNoteLines(cardIndent, notesText) {
   }
   if (!isFinite(minIndent))
     minIndent = 0;
+  const stack = [];
   return rawLines.map((line) => {
     if (line.trim() === "")
       return "";
     const stripped = line.slice(minIndent);
-    const relIndent = (stripped.match(/^(\s*)/) || [""])[0];
-    const content = stripped.slice(relIndent.length);
+    const rawIndentLen = (stripped.match(/^(\s*)/) || [""])[0].length;
+    const content = stripped.slice(rawIndentLen);
+    while (stack.length && stack[stack.length - 1] >= rawIndentLen)
+      stack.pop();
+    stack.push(rawIndentLen);
+    const level = stack.length;
     const bulleted = /^-\s/.test(content) ? content : `- ${content}`;
-    return `${cardIndent}  ${relIndent}${bulleted}`;
+    return `${cardIndent}${"	".repeat(level)}${bulleted}`;
   });
 }
 function appendToFirstLine(text, suffix) {
