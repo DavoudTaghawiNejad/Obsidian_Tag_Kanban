@@ -1974,12 +1974,15 @@ function showRecurrentTriggerDialog(
   // unit. The month dropdown's 12th slot is relabelled "1 year" and stored as a
   // @repeat:1year annotation rather than @repeat:12month.
   const YEAR_SENTINEL = "year1";
-  let repeatEnabled = existingRepeatSpec !== null;
   let initRepeatUnit: RepeatUnit = existingRepeatSpec?.unit === "year" ? "month" : (existingRepeatSpec?.unit ?? "week");
+  // The count dropdown's default option is "-", meaning no interval repeat
+  // (the card doesn't get pushed forward after being marked done).
   let initRepeatCountVal =
-    existingRepeatSpec?.unit === "year" || (existingRepeatSpec?.unit === "month" && existingRepeatSpec.count === 12)
-      ? YEAR_SENTINEL
-      : String(existingRepeatSpec?.count ?? 1);
+    existingRepeatSpec === null
+      ? ""
+      : existingRepeatSpec.unit === "year" || (existingRepeatSpec.unit === "month" && existingRepeatSpec.count === 12)
+        ? YEAR_SENTINEL
+        : String(existingRepeatSpec.count);
 
   const wdStyle = (active: boolean) =>
     `height:24px;padding:0 8px;border-radius:12px;border:1px solid var(--background-modifier-border);cursor:pointer;font-size:.75em;display:inline-flex;align-items:center;justify-content:center;` +
@@ -2004,10 +2007,8 @@ function showRecurrentTriggerDialog(
   dialog.innerHTML = `
     <h3 style="margin:0 0 12px;font-size:1.1em;">Set recurrence trigger</h3>
     <div style="margin-bottom:12px;">
-      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:.9em;margin-bottom:6px;">
-        <input id="k-repeat-enable" type="checkbox" ${repeatEnabled ? "checked" : ""}> Repeat after
-      </label>
-      <div id="k-repeat-controls" style="display:${repeatEnabled ? "flex" : "none"};gap:6px;align-items:center;">
+      <span style="${lblStyle}display:block;margin-bottom:4px;">Repeat after</span>
+      <div id="k-repeat-controls" style="display:flex;gap:6px;align-items:center;">
         <select id="k-repeat-count" style="${selStyle}"></select>
         <select id="k-repeat-unit" style="${selStyle}">
           <option value="day">Days</option>
@@ -2043,8 +2044,6 @@ function showRecurrentTriggerDialog(
     <p id="k-trigger-err" style="margin:2px 0 8px;font-size:.82em;color:#e03e3e;min-height:1.2em;"></p>
     <div id="k-recur-actions" style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">${buttonHtml("Set", true)}${buttonHtml("No trigger", false)}${buttonHtml("Cancel", false)}</div>`;
 
-  const repeatEnableChk = dialog.querySelector("#k-repeat-enable") as HTMLInputElement;
-  const repeatControls  = dialog.querySelector("#k-repeat-controls") as HTMLElement;
   const repeatCountSel  = dialog.querySelector("#k-repeat-count") as HTMLSelectElement;
   const repeatUnitSel   = dialog.querySelector("#k-repeat-unit") as HTMLSelectElement;
   const wdWrap   = dialog.querySelector("#k-wd-wrap") as HTMLElement;
@@ -2071,21 +2070,21 @@ function showRecurrentTriggerDialog(
   renderDomRows();
   renderMoRows();
 
-  // Interval-based recurrence (the "Repeat after" checkbox) and calendar-based
-  // triggers (weekday/quarterly/day-of-month/month) are mutually exclusive —
-  // a card recurs off exactly one of these.
+  // Interval-based recurrence ("Repeat after") and calendar-based triggers
+  // (weekday/quarterly/day-of-month/month) are mutually exclusive — a card
+  // recurs off exactly one of these.
   const populateRepeatCountOptions = (unit: string, selectValue?: string) => {
-    let opts: [string, string][];
+    let opts: [string, string][] = [["", "-"]];
     if (unit === "day") {
-      opts = Array.from({ length: 30 }, (_, i) => [String(i + 1), `${i + 1} day${i > 0 ? "s" : ""}`]);
+      opts.push(...Array.from({ length: 30 }, (_, i) => [String(i + 1), `${i + 1} day${i > 0 ? "s" : ""}`] as [string, string]));
     } else if (unit === "week") {
-      opts = Array.from({ length: 8 }, (_, i) => [String(i + 1), `${i + 1} week${i > 0 ? "s" : ""}`]);
+      opts.push(...Array.from({ length: 8 }, (_, i) => [String(i + 1), `${i + 1} week${i > 0 ? "s" : ""}`] as [string, string]));
     } else {
-      opts = Array.from({ length: 11 }, (_, i) => [String(i + 1), `${i + 1} month${i > 0 ? "s" : ""}`]);
+      opts.push(...Array.from({ length: 11 }, (_, i) => [String(i + 1), `${i + 1} month${i > 0 ? "s" : ""}`] as [string, string]));
       opts.push([YEAR_SENTINEL, "1 year"]);
     }
     repeatCountSel.innerHTML = opts.map(([v, l]) => `<option value="${v}">${l}</option>`).join('');
-    if (selectValue && opts.some(([v]) => v === selectValue)) repeatCountSel.value = selectValue;
+    if (selectValue !== undefined && opts.some(([v]) => v === selectValue)) repeatCountSel.value = selectValue;
   };
   repeatUnitSel.value = initRepeatUnit;
   populateRepeatCountOptions(initRepeatUnit, initRepeatCountVal);
@@ -2106,21 +2105,14 @@ function showRecurrentTriggerDialog(
     selectedDays.length = 0; renderDomRows();
     selectedMonths.length = 0; renderMoRows();
   };
-  const clearRepeatSelection = () => {
-    if (!repeatEnableChk.checked) return;
-    repeatEnableChk.checked = false;
-    repeatControls.style.display = "none";
-  };
+  // Picking a calendar-based trigger resets the interval dropdown back to "-";
+  // picking a real interval count clears any calendar-based selection.
+  const clearRepeatSelection = () => { repeatCountSel.value = ""; };
 
-  repeatEnableChk.addEventListener("change", () => {
-    if (repeatEnableChk.checked) {
-      clearCalendarTriggers();
-      repeatControls.style.display = "flex";
-    } else {
-      repeatControls.style.display = "none";
-    }
+  repeatCountSel.addEventListener("change", () => {
+    if (repeatCountSel.value !== "") clearCalendarTriggers();
   });
-  repeatUnitSel.addEventListener("change", () => populateRepeatCountOptions(repeatUnitSel.value));
+  repeatUnitSel.addEventListener("change", () => populateRepeatCountOptions(repeatUnitSel.value, repeatCountSel.value));
 
   // Quarterly toggle (plain)
   const quarterlyBtn = dialog.querySelector("#k-quarterly-btn") as HTMLButtonElement;
@@ -2188,7 +2180,7 @@ function showRecurrentTriggerDialog(
   });
 
   const submit = () => {
-    if (repeatEnableChk.checked) {
+    if (repeatCountSel.value !== "") {
       close();
       const spec = readRepeatSpec();
       const nextDate = formatDateAnnotation(addRepeatInterval(new Date(), spec));
