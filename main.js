@@ -660,14 +660,14 @@ function renderCheckbox(text, opts = {}) {
     content = content.slice(6);
     if (showCheckbox) {
       if (isSub && subLine != null) {
-        cbHtml = `<input type="checkbox" class="kb-sub-check" data-sub-line="${subLine}"${checked ? " checked" : ""} style="margin-right:5px;cursor:pointer;">`;
+        cbHtml = `<input type="checkbox" class="kb-sub-check" data-sub-line="${subLine}"${checked ? " checked" : ""} style="width:1em;height:1em;margin-right:5px;vertical-align:middle;cursor:pointer;">`;
       } else {
-        cbHtml = `<input type="checkbox" disabled${checked ? " checked" : ""} style="margin-right:5px;">`;
+        cbHtml = `<input type="checkbox" disabled${checked ? " checked" : ""} style="width:1em;height:1em;margin-right:5px;vertical-align:middle;">`;
       }
     }
   } else if (/^[-*+]\s+/.test(content)) {
     content = content.replace(/^[-*+]\s+/, "");
-    cbHtml = showCheckbox ? `<input type="checkbox" disabled style="margin-right:5px;">` : "\u2022 ";
+    cbHtml = showCheckbox ? `<input type="checkbox" disabled style="width:1em;height:1em;margin-right:5px;vertical-align:middle;">` : "\u2022 ";
   }
   if (vaultName)
     content = linksToHtml(content, vaultName);
