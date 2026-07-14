@@ -13,7 +13,6 @@ export interface KanbanSettings {
   parentPages: string[];
   allVaultNotes: boolean;
   allChildrenDoneColor: string;
-  allCheckedColor: string;
   projectColumns: string[];
   activeColumns: string[];
   projectsDocument: string;
@@ -49,7 +48,6 @@ export const DEFAULT_SETTINGS: KanbanSettings = {
   parentPages: [],
   allVaultNotes: true,
   allChildrenDoneColor: "#e03e3e",
-  allCheckedColor: "#2db55d",
   projectColumns: [],
   activeColumns: ["#next", "#important", "#today"],
   projectsDocument: "",
@@ -617,13 +615,6 @@ class KanbanSettingTab extends PluginSettingTab {
       "Border color for cards that have unchecked sub-tasks not tracked as kanban cards.",
       () => this.plugin.settings.allChildrenDoneColor,
       (v) => { this.plugin.settings.allChildrenDoneColor = v; }
-    );
-
-    fixedColor(
-      "All sub-tasks checked — highlight",
-      "Border color for cards where every checkbox descendant is checked.",
-      () => this.plugin.settings.allCheckedColor,
-      (v) => { this.plugin.settings.allCheckedColor = v; }
     );
 
     fixedColor(

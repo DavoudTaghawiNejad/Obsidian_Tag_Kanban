@@ -52,7 +52,6 @@ function buildConfig(settings) {
     normActive: (settings.activeColumns && settings.activeColumns.length ? settings.activeColumns : ["#next", "#important", "#today"]).map(normalizeTag),
     projectsDocument: settings.projectsDocument || "",
     allChildrenDoneColor: settings.allChildrenDoneColor,
-    allCheckedColor: settings.allCheckedColor || "#2db55d",
     columnColors: Object.fromEntries(
       (settings.kanban || []).map((tag, i) => [normalizeTag(tag), (settings.columnColors || [])[i] || ""])
     ),
@@ -1813,15 +1812,6 @@ function isCheckboxItem(s) {
 function isCheckedItem(s) {
   return /^[-*+]\s+\[[xX]\]/.test((s.text ?? "").trim());
 }
-function hasAnyCheckbox(subs) {
-  for (const s of subs ?? []) {
-    if (isCheckboxItem(s))
-      return true;
-    if (s.subs?.length && hasAnyCheckbox(s.subs))
-      return true;
-  }
-  return false;
-}
 function hasUnchecked(subs) {
   for (const s of subs ?? []) {
     if (isCheckboxItem(s) && !isCheckedItem(s))
@@ -1870,10 +1860,8 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
     }
     return true;
   }
-  const hasCheckboxSubs = hasAnyCheckbox(item.item.subs);
-  const allSubsChecked = hasCheckboxSubs && !hasUnchecked(item.item.subs);
   const isProjectColumn = config.normProject.includes(currentNorm);
-  const hasUnmanagedWork = isProjectColumn && hasCheckboxSubs && hasUnchecked(item.item.subs) && !hasActiveKanban(item.item.subs) && !allUncheckedInLaterOrRecurrent(item.item.subs);
+  const hasUnmanagedWork = isProjectColumn && hasUnchecked(item.item.subs) && !hasActiveKanban(item.item.subs) && !allUncheckedInLaterOrRecurrent(item.item.subs);
   function renderSub(sub, depth) {
     const parentTag = item.item.tags.find((t) => normalizeTag(t) === currentNorm) || "";
     const hasCheckbox = /^- \[[ xX]\] /.test(sub.text);
@@ -1920,7 +1908,7 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
          <div class="card-title" style="${titleStyle}">${iconSpacer(26)}${mainContent}</div>
          <button class="kb-add-sub" style="${addSubBtnStyle}position:absolute;top:4px;right:0;">+</button>
        </div>`;
-  const border = isMulti ? "background:var(--background-modifier-error-hover);border:1px solid var(--background-modifier-error);" : hasUnmanagedWork ? `border:2px solid var(--kb-children-done);background:color-mix(in srgb,var(--kb-children-done) 20%,var(--kb-card-bg));` : allSubsChecked ? `border:2px solid var(--kb-all-checked);background:color-mix(in srgb,var(--kb-all-checked) 20%,var(--kb-card-bg));` : "border:1px solid var(--background-modifier-border);";
+  const border = isMulti ? "background:var(--background-modifier-error-hover);border:1px solid var(--background-modifier-error);" : hasUnmanagedWork ? `border:2px solid var(--kb-children-done);background:color-mix(in srgb,var(--kb-children-done) 20%,var(--kb-card-bg));` : "border:1px solid var(--background-modifier-border);";
   const src = item.source.path.split("/").pop().replace(/\.md$/, "");
   const href = `obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(item.filePath)}`;
   const badge = `<div style="margin-top:8px;font-size:.8em;color:var(--kb-text);">
@@ -1984,7 +1972,6 @@ function buildColorCSS(config) {
       --kb-family-parent:${config.colorFamilyParent};
       --kb-family-sibling:${config.colorFamilySibling};
       --kb-children-done:${config.allChildrenDoneColor};
-          --kb-all-checked:${config.allCheckedColor};
       --kb-date-color:${config.colorDate};
       --kb-date-font:${config.fontDate};
       --kb-bold-color:${cv(config.colorBold, "color-mix(in srgb, var(--kb-text) 75%, black)")};
@@ -3588,7 +3575,6 @@ var DEFAULT_SETTINGS = {
   parentPages: [],
   allVaultNotes: true,
   allChildrenDoneColor: "#e03e3e",
-  allCheckedColor: "#2db55d",
   projectColumns: [],
   activeColumns: ["#next", "#important", "#today"],
   projectsDocument: "",
@@ -3996,14 +3982,6 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
       () => this.plugin.settings.allChildrenDoneColor,
       (v) => {
         this.plugin.settings.allChildrenDoneColor = v;
-      }
-    );
-    fixedColor(
-      "All sub-tasks checked \u2014 highlight",
-      "Border color for cards where every checkbox descendant is checked.",
-      () => this.plugin.settings.allCheckedColor,
-      (v) => {
-        this.plugin.settings.allCheckedColor = v;
       }
     );
     fixedColor(

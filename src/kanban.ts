@@ -35,7 +35,6 @@ export interface KanbanConfig {
   normActive: string[];
   projectsDocument: string;
   allChildrenDoneColor: string;
-  allCheckedColor: string;
   // Colors (empty string → fall back to Obsidian theme variable)
   columnColors: Record<string, string>;
   // Per-column max card count keyed by normalized tag. 0 = no limit.
@@ -82,7 +81,6 @@ export function buildConfig(settings: KanbanSettings): KanbanConfig {
     ).map(normalizeTag),
     projectsDocument: settings.projectsDocument || "",
     allChildrenDoneColor: settings.allChildrenDoneColor,
-    allCheckedColor: settings.allCheckedColor || "#2db55d",
     columnColors: Object.fromEntries(
       (settings.kanban || []).map((tag, i) => [normalizeTag(tag), (settings.columnColors || [])[i] || ""])
     ),
@@ -2242,14 +2240,6 @@ function isCheckboxItem(s: any): boolean {
 function isCheckedItem(s: any): boolean {
   return /^[-*+]\s+\[[xX]\]/.test((s.text ?? "").trim());
 }
-// Any checkbox descendant (checked or unchecked).
-function hasAnyCheckbox(subs: any[]): boolean {
-  for (const s of subs ?? []) {
-    if (isCheckboxItem(s)) return true;
-    if (s.subs?.length && hasAnyCheckbox(s.subs)) return true;
-  }
-  return false;
-}
 // Any unchecked checkbox descendant.
 function hasUnchecked(subs: any[]): boolean {
   for (const s of subs ?? []) {
@@ -2316,12 +2306,9 @@ function createCardHTML(
     return true;
   }
 
-  const hasCheckboxSubs = hasAnyCheckbox(item.item.subs);
-  // Green: has checkboxes and all are checked.
-  const allSubsChecked   = hasCheckboxSubs && !hasUnchecked(item.item.subs);
   // Red: only in project columns — has unchecked checkboxes, none in an active column, and not all deferred to Later/Recurrent.
   const isProjectColumn  = config.normProject.includes(currentNorm);
-  const hasUnmanagedWork = isProjectColumn && hasCheckboxSubs && hasUnchecked(item.item.subs)
+  const hasUnmanagedWork = isProjectColumn && hasUnchecked(item.item.subs)
     && !hasActiveKanban(item.item.subs) && !allUncheckedInLaterOrRecurrent(item.item.subs);
 
   function renderSub(sub: any, depth: number): string {
@@ -2401,9 +2388,7 @@ function createCardHTML(
     ? "background:var(--background-modifier-error-hover);border:1px solid var(--background-modifier-error);"
     : hasUnmanagedWork
       ? `border:2px solid var(--kb-children-done);background:color-mix(in srgb,var(--kb-children-done) 20%,var(--kb-card-bg));`
-      : allSubsChecked
-        ? `border:2px solid var(--kb-all-checked);background:color-mix(in srgb,var(--kb-all-checked) 20%,var(--kb-card-bg));`
-        : "border:1px solid var(--background-modifier-border);";
+      : "border:1px solid var(--background-modifier-border);";
 
   const src = item.source.path.split("/").pop().replace(/\.md$/, "");
   const href = `obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(item.filePath)}`;
@@ -2478,7 +2463,6 @@ function buildColorCSS(config: KanbanConfig): string {
       --kb-family-parent:${config.colorFamilyParent};
       --kb-family-sibling:${config.colorFamilySibling};
       --kb-children-done:${config.allChildrenDoneColor};
-          --kb-all-checked:${config.allCheckedColor};
       --kb-date-color:${config.colorDate};
       --kb-date-font:${config.fontDate};
       --kb-bold-color:${cv(config.colorBold, "color-mix(in srgb, var(--kb-text) 75%, black)")};
