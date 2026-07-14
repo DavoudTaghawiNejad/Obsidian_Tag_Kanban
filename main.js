@@ -71,7 +71,10 @@ function buildConfig(settings) {
     fontDate: settings.fontDate || "monospace",
     colorBold: settings.colorBold || "",
     colorItalicStar: settings.colorItalicStar || "",
-    colorItalicUnderscore: settings.colorItalicUnderscore || ""
+    colorItalicUnderscore: settings.colorItalicUnderscore || "",
+    fontSizeColumnTitle: (import_obsidian.Platform.isMobile ? settings.fontSizeColumnTitleMobile : settings.fontSizeColumnTitle) || "",
+    fontSizeCardTitle: (import_obsidian.Platform.isMobile ? settings.fontSizeCardTitleMobile : settings.fontSizeCardTitle) || "",
+    fontSizeSubtask: (import_obsidian.Platform.isMobile ? settings.fontSizeSubtaskMobile : settings.fontSizeSubtask) || ""
   };
 }
 function validateConfig(settings) {
@@ -1884,7 +1887,8 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
       parentDigits: item.digits
     });
     const subLastLine = maxSubLine(sub.subs) || sub.line;
-    return `<div class="kb-sub-row" data-sub-line="${sub.line}" data-sub-last-line="${subLastLine}" data-sub-raw="${subEditRaw.replace(/"/g, "&quot;")}" style="margin:4px 0;line-height:1.5;">${indent}${rendered}</div>`;
+    const subStyle = `margin:4px 0;line-height:1.5;${config.fontSizeSubtask ? `font-size:${config.fontSizeSubtask};` : ""}`;
+    return `<div class="kb-sub-row" data-sub-line="${sub.line}" data-sub-last-line="${subLastLine}" data-sub-raw="${subEditRaw.replace(/"/g, "&quot;")}" style="${subStyle}">${indent}${rendered}</div>`;
   }
   function renderSubTree(subs, depth = 0) {
     return (subs || []).map((sub) => renderSub(sub, depth) + renderSubTree(sub.subs, depth + 1)).join("");
@@ -1893,7 +1897,7 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
   const addSubBtn = `<button class="kb-add-sub" style="${addSubBtnStyle}">+</button>`;
   const TITLE_LINE_H = 1.5;
   const iconSpacer = (width) => `<span aria-hidden="true" style="float:right;width:${width}px;height:${TITLE_LINE_H}em;"></span>`;
-  const titleStyle = `padding:6px 0;font-weight:${TITLE_FONT_WEIGHT};color:var(--kb-text);text-align:left;line-height:${TITLE_LINE_H};`;
+  const titleStyle = `padding:6px 0;font-weight:${TITLE_FONT_WEIGHT};color:var(--kb-text);text-align:left;line-height:${TITLE_LINE_H};${config.fontSizeCardTitle ? `font-size:${config.fontSizeCardTitle};` : ""}`;
   const bodyHTML = hasSubs ? `<div style="position:relative;">
          <div class="card-title" style="${titleStyle}cursor:pointer;"
               onclick="this.closest('.kanban-card').querySelector('details').toggleAttribute('open')">
@@ -2262,7 +2266,9 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
     });
     header.createEl("h4", {
       text: col.rawTag.replace(/^#/, "").toUpperCase(),
-      attr: { style: "margin:0;flex-grow:1;font-weight:bold;color:var(--kb-text);" }
+      attr: {
+        style: `margin:0;flex-grow:1;font-weight:bold;color:var(--kb-text);${config.fontSizeColumnTitle ? `font-size:${config.fontSizeColumnTitle};` : ""}`
+      }
     });
     header.createEl("span", {
       text: String(col.cards.length),
@@ -3595,7 +3601,13 @@ var DEFAULT_SETTINGS = {
   fontDate: "",
   colorBold: "",
   colorItalicStar: "",
-  colorItalicUnderscore: ""
+  colorItalicUnderscore: "",
+  fontSizeColumnTitle: "",
+  fontSizeColumnTitleMobile: "",
+  fontSizeCardTitle: "",
+  fontSizeCardTitleMobile: "",
+  fontSizeSubtask: "",
+  fontSizeSubtaskMobile: ""
 };
 var KanbanPlugin = class extends import_obsidian3.Plugin {
   constructor() {
@@ -3953,6 +3965,67 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
         this.plugin.settings.fontDate = v;
         await this.plugin.saveSettings();
       })
+    );
+    containerEl.createEl("h4", { text: "Font sizes" });
+    containerEl.createEl("p", {
+      text: "CSS font-size values (e.g. 14px, 1.1em). Leave blank to use the theme/browser default. Mobile fields apply only on Obsidian mobile and are independent of the desktop values.",
+      attr: { style: "color:var(--text-muted);font-size:.85em;margin-top:-6px;" }
+    });
+    const fontSizeSetting = (name, desc, get, set) => {
+      new import_obsidian3.Setting(containerEl).setName(name).setDesc(desc).addText(
+        (text) => text.setPlaceholder("theme default").setValue(get()).onChange(async (value) => {
+          set(value.trim());
+          await this.plugin.saveSettings();
+        })
+      );
+    };
+    fontSizeSetting(
+      "Column title size",
+      "Font size of the column header text (e.g. TODO, DONE).",
+      () => this.plugin.settings.fontSizeColumnTitle,
+      (v) => {
+        this.plugin.settings.fontSizeColumnTitle = v;
+      }
+    );
+    fontSizeSetting(
+      "Column title size (mobile)",
+      "Same as above, but only applied on Obsidian mobile.",
+      () => this.plugin.settings.fontSizeColumnTitleMobile,
+      (v) => {
+        this.plugin.settings.fontSizeColumnTitleMobile = v;
+      }
+    );
+    fontSizeSetting(
+      "Card title size",
+      "Font size of a card's main title text.",
+      () => this.plugin.settings.fontSizeCardTitle,
+      (v) => {
+        this.plugin.settings.fontSizeCardTitle = v;
+      }
+    );
+    fontSizeSetting(
+      "Card title size (mobile)",
+      "Same as above, but only applied on Obsidian mobile.",
+      () => this.plugin.settings.fontSizeCardTitleMobile,
+      (v) => {
+        this.plugin.settings.fontSizeCardTitleMobile = v;
+      }
+    );
+    fontSizeSetting(
+      "Subtask size",
+      "Font size of sub-task text (and their checkboxes) on a card.",
+      () => this.plugin.settings.fontSizeSubtask,
+      (v) => {
+        this.plugin.settings.fontSizeSubtask = v;
+      }
+    );
+    fontSizeSetting(
+      "Subtask size (mobile)",
+      "Same as above, but only applied on Obsidian mobile.",
+      () => this.plugin.settings.fontSizeSubtaskMobile,
+      (v) => {
+        this.plugin.settings.fontSizeSubtaskMobile = v;
+      }
     );
     fixedColor(
       "Family highlight \u2014 self",

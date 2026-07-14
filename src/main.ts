@@ -35,6 +35,14 @@ export interface KanbanSettings {
   colorBold: string;
   colorItalicStar: string;
   colorItalicUnderscore: string;
+  // Font sizes — empty string means "use theme/browser default". Mobile fields are
+  // independent overrides used only when running on Obsidian mobile.
+  fontSizeColumnTitle: string;
+  fontSizeColumnTitleMobile: string;
+  fontSizeCardTitle: string;
+  fontSizeCardTitleMobile: string;
+  fontSizeSubtask: string;
+  fontSizeSubtaskMobile: string;
 }
 
 export const DEFAULT_SETTINGS: KanbanSettings = {
@@ -67,6 +75,12 @@ export const DEFAULT_SETTINGS: KanbanSettings = {
   colorBold: "",
   colorItalicStar: "",
   colorItalicUnderscore: "",
+  fontSizeColumnTitle: "",
+  fontSizeColumnTitleMobile: "",
+  fontSizeCardTitle: "",
+  fontSizeCardTitleMobile: "",
+  fontSizeSubtask: "",
+  fontSizeSubtaskMobile: "",
 };
 
 export default class KanbanPlugin extends Plugin {
@@ -588,6 +602,70 @@ class KanbanSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           })
       );
+
+    containerEl.createEl("h4", { text: "Font sizes" });
+    containerEl.createEl("p", {
+      text: "CSS font-size values (e.g. 14px, 1.1em). Leave blank to use the theme/browser default. " +
+        "Mobile fields apply only on Obsidian mobile and are independent of the desktop values.",
+      attr: { style: "color:var(--text-muted);font-size:.85em;margin-top:-6px;" },
+    });
+
+    const fontSizeSetting = (
+      name: string,
+      desc: string,
+      get: () => string,
+      set: (v: string) => void
+    ) => {
+      new Setting(containerEl)
+        .setName(name)
+        .setDesc(desc)
+        .addText((text) =>
+          text
+            .setPlaceholder("theme default")
+            .setValue(get())
+            .onChange(async (value) => {
+              set(value.trim());
+              await this.plugin.saveSettings();
+            })
+        );
+    };
+
+    fontSizeSetting(
+      "Column title size",
+      "Font size of the column header text (e.g. TODO, DONE).",
+      () => this.plugin.settings.fontSizeColumnTitle,
+      (v) => { this.plugin.settings.fontSizeColumnTitle = v; }
+    );
+    fontSizeSetting(
+      "Column title size (mobile)",
+      "Same as above, but only applied on Obsidian mobile.",
+      () => this.plugin.settings.fontSizeColumnTitleMobile,
+      (v) => { this.plugin.settings.fontSizeColumnTitleMobile = v; }
+    );
+    fontSizeSetting(
+      "Card title size",
+      "Font size of a card's main title text.",
+      () => this.plugin.settings.fontSizeCardTitle,
+      (v) => { this.plugin.settings.fontSizeCardTitle = v; }
+    );
+    fontSizeSetting(
+      "Card title size (mobile)",
+      "Same as above, but only applied on Obsidian mobile.",
+      () => this.plugin.settings.fontSizeCardTitleMobile,
+      (v) => { this.plugin.settings.fontSizeCardTitleMobile = v; }
+    );
+    fontSizeSetting(
+      "Subtask size",
+      "Font size of sub-task text (and their checkboxes) on a card.",
+      () => this.plugin.settings.fontSizeSubtask,
+      (v) => { this.plugin.settings.fontSizeSubtask = v; }
+    );
+    fontSizeSetting(
+      "Subtask size (mobile)",
+      "Same as above, but only applied on Obsidian mobile.",
+      () => this.plugin.settings.fontSizeSubtaskMobile,
+      (v) => { this.plugin.settings.fontSizeSubtaskMobile = v; }
+    );
 
     fixedColor(
       "Family highlight — self",

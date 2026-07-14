@@ -10,7 +10,7 @@
  *   new Notice(...)      → same (global in plugin context)
  */
 
-import { App, Notice, TFile, TFolder } from "obsidian";
+import { App, Notice, Platform, TFile, TFolder } from "obsidian";
 import { KanbanSettings } from "./main";
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
@@ -54,6 +54,10 @@ export interface KanbanConfig {
   colorBold: string;
   colorItalicStar: string;
   colorItalicUnderscore: string;
+  // Resolved for the current device (desktop vs. mobile) — empty means "use default".
+  fontSizeColumnTitle: string;
+  fontSizeCardTitle: string;
+  fontSizeSubtask: string;
 }
 
 export function buildConfig(settings: KanbanSettings): KanbanConfig {
@@ -101,6 +105,15 @@ export function buildConfig(settings: KanbanSettings): KanbanConfig {
     colorBold: settings.colorBold || "",
     colorItalicStar: settings.colorItalicStar || "",
     colorItalicUnderscore: settings.colorItalicUnderscore || "",
+    fontSizeColumnTitle: (Platform.isMobile
+      ? settings.fontSizeColumnTitleMobile
+      : settings.fontSizeColumnTitle) || "",
+    fontSizeCardTitle: (Platform.isMobile
+      ? settings.fontSizeCardTitleMobile
+      : settings.fontSizeCardTitle) || "",
+    fontSizeSubtask: (Platform.isMobile
+      ? settings.fontSizeSubtaskMobile
+      : settings.fontSizeSubtask) || "",
   };
 }
 
@@ -2346,7 +2359,10 @@ function createCardHTML(
       parentDigits: item.digits,
     });
     const subLastLine = maxSubLine(sub.subs) || sub.line;
-    return `<div class="kb-sub-row" data-sub-line="${sub.line}" data-sub-last-line="${subLastLine}" data-sub-raw="${subEditRaw.replace(/"/g, "&quot;")}" style="margin:4px 0;line-height:1.5;">${indent}${rendered}</div>`;
+    const subStyle = `margin:4px 0;line-height:1.5;${
+      config.fontSizeSubtask ? `font-size:${config.fontSizeSubtask};` : ""
+    }`;
+    return `<div class="kb-sub-row" data-sub-line="${sub.line}" data-sub-last-line="${subLastLine}" data-sub-raw="${subEditRaw.replace(/"/g, "&quot;")}" style="${subStyle}">${indent}${rendered}</div>`;
   }
 
   function renderSubTree(subs: any[], depth = 0): string {
@@ -2367,7 +2383,9 @@ function createCardHTML(
   const TITLE_LINE_H = 1.5; // em
   const iconSpacer = (width: number) =>
     `<span aria-hidden="true" style="float:right;width:${width}px;height:${TITLE_LINE_H}em;"></span>`;
-  const titleStyle = `padding:6px 0;font-weight:${TITLE_FONT_WEIGHT};color:var(--kb-text);text-align:left;line-height:${TITLE_LINE_H};`;
+  const titleStyle = `padding:6px 0;font-weight:${TITLE_FONT_WEIGHT};color:var(--kb-text);text-align:left;line-height:${TITLE_LINE_H};${
+    config.fontSizeCardTitle ? `font-size:${config.fontSizeCardTitle};` : ""
+  }`;
 
   const bodyHTML = hasSubs
     ? `<div style="position:relative;">
@@ -2762,7 +2780,11 @@ export async function buildBoard(
     });
     header.createEl("h4", {
       text: col.rawTag.replace(/^#/, "").toUpperCase(),
-      attr: { style: "margin:0;flex-grow:1;font-weight:bold;color:var(--kb-text);" },
+      attr: {
+        style: `margin:0;flex-grow:1;font-weight:bold;color:var(--kb-text);${
+          config.fontSizeColumnTitle ? `font-size:${config.fontSizeColumnTitle};` : ""
+        }`,
+      },
     });
     header.createEl("span", {
       text: String(col.cards.length),
