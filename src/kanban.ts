@@ -2308,8 +2308,11 @@ function createCardHTML(
 
   // Red: only in project columns — has unchecked checkboxes, none in an active column, and not all deferred to Later/Recurrent.
   const isProjectColumn  = config.normProject.includes(currentNorm);
-  const hasUnmanagedWork = isProjectColumn && hasUnchecked(item.item.subs)
-    && !hasActiveKanban(item.item.subs) && !allUncheckedInLaterOrRecurrent(item.item.subs);
+  // Red: in the Done column — a "done" card still has an unchecked subtask.
+  const isDoneColumn     = currentNorm === config.normDone;
+  const hasUnmanagedWork = (isProjectColumn && hasUnchecked(item.item.subs)
+    && !hasActiveKanban(item.item.subs) && !allUncheckedInLaterOrRecurrent(item.item.subs))
+    || (isDoneColumn && hasUnchecked(item.item.subs));
 
   function renderSub(sub: any, depth: number): string {
     const parentTag =
@@ -3050,6 +3053,10 @@ export function attachListeners(
         }
       );
     } else {
+      // A card moved to Done that still has open subtasks shouldn't land
+      // collapsed — open it so the unchecked work is visible (it also gets
+      // the Done-column "unmanaged work" highlight, see hasUnmanagedWork).
+      const openOnDone = isDone && hasUnchecked(card.subs);
       const ok = await moveToColumn(
         app,
         card.filePath,
@@ -3060,7 +3067,7 @@ export function attachListeners(
         config,
         null,
         newCalc.digits,
-        newState
+        openOnDone ? "expanded" : newState
       );
       if (ok) requestAnimationFrame(() => setTimeout(refresh, 50));
     }

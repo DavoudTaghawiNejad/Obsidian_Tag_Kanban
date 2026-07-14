@@ -1861,7 +1861,8 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
     return true;
   }
   const isProjectColumn = config.normProject.includes(currentNorm);
-  const hasUnmanagedWork = isProjectColumn && hasUnchecked(item.item.subs) && !hasActiveKanban(item.item.subs) && !allUncheckedInLaterOrRecurrent(item.item.subs);
+  const isDoneColumn = currentNorm === config.normDone;
+  const hasUnmanagedWork = isProjectColumn && hasUnchecked(item.item.subs) && !hasActiveKanban(item.item.subs) && !allUncheckedInLaterOrRecurrent(item.item.subs) || isDoneColumn && hasUnchecked(item.item.subs);
   function renderSub(sub, depth) {
     const parentTag = item.item.tags.find((t) => normalizeTag(t) === currentNorm) || "";
     const hasCheckbox = /^- \[[ xX]\] /.test(sub.text);
@@ -2497,6 +2498,7 @@ function attachListeners(boardEl, config, app, refresh) {
         }
       );
     } else {
+      const openOnDone = isDone && hasUnchecked(card.subs);
       const ok = await moveToColumn(
         app,
         card.filePath,
@@ -2507,7 +2509,7 @@ function attachListeners(boardEl, config, app, refresh) {
         config,
         null,
         newCalc.digits,
-        newState
+        openOnDone ? "expanded" : newState
       );
       if (ok)
         requestAnimationFrame(() => setTimeout(refresh, 50));
