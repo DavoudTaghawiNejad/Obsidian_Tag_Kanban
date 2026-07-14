@@ -1315,7 +1315,7 @@ function dateInputStyle() {
   return "width:auto;max-width:160px;padding:8px;margin:0 auto 10px;display:block;border:1px solid var(--background-modifier-border);border-radius:4px;box-sizing:border-box;background:var(--background-secondary);color:var(--text-normal);";
 }
 function textareaStyle() {
-  return inputStyle() + "min-height:70px;resize:vertical;font-family:inherit;white-space:pre;";
+  return inputStyle() + "min-height:70px;resize:vertical;font-family:inherit;white-space:pre-wrap;overflow-wrap:break-word;";
 }
 var CHECKLIST_MARK = "\u2610";
 function formatNoteLines(cardIndent, notesText) {
@@ -1422,8 +1422,11 @@ function showInputDialog(title, defaultCreateDoc, onSubmit) {
   const chk = defaultCreateDoc ? "checked" : "";
   dialog.innerHTML = `<h3 style="margin:0 0 10px;font-size:1.1em;">${title}</h3>
     <input id="k-text" type="text" placeholder="Enter new item text..." style="${inputStyle()}" autofocus>
-    <textarea id="k-notes" placeholder="Additional notes (optional)..." style="${textareaStyle()}"></textarea>
-    <div style="text-align:left;">${checklistButtonHtml("k-notes-checklist", "Insert checklist item")}</div>
+    <details id="k-notes-details" style="text-align:left;margin-bottom:10px;">
+      <summary style="cursor:pointer;color:var(--text-muted);">Add subtasks</summary>
+      <textarea id="k-notes" placeholder="Subtasks..." style="${textareaStyle()}margin-top:10px;"></textarea>
+      <div style="text-align:left;">${checklistButtonHtml("k-notes-checklist", "Insert checklist item")}</div>
+    </details>
     <label style="display:flex;align-items:center;gap:8px;margin-bottom:12px;cursor:pointer;font-size:.9em;">
       <input id="k-doc" type="checkbox" ${chk}> Create new document
     </label>
@@ -1467,8 +1470,11 @@ function showDateDialog(title, defaultDate, onSubmit, opts = {}) {
   ).join("");
   dialog.innerHTML = `<h3 style="margin:0 0 10px;font-size:1.1em;">${title}</h3>
     ${withText ? `<input id="k-text" type="text" placeholder="Enter new item text..." style="${inputStyle()}" autofocus>` : ""}
-    ${withText ? `<textarea id="k-notes" placeholder="Additional notes (optional)..." style="${textareaStyle()}"></textarea>` : ""}
-    ${withText ? `<div style="text-align:left;">${checklistButtonHtml("k-notes-checklist", "Insert checklist item")}</div>` : ""}
+    ${withText ? `<details id="k-notes-details" style="text-align:left;margin-bottom:10px;">
+      <summary style="cursor:pointer;color:var(--text-muted);">Add subtasks</summary>
+      <textarea id="k-notes" placeholder="Subtasks..." style="${textareaStyle()}margin-top:10px;"></textarea>
+      <div style="text-align:left;">${checklistButtonHtml("k-notes-checklist", "Insert checklist item")}</div>
+    </details>` : ""}
     <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:center;margin-bottom:8px;">${presetBtnsHtml}</div>
     <input id="k-date" type="date" value="${defaultDate}" style="${dateInputStyle()}" ${withText ? "" : "autofocus"}>
     ${withText ? `<label style="display:flex;align-items:center;gap:8px;margin-bottom:12px;cursor:pointer;font-size:.9em;">
@@ -1762,27 +1768,43 @@ function showSubtaskDialog(onSubmit) {
   const { dialog, close } = makeOverlay("kanban-subtask-dialog");
   const prefill = CHECKLIST_MARK;
   dialog.innerHTML = `<h3 style="margin:0 0 10px;font-size:1.1em;">Add subtask</h3>
-    <textarea id="k-text" placeholder="Enter subtask text..." style="${textareaStyle()}">${prefill}</textarea>
-    <div style="text-align:left;">${checklistButtonHtml("k-text-checklist", "Insert checklist item")}</div>
+    <input id="k-task" type="text" placeholder="Enter subtask text..." style="${inputStyle()}" value="${prefill}">
+    <details id="k-subs-details" style="text-align:left;margin-bottom:10px;">
+      <summary style="cursor:pointer;color:var(--text-muted);">Add nested subtasks</summary>
+      <textarea id="k-subs" placeholder="Subtasks of this subtask..." style="${textareaStyle()}margin-top:10px;"></textarea>
+      <div style="text-align:left;">${checklistButtonHtml("k-subs-checklist", "Insert checklist item")}</div>
+    </details>
     <div id="k-actions" style="display:flex;gap:10px;justify-content:center;">${buttonHtml("Add", true)}${buttonHtml("Cancel", false)}</div>`;
   const [addBtn, cancelBtn] = dialog.querySelectorAll("#k-actions button");
-  const input = dialog.querySelector("#k-text");
-  const checklistBtn = dialog.querySelector("#k-text-checklist");
+  const taskInput = dialog.querySelector("#k-task");
+  const subsInput = dialog.querySelector("#k-subs");
+  const checklistBtn = dialog.querySelector("#k-subs-checklist");
   const submit = () => {
-    const v = input.value;
+    const taskLine = taskInput.value;
+    const subsText = subsInput.value;
     close();
-    if (v.trim())
-      onSubmit(v);
+    if (!taskLine.trim() && !subsText.trim())
+      return;
+    const indentedSubs = subsText.trim() ? "\n" + subsText.replace(/\r\n/g, "\n").split("\n").map((l) => l.trim() ? `	${l}` : l).join("\n") : "";
+    onSubmit(taskLine + indentedSubs);
   };
   addBtn.onclick = submit;
   cancelBtn.onclick = close;
-  checklistBtn.onclick = () => insertChecklistPrefix(input);
-  input.onkeydown = (e) => {
+  checklistBtn.onclick = () => insertChecklistPrefix(subsInput);
+  taskInput.onkeydown = (e) => {
+    if (e.key === "Escape")
+      close();
+    if (e.key === "Enter") {
+      e.preventDefault();
+      submit();
+    }
+  };
+  subsInput.onkeydown = (e) => {
     if (e.key === "Escape")
       close();
   };
-  input.focus();
-  input.setSelectionRange(input.value.length, input.value.length);
+  taskInput.focus();
+  taskInput.setSelectionRange(taskInput.value.length, taskInput.value.length);
 }
 async function addSubtaskToCard(app, filePath, afterLine, cardLine, text) {
   try {
@@ -1955,14 +1977,11 @@ function buildColorCSS(config) {
   const configuredDarkText = config.colorText && config.colorText.trim() ? config.colorText.trim() : "#1a1a1a";
   const overLimit = cv(config.colorColumnOverLimit, "#5c1a1a");
   const overText = textOnBg(overLimit, "#ffffff", configuredDarkText);
-  const perColOverLimitRules = Object.entries(config.columnColors).filter(([, c]) => c).map(([norm, color]) => {
+  const perColRules = Object.entries(config.columnColors).filter(([, c]) => c).map(([norm, color]) => {
     const text = textOnBg(color, "#ffffff", configuredDarkText);
     return `
-      #kanban-wrapper [data-col-container="${norm}"][data-col-overlimit="1"]{background:${color}!important;}
-      #kanban-wrapper [data-col-container="${norm}"][data-col-overlimit="1"] h4,
-      #kanban-wrapper [data-col-container="${norm}"][data-col-overlimit="1"] .kb-col-count,
-      #kanban-wrapper [data-col-container="${norm}"][data-col-overlimit="1"] .kb-col-add-btn{color:${text}!important;}
-      #kanban-wrapper [data-col-norm="${norm}"][data-col-overlimit="1"]{background:${color}!important;color:${text}!important;}
+      #kanban-wrapper [data-col-container="${norm}"]{background:${color};}
+      #kanban-wrapper [data-col-norm="${norm}"]{background:${color};color:${text};}
     `;
   }).join("");
   return `
@@ -1988,12 +2007,12 @@ function buildColorCSS(config) {
     #kanban-wrapper [data-col-norm]{background:var(--kb-col-bg);color:var(--kb-text);}
     #kanban-wrapper [data-col-norm][data-col-active="1"]{background:var(--kb-accent);color:var(--text-on-accent);font-weight:600;}
     #kanban-wrapper .kanban-card,.card-title{color:var(--kb-text);}
+    ${perColRules}
     #kanban-wrapper [data-col-container][data-col-overlimit="1"]{background:${overLimit}!important;}
     #kanban-wrapper [data-col-container][data-col-overlimit="1"] h4,
     #kanban-wrapper [data-col-container][data-col-overlimit="1"] .kb-col-count,
     #kanban-wrapper [data-col-container][data-col-overlimit="1"] .kb-col-add-btn{color:${overText}!important;}
-    #kanban-wrapper [data-col-norm][data-col-overlimit="1"]{background:${overLimit}!important;color:${overText}!important;}
-    ${perColOverLimitRules}`;
+    #kanban-wrapper [data-col-norm][data-col-overlimit="1"]{background:${overLimit}!important;color:${overText}!important;}`;
 }
 async function tagUntaggedRecurrentCards(app, paths, config) {
   const annotationRe = new RegExp(`@${config.normRecurrent}\\b`, "i");
