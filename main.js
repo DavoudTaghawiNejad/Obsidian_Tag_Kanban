@@ -37,12 +37,14 @@ function buildConfig(settings) {
     parentPages: settings.parentPages,
     allVaultNotes: settings.allVaultNotes,
     doneColumn: settings.doneColumn,
-    todayColumn: settings.todayColumn,
+    startColumn: settings.startColumn,
+    dueColumn: settings.dueColumn,
     laterColumn: settings.laterColumn,
     newTaskInsert: settings.newTaskInsert,
     normKanban,
     normDone: normalizeTag(settings.doneColumn),
-    normToday: normalizeTag(settings.todayColumn),
+    normStart: normalizeTag(settings.startColumn),
+    normDue: normalizeTag(settings.dueColumn),
     normLater: normalizeTag(settings.laterColumn),
     recurrentColumn: settings.recurrentColumn || "#recurrent",
     normRecurrent: normalizeTag(settings.recurrentColumn || "#recurrent"),
@@ -76,18 +78,21 @@ function buildConfig(settings) {
 function validateConfig(settings) {
   const normKanban = settings.kanban.map(normalizeTag);
   const normDone = normalizeTag(settings.doneColumn);
-  const normToday = normalizeTag(settings.todayColumn);
+  const normStart = normalizeTag(settings.startColumn);
+  const normDue = normalizeTag(settings.dueColumn);
   const normLater = normalizeTag(settings.laterColumn);
   if (!settings.kanban.length)
     return "Missing/empty 'Kanban columns' setting.";
   if (!settings.doneColumn || !normKanban.includes(normDone))
     return "'Done column' must match one of the Kanban columns.";
-  if (!settings.todayColumn || !normKanban.includes(normToday))
-    return "'Today column' must match one of the Kanban columns.";
+  if (!settings.startColumn || !normKanban.includes(normStart))
+    return "'Start column in single row view' must match one of the Kanban columns.";
+  if (!settings.dueColumn || !normKanban.includes(normDue))
+    return "'Target column for due later and recurrent tasks' must match one of the Kanban columns.";
   if (!settings.laterColumn || !normKanban.includes(normLater))
     return "'Later column' must match one of the Kanban columns.";
-  if (normToday === normLater)
-    return "'Today column' and 'Later column' must be different.";
+  if (normDue === normLater)
+    return "'Target column for due later and recurrent tasks' and 'Later column' must be different.";
   if (!settings.allVaultNotes && !settings.parentPages.length)
     return "Add at least one 'Parent page', or enable 'Scan all vault notes'.";
   if (!settings.newTaskInsert)
@@ -407,7 +412,7 @@ async function triggerDatedLaterSubs(app, subs, filePath, config, today) {
     if (!sub.tags.some((t) => config.normKanban.includes(normalizeTag(t)))) {
       const d = parseCardDate(sub.text);
       if (d && d <= today) {
-        await addTagAndClearDate(app, filePath, sub.line, config.todayColumn);
+        await addTagAndClearDate(app, filePath, sub.line, config.dueColumn);
         changed = true;
       }
     }
@@ -427,7 +432,7 @@ async function triggerRecurrentSubs(app, subs, filePath, config, today, todayStr
       const repeatDate = parseCardDate(sub.text);
       const fires = repeatDate ? repeatDate <= today : matchesTriggerAnnotations(extractTriggerAnnotations(sub.text, config.normRecurrent), today);
       if (hasRecurrentAnnotation(sub.text, config.normRecurrent) && fires && extractSkipDate(sub.text) !== todayStr) {
-        await addTagAndSkipDate(app, filePath, sub.line, config.todayColumn, todayStr);
+        await addTagAndSkipDate(app, filePath, sub.line, config.dueColumn, todayStr);
         changed = true;
       }
     }
@@ -929,6 +934,12 @@ async function addNewItem(app, rawInsertTarget, columnTag, userText, dateStr, co
     new import_obsidian.Notice(`Failed to add item: ${e.message}`);
     return false;
   }
+}
+async function addDueColumnExplanationCard(app, config) {
+  if (!config.dueColumn)
+    return false;
+  const text = "This column only shows up while it has cards in it \u2014 it disappears automatically when it's empty, and reappears once the board moves a due-later or recurrent card into it.";
+  return addNewItem(app, config.newTaskInsert, config.dueColumn, text, null, config, false, "");
 }
 async function moveCardToNewDoc(app, filePath, lineNum, plainTitle, targetTag, config) {
   const safeTitle = plainTitle.replace(/[\\/:*?"<>|#\[\]]/g, " ").replace(/\s+/g, " ").trim();
@@ -2113,7 +2124,7 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
   });
   if (laterToMove.length) {
     for (const item of laterToMove)
-      await moveToColumn(app, item.filePath, item.item.line, item.item.tags, config.todayColumn, false, config, null, null, null, null, true);
+      await moveToColumn(app, item.filePath, item.item.line, item.item.tags, config.dueColumn, false, config, null, null, null, null, true);
     items = await collectItems(app, paths, config);
   }
   {
@@ -2147,7 +2158,7 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
     });
     if (recurrentToMove.length) {
       for (const item of recurrentToMove)
-        await moveToColumn(app, item.filePath, item.item.line, item.item.tags, config.todayColumn, false, config, null, null, null, null, true);
+        await moveToColumn(app, item.filePath, item.item.line, item.item.tags, config.dueColumn, false, config, null, null, null, null, true);
       items = await collectItems(app, paths, config);
     }
     let anySubTriggered = false;
@@ -2215,8 +2226,12 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
     wrapper.clientWidth > 0 ? wrapper.clientWidth : window.innerWidth
   );
   wrapper.dataset.narrow = isNarrow ? "1" : "0";
-  const allNorms = Object.keys(columns);
-  let activeNorm = savedActiveCol && allNorms.includes(savedActiveCol) ? savedActiveCol : config.normToday;
+  const allNorms = Object.keys(columns).filter(
+    (norm) => norm !== config.normDue || columns[norm].cards.length > 0
+  );
+  let activeNorm = savedActiveCol && allNorms.includes(savedActiveCol) ? savedActiveCol : config.normStart;
+  if (!allNorms.includes(activeNorm))
+    activeNorm = allNorms[0];
   if (isNarrow) {
     const tabBar = scroll.createEl("div", {
       attr: {
@@ -3563,9 +3578,10 @@ var KanbanView = class extends import_obsidian2.ItemView {
 
 // src/main.ts
 var DEFAULT_SETTINGS = {
-  kanban: ["#todo", "#inprogress", "#later", "#done", "#recurrent"],
+  kanban: ["#todo", "#inprogress", "#today", "#later", "#due", "#done", "#recurrent"],
   doneColumn: "#done",
-  todayColumn: "#today",
+  startColumn: "#today",
+  dueColumn: "#due",
   laterColumn: "#later",
   recurrentColumn: "#recurrent",
   newTaskInsert: "Tasks",
@@ -3686,6 +3702,9 @@ var KanbanPlugin = class extends import_obsidian3.Plugin {
   }
   async saveSettings() {
     await this.saveData(this.settings);
+    this.refreshOpenBoards();
+  }
+  refreshOpenBoards() {
     this.app.workspace.getLeavesOfType(VIEW_TYPE_KANBAN).forEach((leaf) => {
       leaf.view.refresh();
     });
@@ -3696,6 +3715,13 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
     super(app, plugin);
     this.ignoreWarning = false;
     this.plugin = plugin;
+  }
+  // The due column is hidden while empty, so a settings change touching it would
+  // otherwise leave it invisible. Drop an explanatory card in it and refresh so the
+  // user can immediately see the column (and the note) reflecting the change.
+  async touchDueColumn() {
+    await addDueColumnExplanationCard(this.app, buildConfig(this.plugin.settings));
+    this.plugin.refreshOpenBoards();
   }
   async display() {
     const { containerEl } = this;
@@ -3748,10 +3774,19 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Today column").setDesc("Tag for the column where past-due and undated #later tasks are moved to (e.g. #today)").addText(
-      (text) => text.setPlaceholder("#today").setValue(this.plugin.settings.todayColumn).onChange(async (value) => {
-        this.plugin.settings.todayColumn = value.trim();
+    new import_obsidian3.Setting(containerEl).setName("Start column in single row view").setDesc("Tag for the column shown by default when the board is displayed as a single column (narrow/mobile view)").addText(
+      (text) => text.setPlaceholder("#today").setValue(this.plugin.settings.startColumn).onChange(async (value) => {
+        this.plugin.settings.startColumn = value.trim();
         await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian3.Setting(containerEl).setName("Target column for due later and recurrent tasks").setDesc(
+      "Tag for the column where past-due/undated #later tasks and triggered #recurrent tasks are moved to (e.g. #due). This column is hidden whenever it has no cards, and reappears automatically once the board moves a card into it."
+    ).addText(
+      (text) => text.setPlaceholder("#due").setValue(this.plugin.settings.dueColumn).onChange(async (value) => {
+        this.plugin.settings.dueColumn = value.trim();
+        await this.plugin.saveSettings();
+        await this.touchDueColumn();
       })
     );
     new import_obsidian3.Setting(containerEl).setName("Later column").setDesc("Tag for the scheduled / later column \u2014 shows a date picker on drop").addText(
@@ -3987,6 +4022,7 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
     this.plugin.settings.kanban.forEach((tag, i) => {
       const currentColor = (this.plugin.settings.columnColors || [])[i] || "";
       const currentMax = (this.plugin.settings.columnMaxCards || [])[i] || 0;
+      const isDueColumn = normalizeTag(tag) === normalizeTag(this.plugin.settings.dueColumn);
       let numberInputEl;
       const settingGroup = containerEl.createDiv({ cls: "setting-group" });
       const settingItems = settingGroup.createDiv({ cls: "setting-items" });
@@ -3996,6 +4032,8 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
             this.plugin.settings.columnColors = [];
           this.plugin.settings.columnColors[i] = value;
           await this.plugin.saveSettings();
+          if (isDueColumn)
+            await this.touchDueColumn();
         })
       ).addExtraButton(
         (btn) => btn.setIcon("rotate-ccw").setTooltip("Remove custom color").onClick(async () => {
@@ -4003,6 +4041,8 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
             this.plugin.settings.columnColors = [];
           this.plugin.settings.columnColors[i] = "";
           await this.plugin.saveSettings();
+          if (isDueColumn)
+            await this.touchDueColumn();
           this.display();
         })
       );
@@ -4020,6 +4060,8 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
             numberInputEl.value = String(this.plugin.settings.columnMaxCards[i]);
           }
           await this.plugin.saveSettings();
+          if (isDueColumn)
+            await this.touchDueColumn();
         })
       ).addText((text) => {
         numberInputEl = text.inputEl;
@@ -4035,6 +4077,8 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
           const n = parseInt(value.trim(), 10);
           this.plugin.settings.columnMaxCards[i] = Number.isFinite(n) && n > 0 ? n : 1;
           await this.plugin.saveSettings();
+          if (isDueColumn)
+            await this.touchDueColumn();
         });
       });
     });

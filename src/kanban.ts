@@ -20,13 +20,15 @@ export interface KanbanConfig {
   parentPages: string[];
   allVaultNotes: boolean;
   doneColumn: string;
-  todayColumn: string;
+  startColumn: string;
+  dueColumn: string;
   laterColumn: string;
   recurrentColumn: string;
   newTaskInsert: string;
   normKanban: string[];
   normDone: string;
-  normToday: string;
+  normStart: string;
+  normDue: string;
   normLater: string;
   normRecurrent: string;
   normProject: string[];
@@ -62,12 +64,14 @@ export function buildConfig(settings: KanbanSettings): KanbanConfig {
     parentPages: settings.parentPages,
     allVaultNotes: settings.allVaultNotes,
     doneColumn: settings.doneColumn,
-    todayColumn: settings.todayColumn,
+    startColumn: settings.startColumn,
+    dueColumn: settings.dueColumn,
     laterColumn: settings.laterColumn,
     newTaskInsert: settings.newTaskInsert,
     normKanban,
     normDone: normalizeTag(settings.doneColumn),
-    normToday: normalizeTag(settings.todayColumn),
+    normStart: normalizeTag(settings.startColumn),
+    normDue: normalizeTag(settings.dueColumn),
     normLater: normalizeTag(settings.laterColumn),
     recurrentColumn: settings.recurrentColumn || "#recurrent",
     normRecurrent: normalizeTag(settings.recurrentColumn || "#recurrent"),
@@ -105,18 +109,21 @@ export function buildConfig(settings: KanbanSettings): KanbanConfig {
 export function validateConfig(settings: KanbanSettings): string | null {
   const normKanban = settings.kanban.map(normalizeTag);
   const normDone = normalizeTag(settings.doneColumn);
-  const normToday = normalizeTag(settings.todayColumn);
+  const normStart = normalizeTag(settings.startColumn);
+  const normDue = normalizeTag(settings.dueColumn);
   const normLater = normalizeTag(settings.laterColumn);
 
   if (!settings.kanban.length) return "Missing/empty 'Kanban columns' setting.";
   if (!settings.doneColumn || !normKanban.includes(normDone))
     return "'Done column' must match one of the Kanban columns.";
-  if (!settings.todayColumn || !normKanban.includes(normToday))
-    return "'Today column' must match one of the Kanban columns.";
+  if (!settings.startColumn || !normKanban.includes(normStart))
+    return "'Start column in single row view' must match one of the Kanban columns.";
+  if (!settings.dueColumn || !normKanban.includes(normDue))
+    return "'Target column for due later and recurrent tasks' must match one of the Kanban columns.";
   if (!settings.laterColumn || !normKanban.includes(normLater))
     return "'Later column' must match one of the Kanban columns.";
-  if (normToday === normLater)
-    return "'Today column' and 'Later column' must be different.";
+  if (normDue === normLater)
+    return "'Target column for due later and recurrent tasks' and 'Later column' must be different.";
   if (!settings.allVaultNotes && !settings.parentPages.length)
     return "Add at least one 'Parent page', or enable 'Scan all vault notes'.";
   if (!settings.newTaskInsert)
@@ -126,7 +133,7 @@ export function validateConfig(settings: KanbanSettings): string | null {
 
 // ─── TAG UTILITIES ────────────────────────────────────────────────────────────
 
-const normalizeTag = (tag: string): string =>
+export const normalizeTag = (tag: string): string =>
   (tag || "").trim().replace(/^#/, "").replace(/_$/, "").toLowerCase();
 
 const matchesKanbanTag = (raw: string, normList: string[]): boolean =>
@@ -498,7 +505,7 @@ async function addTagAndClearDate(app: App, filePath: string, lineNum: number, t
   } catch { /* ignore */ }
 }
 
-// Adds #today and removes the date from every subtask of a #later card whose @YYYY-MM-DD has arrived.
+// Adds the due tag and removes the date from every subtask of a #later card whose @YYYY-MM-DD has arrived.
 async function triggerDatedLaterSubs(
   app: App, subs: any[], filePath: string, config: KanbanConfig, today: Date
 ): Promise<boolean> {
@@ -508,7 +515,7 @@ async function triggerDatedLaterSubs(
     if (!sub.tags.some((t: string) => config.normKanban.includes(normalizeTag(t)))) {
       const d = parseCardDate(sub.text);
       if (d && d <= today) {
-        await addTagAndClearDate(app, filePath, sub.line, config.todayColumn);
+        await addTagAndClearDate(app, filePath, sub.line, config.dueColumn);
         changed = true;
       }
     }
@@ -518,7 +525,7 @@ async function triggerDatedLaterSubs(
   return changed;
 }
 
-// Adds #today + skip date to every untriggered subtask whose @recurrent trigger fires today.
+// Adds the due tag + skip date to every untriggered subtask whose @recurrent trigger fires today.
 async function triggerRecurrentSubs(
   app: App, subs: any[], filePath: string, config: KanbanConfig, today: Date, todayStr: string
 ): Promise<boolean> {
@@ -535,7 +542,7 @@ async function triggerRecurrentSubs(
         fires &&
         extractSkipDate(sub.text) !== todayStr
       ) {
-        await addTagAndSkipDate(app, filePath, sub.line, config.todayColumn, todayStr);
+        await addTagAndSkipDate(app, filePath, sub.line, config.dueColumn, todayStr);
         changed = true;
       }
     }
@@ -1173,6 +1180,17 @@ async function addNewItem(
     new Notice(`Failed to add item: ${e.message}`);
     return false;
   }
+}
+
+// The due column is hidden while empty (see buildBoard), so a settings change that
+// touches it would otherwise leave it invisible with no way to confirm it worked.
+// Drop an explanatory card in it, which also makes it reappear immediately.
+export async function addDueColumnExplanationCard(app: App, config: KanbanConfig): Promise<boolean> {
+  if (!config.dueColumn) return false;
+  const text =
+    "This column only shows up while it has cards in it — it disappears automatically when it's empty, " +
+    "and reappears once the board moves a due-later or recurrent card into it.";
+  return addNewItem(app, config.newTaskInsert, config.dueColumn, text, null, config, false, "");
 }
 
 async function moveCardToNewDoc(
@@ -2586,7 +2604,7 @@ export async function buildBoard(
 
   let items = await collectItems(app, paths, config);
 
-  // Auto-move past/undated #later items and triggered #later items → today column
+  // Auto-move past/undated #later items and triggered #later items → due column
   const todayStrLater = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}`;
   const laterToMove = items.filter((i) => {
     if (!i.item.tags.some((t: string) => normalizeTag(t) === config.normLater)) return false;
@@ -2600,11 +2618,11 @@ export async function buildBoard(
   });
   if (laterToMove.length) {
     for (const item of laterToMove)
-      await moveToColumn(app, item.filePath, item.item.line, item.item.tags, config.todayColumn, false, config, null, null, null, null, true);
+      await moveToColumn(app, item.filePath, item.item.line, item.item.tags, config.dueColumn, false, config, null, null, null, null, true);
     items = await collectItems(app, paths, config);
   }
 
-  // Step A2: add #today and remove date from dated subtasks of remaining #later cards
+  // Step A2: add the due tag and remove date from dated subtasks of remaining #later cards
   {
     const remainingLater = items.filter(
       (i) => i.item.tags.some((t: string) => normalizeTag(t) === config.normLater)
@@ -2617,7 +2635,7 @@ export async function buildBoard(
     if (anyLaterSubTriggered) items = await collectItems(app, paths, config);
   }
 
-  // Step B: move triggered #recurrent cards → today column
+  // Step B: move triggered #recurrent cards → due column
   if (config.normRecurrent) {
     const todayStr = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}`;
     // A card with a literal @date (interval-based recurrence) fires once that date
@@ -2635,10 +2653,10 @@ export async function buildBoard(
     });
     if (recurrentToMove.length) {
       for (const item of recurrentToMove)
-        await moveToColumn(app, item.filePath, item.item.line, item.item.tags, config.todayColumn, false, config, null, null, null, null, true);
+        await moveToColumn(app, item.filePath, item.item.line, item.item.tags, config.dueColumn, false, config, null, null, null, null, true);
       items = await collectItems(app, paths, config);
     }
-    // Step C: add #today to subtasks of #recurrent cards whose trigger fires today
+    // Step C: add the due tag to subtasks of #recurrent cards whose trigger fires today
     let anySubTriggered = false;
     for (const i of items) {
       if (!i.item.tags.some((t: string) => normalizeTag(t) === config.normRecurrent)) continue;
@@ -2702,8 +2720,13 @@ export async function buildBoard(
   );
   wrapper.dataset.narrow = isNarrow ? "1" : "0";
 
-  const allNorms = Object.keys(columns);
-  let activeNorm = (savedActiveCol && allNorms.includes(savedActiveCol)) ? savedActiveCol : config.normToday;
+  // The due column (target for auto-moved due-later/recurrent tasks) is hidden while
+  // empty and reappears on its own once the board moves a card into it.
+  const allNorms = Object.keys(columns).filter(
+    (norm) => norm !== config.normDue || columns[norm].cards.length > 0
+  );
+  let activeNorm = (savedActiveCol && allNorms.includes(savedActiveCol)) ? savedActiveCol : config.normStart;
+  if (!allNorms.includes(activeNorm)) activeNorm = allNorms[0];
 
   if (isNarrow) {
     const tabBar = scroll.createEl("div", {

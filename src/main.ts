@@ -1,10 +1,12 @@
 import { App, Platform, Plugin, PluginSettingTab, Setting, WorkspaceLeaf } from "obsidian";
 import { KanbanView, VIEW_TYPE_KANBAN } from "./KanbanView";
+import { buildConfig, addDueColumnExplanationCard, normalizeTag } from "./kanban";
 
 export interface KanbanSettings {
   kanban: string[];
   doneColumn: string;
-  todayColumn: string;
+  startColumn: string;
+  dueColumn: string;
   laterColumn: string;
   recurrentColumn: string;
   newTaskInsert: string;
@@ -37,9 +39,10 @@ export interface KanbanSettings {
 }
 
 export const DEFAULT_SETTINGS: KanbanSettings = {
-  kanban: ["#todo", "#inprogress", "#later", "#done", "#recurrent"],
+  kanban: ["#todo", "#inprogress", "#today", "#later", "#due", "#done", "#recurrent"],
   doneColumn: "#done",
-  todayColumn: "#today",
+  startColumn: "#today",
+  dueColumn: "#due",
   laterColumn: "#later",
   recurrentColumn: "#recurrent",
   newTaskInsert: "Tasks",
@@ -177,6 +180,10 @@ export default class KanbanPlugin extends Plugin {
 
   async saveSettings() {
     await this.saveData(this.settings);
+    this.refreshOpenBoards();
+  }
+
+  refreshOpenBoards() {
     this.app.workspace.getLeavesOfType(VIEW_TYPE_KANBAN).forEach((leaf) => {
       (leaf.view as KanbanView).refresh();
     });
@@ -190,6 +197,14 @@ class KanbanSettingTab extends PluginSettingTab {
   constructor(app: App, plugin: KanbanPlugin) {
     super(app, plugin);
     this.plugin = plugin;
+  }
+
+  // The due column is hidden while empty, so a settings change touching it would
+  // otherwise leave it invisible. Drop an explanatory card in it and refresh so the
+  // user can immediately see the column (and the note) reflecting the change.
+  private async touchDueColumn() {
+    await addDueColumnExplanationCard(this.app, buildConfig(this.plugin.settings));
+    this.plugin.refreshOpenBoards();
   }
 
   async display(): Promise<void> {
@@ -273,15 +288,32 @@ class KanbanSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Today column")
-      .setDesc("Tag for the column where past-due and undated #later tasks are moved to (e.g. #today)")
+      .setName("Start column in single row view")
+      .setDesc("Tag for the column shown by default when the board is displayed as a single column (narrow/mobile view)")
       .addText((text) =>
         text
           .setPlaceholder("#today")
-          .setValue(this.plugin.settings.todayColumn)
+          .setValue(this.plugin.settings.startColumn)
           .onChange(async (value) => {
-            this.plugin.settings.todayColumn = value.trim();
+            this.plugin.settings.startColumn = value.trim();
             await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Target column for due later and recurrent tasks")
+      .setDesc(
+        "Tag for the column where past-due/undated #later tasks and triggered #recurrent tasks are moved to (e.g. #due). " +
+        "This column is hidden whenever it has no cards, and reappears automatically once the board moves a card into it."
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("#due")
+          .setValue(this.plugin.settings.dueColumn)
+          .onChange(async (value) => {
+            this.plugin.settings.dueColumn = value.trim();
+            await this.plugin.saveSettings();
+            await this.touchDueColumn();
           })
       );
 
@@ -609,6 +641,7 @@ class KanbanSettingTab extends PluginSettingTab {
     this.plugin.settings.kanban.forEach((tag, i) => {
       const currentColor = (this.plugin.settings.columnColors || [])[i] || "";
       const currentMax = (this.plugin.settings.columnMaxCards || [])[i] || 0;
+      const isDueColumn = normalizeTag(tag) === normalizeTag(this.plugin.settings.dueColumn);
       let numberInputEl: HTMLInputElement;
 
       // Obsidian's own grouped-card look: a .setting-group > .setting-items wrapper
@@ -625,6 +658,7 @@ class KanbanSettingTab extends PluginSettingTab {
               if (!this.plugin.settings.columnColors) this.plugin.settings.columnColors = [];
               this.plugin.settings.columnColors[i] = value;
               await this.plugin.saveSettings();
+              if (isDueColumn) await this.touchDueColumn();
             })
         )
         .addExtraButton((btn) =>
@@ -635,6 +669,7 @@ class KanbanSettingTab extends PluginSettingTab {
               if (!this.plugin.settings.columnColors) this.plugin.settings.columnColors = [];
               this.plugin.settings.columnColors[i] = "";
               await this.plugin.saveSettings();
+              if (isDueColumn) await this.touchDueColumn();
               this.display();
             })
         );
@@ -657,6 +692,7 @@ class KanbanSettingTab extends PluginSettingTab {
                 numberInputEl.value = String(this.plugin.settings.columnMaxCards[i]);
               }
               await this.plugin.saveSettings();
+              if (isDueColumn) await this.touchDueColumn();
             })
         )
         .addText((text) => {
@@ -674,6 +710,7 @@ class KanbanSettingTab extends PluginSettingTab {
               const n = parseInt(value.trim(), 10);
               this.plugin.settings.columnMaxCards[i] = Number.isFinite(n) && n > 0 ? n : 1;
               await this.plugin.saveSettings();
+              if (isDueColumn) await this.touchDueColumn();
             });
         });
     });
