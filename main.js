@@ -131,6 +131,10 @@ function parseTaskLine(raw) {
   const sm = rest.match(/%% @skip:(\d{4}-\d{2}-\d{2}) %%/);
   if (sm)
     skipDate = sm[1];
+  let color = null;
+  const clm = rest.match(/%% @color:(#[0-9a-fA-F]{6}) %%/);
+  if (clm)
+    color = clm[1];
   rest = rest.replace(/\s*%%[\s\S]*?%%\s*/g, " ").trim();
   let date = null;
   const dm = rest.match(/(^|\s)(@\d{4}-\d{2}-\d{2})\b/);
@@ -158,7 +162,7 @@ function parseTaskLine(raw) {
   }
   const tags = rest.match(/(?<!\w)#\w+/g) || [];
   const text = rest.replace(/\s*(?<!\w)#\w+/g, "").trim();
-  return { indent, bullet, checked, text, tags, date, doneDate, orderDigits, orderState, skipDate };
+  return { indent, bullet, checked, text, tags, date, doneDate, orderDigits, orderState, skipDate, color };
 }
 function serializeTaskLine(t) {
   const parts = [];
@@ -177,6 +181,9 @@ function serializeTaskLine(t) {
   }
   if (t.skipDate) {
     parts.push(`%% @skip:${t.skipDate} %%`);
+  }
+  if (t.color) {
+    parts.push(`%% @color:${t.color} %%`);
   }
   return t.indent + parts.join(" ");
 }
@@ -353,6 +360,10 @@ function hasValidTriggers(text, normRecurrent) {
 }
 function extractSkipDate(rawLine) {
   const m = rawLine.match(/%% @skip:(\d{4}-\d{2}-\d{2}) %%/);
+  return m ? m[1] : null;
+}
+function extractCardColor(rawLine) {
+  const m = rawLine.match(/%% @color:(#[0-9a-fA-F]{6}) %%/);
   return m ? m[1] : null;
 }
 function setSkipDate(line, dateStr) {
@@ -680,6 +691,15 @@ async function updateCardDate(app, filePath, lineNum, newDateStr) {
   lines[lineNum - 1] = serializeTaskLine(parsed);
   await writeFileLines(app, tFile, lines);
 }
+async function updateCardColor(app, filePath, lineNum, color) {
+  const { tFile, lines } = await readFileLines(app, filePath);
+  if (lineNum < 1 || lineNum > lines.length)
+    return;
+  const parsed = parseTaskLine(lines[lineNum - 1]);
+  parsed.color = color;
+  lines[lineNum - 1] = serializeTaskLine(parsed);
+  await writeFileLines(app, tFile, lines);
+}
 async function updateCardTriggers(app, filePath, lineNum, normRecurrent, newTriggerStr) {
   const { tFile, lines } = await readFileLines(app, filePath);
   if (lineNum < 1 || lineNum > lines.length)
@@ -723,11 +743,15 @@ async function editCardText(app, filePath, lineNum, newText) {
     const tags = extractTags(original).join(" ");
     const orderMatch = original.match(/%% @\d+\w %%/);
     const orderComment = orderMatch ? orderMatch[0] : "";
+    const colorMatch = original.match(/%% @color:#[0-9a-fA-F]{6} %%/);
+    const colorComment = colorMatch ? colorMatch[0] : "";
     const parts = [indent + marker + newText.trim()];
     if (tags)
       parts.push(tags);
     if (orderComment)
       parts.push(orderComment);
+    if (colorComment)
+      parts.push(colorComment);
     lines[lineNum - 1] = parts.join(" ");
     await writeFileLines(app, tFile, lines);
     return true;
@@ -1740,6 +1764,67 @@ function showSubtaskDialog(onSubmit) {
   taskInput.focus();
   taskInput.setSelectionRange(taskInput.value.length, taskInput.value.length);
 }
+var CARD_COLOR_HUES = [
+  ["Red", 0],
+  ["Orange", 28],
+  ["Yellow", 48],
+  ["Green", 130],
+  ["Teal", 175],
+  ["Blue", 212],
+  ["Purple", 265],
+  ["Pink", 325]
+];
+var CARD_COLOR_GRAY = "#888888";
+var CARD_COLOR_WHITE = "#ffffff";
+var CARD_COLOR_LIGHTNESS = 55;
+function showCardColorDialog(existingColor, onApply) {
+  const { dialog, close } = makeOverlay("kanban-card-color-dialog");
+  const validExisting = existingColor && /^#[0-9a-fA-F]{6}$/.test(existingColor) ? existingColor : null;
+  const existingHsl = validExisting ? hexToHsl(validExisting) : null;
+  let selectedHue = existingHsl ? existingHsl.l > 90 ? -2 : existingHsl.s < 10 ? -1 : CARD_COLOR_HUES.reduce((best, [, h]) => Math.abs(h - existingHsl.h) < Math.abs(best - existingHsl.h) ? h : best, CARD_COLOR_HUES[0][1]) : CARD_COLOR_HUES[5][1];
+  let initialSat = Math.round(existingHsl ? existingHsl.s : 60);
+  const swatchBtnStyle = (h, active) => `width:32px;height:32px;border-radius:50%;cursor:pointer;border:2px solid ${active ? "var(--kb-accent)" : h === -2 ? "var(--background-modifier-border)" : "transparent"};background:${h === -2 ? CARD_COLOR_WHITE : h === -1 ? CARD_COLOR_GRAY : hslToHex(h, 65, 55)};`;
+  const swatchesHtml = CARD_COLOR_HUES.map(([name, h]) => `<button type="button" class="kb-color-swatch" data-hue="${h}" title="${name}" style="${swatchBtnStyle(h, h === selectedHue)}"></button>`).join("") + `<button type="button" class="kb-color-swatch" data-hue="-1" title="Gray" style="${swatchBtnStyle(-1, selectedHue === -1)}"></button><button type="button" class="kb-color-swatch" data-hue="-2" title="White" style="${swatchBtnStyle(-2, selectedHue === -2)}"></button>`;
+  dialog.innerHTML = `
+    <h3 style="margin:0 0 12px;font-size:1.1em;">Highlight card</h3>
+    <div id="k-color-preview" style="width:100%;height:44px;border-radius:8px;margin-bottom:14px;border:1px solid var(--background-modifier-border);"></div>
+    <div id="k-color-swatches" style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-bottom:14px;">${swatchesHtml}</div>
+    <div style="margin-bottom:16px;text-align:left;">
+      <span style="font-size:.8em;opacity:.75;display:block;margin-bottom:4px;">Saturation</span>
+      <input id="k-saturation" type="range" min="0" max="100" value="${initialSat}" style="width:100%;" ${selectedHue < 0 ? "disabled" : ""}>
+    </div>
+    <div id="k-color-actions" style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">${buttonHtml("Apply", true)}${buttonHtml("Cancel", false)}</div>`;
+  const preview = dialog.querySelector("#k-color-preview");
+  const satInput = dialog.querySelector("#k-saturation");
+  const swatchWrap = dialog.querySelector("#k-color-swatches");
+  const [applyBtn, cancelBtn] = dialog.querySelectorAll("#k-color-actions button");
+  const currentHex = () => selectedHue === -2 ? CARD_COLOR_WHITE : selectedHue === -1 ? CARD_COLOR_GRAY : hslToHex(selectedHue, parseInt(satInput.value, 10), CARD_COLOR_LIGHTNESS);
+  const updatePreview = () => {
+    preview.style.background = currentHex();
+  };
+  updatePreview();
+  swatchWrap.addEventListener("click", (e) => {
+    const btn = e.target.closest(".kb-color-swatch");
+    if (!btn)
+      return;
+    selectedHue = parseInt(btn.dataset.hue, 10);
+    swatchWrap.querySelectorAll(".kb-color-swatch").forEach((b) => {
+      b.style.cssText = swatchBtnStyle(parseInt(b.dataset.hue, 10), parseInt(b.dataset.hue, 10) === selectedHue);
+    });
+    satInput.disabled = selectedHue < 0;
+    updatePreview();
+  });
+  satInput.addEventListener("input", updatePreview);
+  applyBtn.onclick = () => {
+    close();
+    onApply(currentHex());
+  };
+  cancelBtn.onclick = close;
+  dialog.addEventListener("keydown", (e) => {
+    if (e.key === "Escape")
+      close();
+  });
+}
 async function addSubtaskToCard(app, filePath, afterLine, cardLine, text) {
   try {
     const { tFile, lines } = await readFileLines(app, filePath);
@@ -1870,6 +1955,8 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
          <button class="kb-add-sub" style="${addSubBtnStyle}position:absolute;top:4px;right:0;">+</button>
        </div>`;
   const border = isMulti ? "background:var(--background-modifier-error-hover);border:1px solid var(--background-modifier-error);" : hasUnmanagedWork ? `border:2px solid var(--kb-children-done);background:color-mix(in srgb,var(--kb-children-done) 20%,var(--kb-card-bg));` : "border:1px solid var(--background-modifier-border);";
+  const cardColor = extractCardColor(item.item.text);
+  const colorStyle = cardColor ? `background:${cardColor}!important;color:${textOnBg(cardColor, "#ffffff", config.colorText && config.colorText.trim() ? config.colorText.trim() : "#1a1a1a")}!important;` : "";
   const src = item.source.path.split("/").pop().replace(/\.md$/, "");
   const href = `obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(item.filePath)}`;
   const badge = `<div style="margin-top:8px;font-size:.8em;color:var(--kb-text);">
@@ -1885,8 +1972,9 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
     data-tags='${JSON.stringify(item.item.tags).replace(/'/g, "&#39;")}'
     data-subs='${JSON.stringify(item.item.subs.map((s) => ({ line: s.line, text: s.text, subs: s.subs || [] }))).replace(/'/g, "&#39;")}'
     data-is-promoted="${item.isPromoted || false}"
+    data-color="${cardColor || ""}"
     style="padding:10px 14px;margin:8px 0;border-radius:10px;background:var(--kb-card-bg);color:var(--kb-text);
-           box-shadow:0 2px 8px rgba(0,0,0,.12);${border};cursor:move;position:relative;text-align:left;">
+           box-shadow:0 2px 8px rgba(0,0,0,.12);${border};${colorStyle}cursor:move;position:relative;text-align:left;">
     ${item.indent > 0 ? '<span class="demote-btn" style="position:absolute;top:4px;left:6px;font-size:0.75em;color:var(--kb-accent);line-height:1;cursor:pointer;">&#x25B6;</span>' : ""}
     ${bodyHTML}
     ${badge}
@@ -1905,6 +1993,40 @@ function hexLuminance(hex) {
 }
 function textOnBg(bgHex, lightText, darkText) {
   return hexLuminance(bgHex) > 0.179 ? darkText : lightText;
+}
+function hslToHex(h, s, l) {
+  const sN = s / 100, lN = l / 100;
+  const k = (n) => (n + h / 30) % 12;
+  const a = sN * Math.min(lN, 1 - lN);
+  const f = (n) => lN - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
+  const toHex = (x) => Math.round(255 * x).toString(16).padStart(2, "0");
+  return `#${toHex(f(0))}${toHex(f(8))}${toHex(f(4))}`;
+}
+function hexToHsl(hex) {
+  const clean = hex.replace(/^#/, "");
+  const r = parseInt(clean.slice(0, 2), 16) / 255;
+  const g = parseInt(clean.slice(2, 4), 16) / 255;
+  const b = parseInt(clean.slice(4, 6), 16) / 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  let h = 0, s = 0;
+  if (max !== min) {
+    const d = max - min;
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    switch (max) {
+      case r:
+        h = (g - b) / d + (g < b ? 6 : 0);
+        break;
+      case g:
+        h = (b - r) / d + 2;
+        break;
+      default:
+        h = (r - g) / d + 4;
+        break;
+    }
+    h *= 60;
+  }
+  return { h, s: s * 100, l: l * 100 };
 }
 function buildColorCSS(config) {
   const cv = (val, fb) => val && val.trim() ? val.trim() : fb;
@@ -2385,11 +2507,23 @@ function attachListeners(boardEl, config, app, refresh) {
     if (!toEl?.closest(".kanban-card"))
       clearHighlights();
   }
+  function openCardColorDialog(card) {
+    const filePath = card.dataset.file;
+    const lineNum = parseInt(card.dataset.line, 10);
+    const existing = card.dataset.color || null;
+    showCardColorDialog(existing, async (hex) => {
+      await updateCardColor(app, filePath, lineNum, hex);
+      requestAnimationFrame(() => setTimeout(refresh, 50));
+    });
+  }
   function onCardClick(e) {
     const card = e.target.closest(".kanban-card");
     if (!card)
       return;
     applyHighlights(card);
+    if (e.target === card && !isNarrowNow()) {
+      openCardColorDialog(card);
+    }
   }
   async function doMove(card, targetNorm, zone) {
     if (!card)
@@ -2868,9 +3002,22 @@ function attachListeners(boardEl, config, app, refresh) {
       startTitleEdit(card);
     });
     sheet.appendChild(editBtn);
+    const bottomRow = doc.createElement("div");
+    bottomRow.style.cssText = "display:flex;gap:8px;margin-top:8px;";
+    sheet.appendChild(bottomRow);
+    const colorBtn = doc.createElement("button");
+    colorBtn.textContent = "Color";
+    colorBtn.style.cssText = "flex:1;padding:14px;border-radius:10px;border:1px solid var(--background-modifier-border);background:var(--background-secondary);color:var(--text-normal);cursor:pointer;font-size:1em;font-weight:500;";
+    colorBtn.addEventListener("click", () => {
+      closeColPicker();
+      clearSelection();
+      touchCard = null;
+      openCardColorDialog(card);
+    });
+    bottomRow.appendChild(colorBtn);
     const deleteBtn = doc.createElement("button");
     deleteBtn.textContent = "Delete";
-    deleteBtn.style.cssText = "margin-top:8px;padding:14px;border-radius:10px;border:1px solid var(--background-modifier-border);background:var(--background-secondary);color:var(--text-error, #e03e3e);width:100%;cursor:pointer;font-size:1em;font-weight:500;";
+    deleteBtn.style.cssText = "flex:1;padding:14px;border-radius:10px;border:1px solid var(--background-modifier-border);background:var(--background-secondary);color:var(--text-error, #e03e3e);cursor:pointer;font-size:1em;font-weight:500;";
     deleteBtn.addEventListener("click", async () => {
       closeColPicker();
       clearSelection();
@@ -2884,7 +3031,7 @@ function attachListeners(boardEl, config, app, refresh) {
       await deleteLineRange(app, filePath, lineNum, lastLine);
       requestAnimationFrame(() => setTimeout(refresh, 50));
     });
-    sheet.appendChild(deleteBtn);
+    bottomRow.appendChild(deleteBtn);
     const cancelBtn = doc.createElement("button");
     cancelBtn.textContent = "Cancel";
     cancelBtn.style.cssText = "margin-top:12px;padding:14px;border-radius:10px;border:1px solid var(--background-modifier-border);background:none;color:var(--text-muted);width:100%;cursor:pointer;font-size:1em;";
