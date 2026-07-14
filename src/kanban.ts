@@ -438,9 +438,6 @@ function matchesTriggerAnnotations(triggers: string[], today: Date): boolean {
 
   for (const t of triggers) {
     if (t === 'last_day') { if (todayDate === lastDay) return true; continue; }
-    if (t === 'quarterly' || t === 'q+1') { if (todayDate === 1 && [0, 3, 6, 9].includes(todayMonth)) return true; continue; }
-    if (t === 'quarterly+2' || t === 'q+2') { if (todayDate === 1 && [1, 4, 7, 10].includes(todayMonth)) return true; continue; }
-    if (t === 'quarterly+3' || t === 'q+3') { if (todayDate === 1 && [2, 5, 8, 11].includes(todayMonth)) return true; continue; }
 
     const wdShort = TRIGGER_WEEKDAYS_SHORT.indexOf(t);
     if (wdShort !== -1) { if (wdShort === todayWeekday) return true; continue; }
@@ -468,7 +465,6 @@ function matchesTriggerAnnotations(triggers: string[], today: Date): boolean {
 
 function isValidTriggerToken(t: string): boolean {
   if (t === 'last_day') return true;
-  if (t === 'quarterly' || t === 'quarterly+2' || t === 'quarterly+3' || t === 'q+1' || t === 'q+2' || t === 'q+3') return true;
   return TRIGGER_WEEKDAYS_SHORT.includes(t) ||
     TRIGGER_WEEKDAYS_FULL.includes(t) ||
     TRIGGER_MONTHS_SHORT.includes(t) ||
@@ -722,7 +718,7 @@ function stripTriggerAnnotations(text: string, normRecurrent: string): string {
   text = text.replace(new RegExp(`@(${normRecurrent})\\b`, 'gi'), '$1');
   text = text.replace(/@([a-zA-Z][a-zA-Z_]*(?:[+-]\d+)?|\d{1,2})\b/g, (match, token) => {
     const t = token.toLowerCase();
-    if (isValidTriggerToken(t) || /^quarterly([+-]\d+)?$/.test(t)) return token;
+    if (isValidTriggerToken(t)) return token;
     return match;
   });
   return text;
@@ -1963,12 +1959,6 @@ function showRecurrentTriggerDialog(
   const activeWD       = new Set(existingTriggers.filter(t => WD_KEYS.includes(t)));
   const selectedDays   = existingTriggers.filter(t => /^\d{1,2}$/.test(t));
   const selectedMonths = existingTriggers.filter(t => MO_KEYS.includes(t));
-  const activeQuarterly = new Set<string>(
-    existingTriggers
-      .filter(t => t === 'quarterly+2' || t === 'quarterly+3' || t === 'q+2' || t === 'q+3')
-      .map(t => t === 'q+2' ? 'quarterly+2' : t === 'q+3' ? 'quarterly+3' : t)
-  );
-  let quarterlyActive = existingTriggers.includes('quarterly') || existingTriggers.includes('q+1');
 
   // Interval-based recurrence: a count dropdown whose options depend on the chosen
   // unit. The month dropdown's 12th slot is relabelled "1 year" and stored as a
@@ -2021,14 +2011,6 @@ function showRecurrentTriggerDialog(
       <span style="${lblStyle}display:block;margin-bottom:4px;">Weekday</span>
       <div id="k-wd-wrap" style="display:flex;gap:4px;flex-wrap:wrap;">${wdBtns}</div>
     </div>
-    <div style="margin-bottom:12px;">
-      <span style="${lblStyle}display:block;margin-bottom:4px;">Quarterly</span>
-      <div style="display:flex;gap:4px;flex-wrap:wrap;">
-        <button type="button" id="k-quarterly-btn" style="${wdStyle(quarterlyActive)}">quarterly</button>
-        <button type="button" class="kb-q-btn" data-q="quarterly+2" style="${wdStyle(activeQuarterly.has('quarterly+2'))}">quarterly+2</button>
-        <button type="button" class="kb-q-btn" data-q="quarterly+3" style="${wdStyle(activeQuarterly.has('quarterly+3'))}">quarterly+3</button>
-      </div>
-    </div>
     <div style="display:flex;gap:10px;margin-bottom:6px;">
       <div style="display:flex;align-items:center;gap:6px;">
         <span style="${lblStyle}white-space:nowrap;">Day of month</span>
@@ -2047,7 +2029,6 @@ function showRecurrentTriggerDialog(
   const repeatCountSel  = dialog.querySelector("#k-repeat-count") as HTMLSelectElement;
   const repeatUnitSel   = dialog.querySelector("#k-repeat-unit") as HTMLSelectElement;
   const wdWrap   = dialog.querySelector("#k-wd-wrap") as HTMLElement;
-  const qWrap    = dialog.querySelector(".kb-q-btn")!.parentElement as HTMLElement;
   const domSel   = dialog.querySelector("#k-dom") as HTMLSelectElement;
   const moSel        = dialog.querySelector("#k-month") as HTMLSelectElement;
   const domRows      = dialog.querySelector("#k-dom-rows") as HTMLElement;
@@ -2071,8 +2052,8 @@ function showRecurrentTriggerDialog(
   renderMoRows();
 
   // Interval-based recurrence ("Repeat after") and calendar-based triggers
-  // (weekday/quarterly/day-of-month/month) are mutually exclusive — a card
-  // recurs off exactly one of these.
+  // (weekday/day-of-month/month) are mutually exclusive — a card recurs off
+  // exactly one of these.
   const populateRepeatCountOptions = (unit: string, selectValue?: string) => {
     let opts: [string, string][] = [["", "-"]];
     if (unit === "day") {
@@ -2098,10 +2079,6 @@ function showRecurrentTriggerDialog(
   const clearCalendarTriggers = () => {
     activeWD.clear();
     wdWrap.querySelectorAll<HTMLButtonElement>(".kb-wd-btn").forEach((b) => b.style.cssText = wdStyle(false));
-    quarterlyActive = false;
-    quarterlyBtn.style.cssText = wdStyle(false);
-    activeQuarterly.clear();
-    qWrap.querySelectorAll<HTMLButtonElement>(".kb-q-btn").forEach((b) => b.style.cssText = wdStyle(false));
     selectedDays.length = 0; renderDomRows();
     selectedMonths.length = 0; renderMoRows();
   };
@@ -2113,24 +2090,6 @@ function showRecurrentTriggerDialog(
     if (repeatCountSel.value !== "") clearCalendarTriggers();
   });
   repeatUnitSel.addEventListener("change", () => populateRepeatCountOptions(repeatUnitSel.value, repeatCountSel.value));
-
-  // Quarterly toggle (plain)
-  const quarterlyBtn = dialog.querySelector("#k-quarterly-btn") as HTMLButtonElement;
-  quarterlyBtn.addEventListener("click", () => {
-    clearRepeatSelection();
-    quarterlyActive = !quarterlyActive;
-    quarterlyBtn.style.cssText = wdStyle(quarterlyActive);
-  });
-
-  // quarterly+2 / quarterly+3 toggles
-  qWrap.addEventListener("click", (e) => {
-    const btn = (e.target as Element).closest(".kb-q-btn") as HTMLButtonElement | null;
-    if (!btn) return;
-    clearRepeatSelection();
-    const q = btn.dataset.q!;
-    if (activeQuarterly.has(q)) { activeQuarterly.delete(q); btn.style.cssText = wdStyle(false); }
-    else                        { activeQuarterly.add(q);    btn.style.cssText = wdStyle(true);  }
-  });
 
   // Weekday toggle
   wdWrap.addEventListener("click", (e) => {
@@ -2187,7 +2146,7 @@ function showRecurrentTriggerDialog(
       onSubmit(`${formatRepeatAnnotation(spec)} ${nextDate}`);
       return;
     }
-    const tokens = [...activeWD, ...(quarterlyActive ? ['quarterly'] : []), ...['quarterly+2','quarterly+3'].filter(q => activeQuarterly.has(q)), ...selectedDays, ...selectedMonths];
+    const tokens = [...activeWD, ...selectedDays, ...selectedMonths];
     if (!tokens.length) { errEl.textContent = "Select at least one trigger."; return; }
     close();
     onSubmit(tokens.map(t => `@${t}`).join(" "));

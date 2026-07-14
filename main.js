@@ -308,21 +308,6 @@ function matchesTriggerAnnotations(triggers, today) {
         return true;
       continue;
     }
-    if (t === "quarterly" || t === "q+1") {
-      if (todayDate === 1 && [0, 3, 6, 9].includes(todayMonth))
-        return true;
-      continue;
-    }
-    if (t === "quarterly+2" || t === "q+2") {
-      if (todayDate === 1 && [1, 4, 7, 10].includes(todayMonth))
-        return true;
-      continue;
-    }
-    if (t === "quarterly+3" || t === "q+3") {
-      if (todayDate === 1 && [2, 5, 8, 11].includes(todayMonth))
-        return true;
-      continue;
-    }
     const wdShort = TRIGGER_WEEKDAYS_SHORT.indexOf(t);
     if (wdShort !== -1) {
       if (wdShort === todayWeekday)
@@ -360,8 +345,6 @@ function matchesTriggerAnnotations(triggers, today) {
 }
 function isValidTriggerToken(t) {
   if (t === "last_day")
-    return true;
-  if (t === "quarterly" || t === "quarterly+2" || t === "quarterly+3" || t === "q+1" || t === "q+2" || t === "q+3")
     return true;
   return TRIGGER_WEEKDAYS_SHORT.includes(t) || TRIGGER_WEEKDAYS_FULL.includes(t) || TRIGGER_MONTHS_SHORT.includes(t) || TRIGGER_MONTHS_FULL.includes(t) || /^\d{1,2}$/.test(t) && parseInt(t, 10) >= 1 && parseInt(t, 10) <= 31;
 }
@@ -1536,10 +1519,6 @@ function showRecurrentTriggerDialog(onSubmit, existingTriggers = [], existingRep
   const activeWD = new Set(existingTriggers.filter((t) => WD_KEYS.includes(t)));
   const selectedDays = existingTriggers.filter((t) => /^\d{1,2}$/.test(t));
   const selectedMonths = existingTriggers.filter((t) => MO_KEYS.includes(t));
-  const activeQuarterly = new Set(
-    existingTriggers.filter((t) => t === "quarterly+2" || t === "quarterly+3" || t === "q+2" || t === "q+3").map((t) => t === "q+2" ? "quarterly+2" : t === "q+3" ? "quarterly+3" : t)
-  );
-  let quarterlyActive = existingTriggers.includes("quarterly") || existingTriggers.includes("q+1");
   const YEAR_SENTINEL = "year1";
   let initRepeatUnit = existingRepeatSpec?.unit === "year" ? "month" : existingRepeatSpec?.unit ?? "week";
   let initRepeatCountVal = existingRepeatSpec === null ? "" : existingRepeatSpec.unit === "year" || existingRepeatSpec.unit === "month" && existingRepeatSpec.count === 12 ? YEAR_SENTINEL : String(existingRepeatSpec.count);
@@ -1569,14 +1548,6 @@ function showRecurrentTriggerDialog(onSubmit, existingTriggers = [], existingRep
       <span style="${lblStyle}display:block;margin-bottom:4px;">Weekday</span>
       <div id="k-wd-wrap" style="display:flex;gap:4px;flex-wrap:wrap;">${wdBtns}</div>
     </div>
-    <div style="margin-bottom:12px;">
-      <span style="${lblStyle}display:block;margin-bottom:4px;">Quarterly</span>
-      <div style="display:flex;gap:4px;flex-wrap:wrap;">
-        <button type="button" id="k-quarterly-btn" style="${wdStyle(quarterlyActive)}">quarterly</button>
-        <button type="button" class="kb-q-btn" data-q="quarterly+2" style="${wdStyle(activeQuarterly.has("quarterly+2"))}">quarterly+2</button>
-        <button type="button" class="kb-q-btn" data-q="quarterly+3" style="${wdStyle(activeQuarterly.has("quarterly+3"))}">quarterly+3</button>
-      </div>
-    </div>
     <div style="display:flex;gap:10px;margin-bottom:6px;">
       <div style="display:flex;align-items:center;gap:6px;">
         <span style="${lblStyle}white-space:nowrap;">Day of month</span>
@@ -1594,7 +1565,6 @@ function showRecurrentTriggerDialog(onSubmit, existingTriggers = [], existingRep
   const repeatCountSel = dialog.querySelector("#k-repeat-count");
   const repeatUnitSel = dialog.querySelector("#k-repeat-unit");
   const wdWrap = dialog.querySelector("#k-wd-wrap");
-  const qWrap = dialog.querySelector(".kb-q-btn").parentElement;
   const domSel = dialog.querySelector("#k-dom");
   const moSel = dialog.querySelector("#k-month");
   const domRows = dialog.querySelector("#k-dom-rows");
@@ -1638,10 +1608,6 @@ function showRecurrentTriggerDialog(onSubmit, existingTriggers = [], existingRep
   const clearCalendarTriggers = () => {
     activeWD.clear();
     wdWrap.querySelectorAll(".kb-wd-btn").forEach((b) => b.style.cssText = wdStyle(false));
-    quarterlyActive = false;
-    quarterlyBtn.style.cssText = wdStyle(false);
-    activeQuarterly.clear();
-    qWrap.querySelectorAll(".kb-q-btn").forEach((b) => b.style.cssText = wdStyle(false));
     selectedDays.length = 0;
     renderDomRows();
     selectedMonths.length = 0;
@@ -1655,26 +1621,6 @@ function showRecurrentTriggerDialog(onSubmit, existingTriggers = [], existingRep
       clearCalendarTriggers();
   });
   repeatUnitSel.addEventListener("change", () => populateRepeatCountOptions(repeatUnitSel.value, repeatCountSel.value));
-  const quarterlyBtn = dialog.querySelector("#k-quarterly-btn");
-  quarterlyBtn.addEventListener("click", () => {
-    clearRepeatSelection();
-    quarterlyActive = !quarterlyActive;
-    quarterlyBtn.style.cssText = wdStyle(quarterlyActive);
-  });
-  qWrap.addEventListener("click", (e) => {
-    const btn = e.target.closest(".kb-q-btn");
-    if (!btn)
-      return;
-    clearRepeatSelection();
-    const q = btn.dataset.q;
-    if (activeQuarterly.has(q)) {
-      activeQuarterly.delete(q);
-      btn.style.cssText = wdStyle(false);
-    } else {
-      activeQuarterly.add(q);
-      btn.style.cssText = wdStyle(true);
-    }
-  });
   wdWrap.addEventListener("click", (e) => {
     const btn = e.target.closest(".kb-wd-btn");
     if (!btn)
@@ -1731,7 +1677,7 @@ function showRecurrentTriggerDialog(onSubmit, existingTriggers = [], existingRep
       onSubmit(`${formatRepeatAnnotation(spec)} ${nextDate}`);
       return;
     }
-    const tokens = [...activeWD, ...quarterlyActive ? ["quarterly"] : [], ...["quarterly+2", "quarterly+3"].filter((q) => activeQuarterly.has(q)), ...selectedDays, ...selectedMonths];
+    const tokens = [...activeWD, ...selectedDays, ...selectedMonths];
     if (!tokens.length) {
       errEl.textContent = "Select at least one trigger.";
       return;
