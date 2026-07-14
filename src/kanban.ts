@@ -2458,18 +2458,15 @@ function buildColorCSS(config: KanbanConfig): string {
   const configuredDarkText = (config.colorText && config.colorText.trim()) ? config.colorText.trim() : "#1a1a1a";
   const overLimit = cv(config.colorColumnOverLimit, "#5c1a1a");
   const overText = textOnBg(overLimit, "#ffffff", configuredDarkText);
-  // Per-column color only applies while that column is over its max card count —
-  // it overrides the shared warning color for that specific column.
-  const perColOverLimitRules = Object.entries(config.columnColors)
+  // Per-column color is the column's base background. The shared over-limit
+  // warning color still wins (via !important) once a column exceeds its max.
+  const perColRules = Object.entries(config.columnColors)
     .filter(([, c]) => c)
     .map(([norm, color]) => {
       const text = textOnBg(color, "#ffffff", configuredDarkText);
       return `
-      #kanban-wrapper [data-col-container="${norm}"][data-col-overlimit="1"]{background:${color}!important;}
-      #kanban-wrapper [data-col-container="${norm}"][data-col-overlimit="1"] h4,
-      #kanban-wrapper [data-col-container="${norm}"][data-col-overlimit="1"] .kb-col-count,
-      #kanban-wrapper [data-col-container="${norm}"][data-col-overlimit="1"] .kb-col-add-btn{color:${text}!important;}
-      #kanban-wrapper [data-col-norm="${norm}"][data-col-overlimit="1"]{background:${color}!important;color:${text}!important;}
+      #kanban-wrapper [data-col-container="${norm}"]{background:${color};}
+      #kanban-wrapper [data-col-norm="${norm}"]{background:${color};color:${text};}
     `;
     }).join("");
   return `
@@ -2495,12 +2492,12 @@ function buildColorCSS(config: KanbanConfig): string {
     #kanban-wrapper [data-col-norm]{background:var(--kb-col-bg);color:var(--kb-text);}
     #kanban-wrapper [data-col-norm][data-col-active="1"]{background:var(--kb-accent);color:var(--text-on-accent);font-weight:600;}
     #kanban-wrapper .kanban-card,.card-title{color:var(--kb-text);}
+    ${perColRules}
     #kanban-wrapper [data-col-container][data-col-overlimit="1"]{background:${overLimit}!important;}
     #kanban-wrapper [data-col-container][data-col-overlimit="1"] h4,
     #kanban-wrapper [data-col-container][data-col-overlimit="1"] .kb-col-count,
     #kanban-wrapper [data-col-container][data-col-overlimit="1"] .kb-col-add-btn{color:${overText}!important;}
-    #kanban-wrapper [data-col-norm][data-col-overlimit="1"]{background:${overLimit}!important;color:${overText}!important;}
-    ${perColOverLimitRules}`;
+    #kanban-wrapper [data-col-norm][data-col-overlimit="1"]{background:${overLimit}!important;color:${overText}!important;}`;
 }
 
 async function tagUntaggedRecurrentCards(app: App, paths: string[], config: KanbanConfig): Promise<void> {
