@@ -1660,6 +1660,9 @@ function parseFileEntries(lines: string[], filePath: string, config: KanbanConfi
           isPromoted: indent > 0,
           indent,
           hierarchy_level: stack.length,
+          inheritedColor: stack.length
+            ? (extractCardColor(stack[stack.length - 1].item.text) || stack[stack.length - 1].inheritedColor || null)
+            : null,
         });
       }
       continue;
@@ -1695,6 +1698,14 @@ function parseFileEntries(lines: string[], filePath: string, config: KanbanConfi
       ),
       indent,
       hierarchy_level: stack.length,
+      // Nearest ancestor's own (or itself-inherited) color — used as this
+      // item's card color only when it has no "%% @color %%" of its own,
+      // and only once this item is itself rendered as a card (a promoted
+      // sub-task getting its own top-level card). Nested/unpromoted display
+      // (renderSub) never uses this — see createCardHTML.
+      inheritedColor: stack.length
+        ? (extractCardColor(stack[stack.length - 1].item.text) || stack[stack.length - 1].inheritedColor || null)
+        : null,
     };
 
     if (stack.length && stack[stack.length - 1].indent < indent) {
@@ -2549,21 +2560,26 @@ function showSubtaskDialog(onSubmit: (text: string) => void) {
   taskInput.setSelectionRange(taskInput.value.length, taskInput.value.length);
 }
 
-// A small fixed set of basic hues (plus gray and white); saturation and
-// lightness are fixed constants so only hue is picked here. Gray/white are
-// achromatic quick picks that bypass hue/saturation/lightness entirely.
+// A small fixed set of basic hues (plus gray and a "Default" no-color
+// option); saturation and lightness are fixed constants so only hue is
+// picked here. Gray is an achromatic quick pick that bypasses
+// hue/saturation/lightness entirely. Default (-2) isn't a color at all —
+// picking it clears any "%% @color %%" on the card, restoring its normal
+// background/text and, for a promoted sub-task, letting it inherit its
+// parent's color again (see createCardHTML's cardColor).
 const CARD_COLOR_HUES: [string, number][] = [
   ["Red", 0], ["Orange", 28], ["Yellow", 48], ["Green", 130],
   ["Teal", 175], ["Blue", 212], ["Purple", 265], ["Pink", 325],
 ];
 const CARD_COLOR_GRAY = "#888888";
-const CARD_COLOR_WHITE = "#ffffff";
 const CARD_COLOR_SATURATION = 65;
 const CARD_COLOR_LIGHTNESS = 55;
+const CARD_COLOR_NONE_SWATCH_BG =
+  "repeating-linear-gradient(45deg, var(--background-modifier-border), var(--background-modifier-border) 3px, transparent 3px, transparent 7px)";
 
 function showCardColorDialog(
   existingColor: string | null,
-  onApply: (hex: string) => void
+  onApply: (hex: string | null) => void
 ) {
   const { dialog, close } = makeOverlay("kanban-card-color-dialog");
 
@@ -2571,25 +2587,25 @@ function showCardColorDialog(
     ? existingColor
     : null;
   const existingHsl = validExisting ? hexToHsl(validExisting) : null;
-  let selectedHue = existingHsl
-    ? (existingHsl.l > 90
-        ? -2
-        : existingHsl.s < 10
-          ? -1
-          : CARD_COLOR_HUES.reduce((best, [, h]) =>
-              Math.abs(h - existingHsl.h) < Math.abs(best - existingHsl.h) ? h : best, CARD_COLOR_HUES[0][1]))
-    : CARD_COLOR_HUES[5][1]; // Blue
+  let selectedHue = !existingHsl
+    ? -2 // no color set → Default
+    : existingHsl.l > 90
+      ? -2 // legacy literal white, from before Default existed
+      : existingHsl.s < 10
+        ? -1
+        : CARD_COLOR_HUES.reduce((best, [, h]) =>
+            Math.abs(h - existingHsl.h) < Math.abs(best - existingHsl.h) ? h : best, CARD_COLOR_HUES[0][1]);
 
   const swatchBtnStyle = (h: number, active: boolean) =>
     `width:32px;height:32px;border-radius:50%;cursor:pointer;` +
     `border:2px solid ${active ? "var(--kb-accent)" : h === -2 ? "var(--background-modifier-border)" : "transparent"};` +
-    `background:${h === -2 ? CARD_COLOR_WHITE : h === -1 ? CARD_COLOR_GRAY : hslToHex(h, CARD_COLOR_SATURATION, CARD_COLOR_LIGHTNESS)};`;
+    `background:${h === -2 ? CARD_COLOR_NONE_SWATCH_BG : h === -1 ? CARD_COLOR_GRAY : hslToHex(h, CARD_COLOR_SATURATION, CARD_COLOR_LIGHTNESS)};`;
 
   const swatchesHtml = CARD_COLOR_HUES
     .map(([name, h]) => `<button type="button" class="kb-color-swatch" data-hue="${h}" title="${name}" style="${swatchBtnStyle(h, h === selectedHue)}"></button>`)
     .join("") +
     `<button type="button" class="kb-color-swatch" data-hue="-1" title="Gray" style="${swatchBtnStyle(-1, selectedHue === -1)}"></button>` +
-    `<button type="button" class="kb-color-swatch" data-hue="-2" title="White" style="${swatchBtnStyle(-2, selectedHue === -2)}"></button>`;
+    `<button type="button" class="kb-color-swatch" data-hue="-2" title="Default (no color)" style="${swatchBtnStyle(-2, selectedHue === -2)}"></button>`;
 
   dialog.innerHTML = `
     <h3 style="margin:0 0 12px;font-size:1.1em;">Highlight card</h3>
@@ -2601,12 +2617,17 @@ function showCardColorDialog(
   const swatchWrap = dialog.querySelector("#k-color-swatches") as HTMLElement;
   const [applyBtn, cancelBtn] = dialog.querySelectorAll<HTMLButtonElement>("#k-color-actions button");
 
-  const currentHex = () =>
-    selectedHue === -2 ? CARD_COLOR_WHITE :
+  const currentHex = (): string | null =>
+    selectedHue === -2 ? null :
     selectedHue === -1 ? CARD_COLOR_GRAY :
     hslToHex(selectedHue, CARD_COLOR_SATURATION, CARD_COLOR_LIGHTNESS);
   const updatePreview = () => {
     const hex = currentHex();
+    if (hex === null) {
+      preview.style.border = "1px solid var(--background-modifier-border)";
+      preview.style.background = "var(--kb-card-bg,var(--background-secondary))";
+      return;
+    }
     const { h, s, l } = hexToHsl(hex);
     preview.style.border = `6px solid ${hslToHex(h, s, l / 2)}`;
     preview.style.background = hex;
@@ -2799,7 +2820,11 @@ function createCardHTML(
   // titles, so it stays readable against the fill. Computed here (before
   // titleStyle/badge) so those explicit per-element colors — which would
   // otherwise block inheritance from the card wrapper below — pick it up too.
-  const cardColor = extractCardColor(item.item.text);
+  // Falls back to the nearest ancestor's color (item.inheritedColor, set in
+  // parseFileEntries) when this card has none of its own — only relevant
+  // for a promoted sub-task getting its own top-level card here; the
+  // nested/unpromoted display in renderSub never applies a color at all.
+  const cardColor = extractCardColor(item.item.text) || item.inheritedColor || null;
   let frameColor = "";
   let textColor = "var(--kb-text)";
   if (cardColor) {

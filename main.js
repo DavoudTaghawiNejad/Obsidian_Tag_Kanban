@@ -1241,7 +1241,8 @@ function parseFileEntries(lines, filePath, config) {
           len: parsed2?.len ?? null,
           isPromoted: indent > 0,
           indent,
-          hierarchy_level: stack.length
+          hierarchy_level: stack.length,
+          inheritedColor: stack.length ? extractCardColor(stack[stack.length - 1].item.text) || stack[stack.length - 1].inheritedColor || null : null
         });
       }
       continue;
@@ -1268,7 +1269,13 @@ function parseFileEntries(lines, filePath, config) {
         (t) => matchesKanbanTag(t, config.normKanban)
       ),
       indent,
-      hierarchy_level: stack.length
+      hierarchy_level: stack.length,
+      // Nearest ancestor's own (or itself-inherited) color — used as this
+      // item's card color only when it has no "%% @color %%" of its own,
+      // and only once this item is itself rendered as a card (a promoted
+      // sub-task getting its own top-level card). Nested/unpromoted display
+      // (renderSub) never uses this — see createCardHTML.
+      inheritedColor: stack.length ? extractCardColor(stack[stack.length - 1].item.text) || stack[stack.length - 1].inheritedColor || null : null
     };
     if (stack.length && stack[stack.length - 1].indent < indent) {
       stack[stack.length - 1].item.subs.push(entry.item);
@@ -1984,16 +1991,16 @@ var CARD_COLOR_HUES = [
   ["Pink", 325]
 ];
 var CARD_COLOR_GRAY = "#888888";
-var CARD_COLOR_WHITE = "#ffffff";
 var CARD_COLOR_SATURATION = 65;
 var CARD_COLOR_LIGHTNESS = 55;
+var CARD_COLOR_NONE_SWATCH_BG = "repeating-linear-gradient(45deg, var(--background-modifier-border), var(--background-modifier-border) 3px, transparent 3px, transparent 7px)";
 function showCardColorDialog(existingColor, onApply) {
   const { dialog, close } = makeOverlay("kanban-card-color-dialog");
   const validExisting = existingColor && /^#[0-9a-fA-F]{6}$/.test(existingColor) ? existingColor : null;
   const existingHsl = validExisting ? hexToHsl(validExisting) : null;
-  let selectedHue = existingHsl ? existingHsl.l > 90 ? -2 : existingHsl.s < 10 ? -1 : CARD_COLOR_HUES.reduce((best, [, h]) => Math.abs(h - existingHsl.h) < Math.abs(best - existingHsl.h) ? h : best, CARD_COLOR_HUES[0][1]) : CARD_COLOR_HUES[5][1];
-  const swatchBtnStyle = (h, active) => `width:32px;height:32px;border-radius:50%;cursor:pointer;border:2px solid ${active ? "var(--kb-accent)" : h === -2 ? "var(--background-modifier-border)" : "transparent"};background:${h === -2 ? CARD_COLOR_WHITE : h === -1 ? CARD_COLOR_GRAY : hslToHex(h, CARD_COLOR_SATURATION, CARD_COLOR_LIGHTNESS)};`;
-  const swatchesHtml = CARD_COLOR_HUES.map(([name, h]) => `<button type="button" class="kb-color-swatch" data-hue="${h}" title="${name}" style="${swatchBtnStyle(h, h === selectedHue)}"></button>`).join("") + `<button type="button" class="kb-color-swatch" data-hue="-1" title="Gray" style="${swatchBtnStyle(-1, selectedHue === -1)}"></button><button type="button" class="kb-color-swatch" data-hue="-2" title="White" style="${swatchBtnStyle(-2, selectedHue === -2)}"></button>`;
+  let selectedHue = !existingHsl ? -2 : existingHsl.l > 90 ? -2 : existingHsl.s < 10 ? -1 : CARD_COLOR_HUES.reduce((best, [, h]) => Math.abs(h - existingHsl.h) < Math.abs(best - existingHsl.h) ? h : best, CARD_COLOR_HUES[0][1]);
+  const swatchBtnStyle = (h, active) => `width:32px;height:32px;border-radius:50%;cursor:pointer;border:2px solid ${active ? "var(--kb-accent)" : h === -2 ? "var(--background-modifier-border)" : "transparent"};background:${h === -2 ? CARD_COLOR_NONE_SWATCH_BG : h === -1 ? CARD_COLOR_GRAY : hslToHex(h, CARD_COLOR_SATURATION, CARD_COLOR_LIGHTNESS)};`;
+  const swatchesHtml = CARD_COLOR_HUES.map(([name, h]) => `<button type="button" class="kb-color-swatch" data-hue="${h}" title="${name}" style="${swatchBtnStyle(h, h === selectedHue)}"></button>`).join("") + `<button type="button" class="kb-color-swatch" data-hue="-1" title="Gray" style="${swatchBtnStyle(-1, selectedHue === -1)}"></button><button type="button" class="kb-color-swatch" data-hue="-2" title="Default (no color)" style="${swatchBtnStyle(-2, selectedHue === -2)}"></button>`;
   dialog.innerHTML = `
     <h3 style="margin:0 0 12px;font-size:1.1em;">Highlight card</h3>
     <div id="k-color-preview" style="width:100%;height:44px;border-radius:8px;margin-bottom:14px;background:var(--kb-card-bg,var(--background-secondary));"></div>
@@ -2002,9 +2009,14 @@ function showCardColorDialog(existingColor, onApply) {
   const preview = dialog.querySelector("#k-color-preview");
   const swatchWrap = dialog.querySelector("#k-color-swatches");
   const [applyBtn, cancelBtn] = dialog.querySelectorAll("#k-color-actions button");
-  const currentHex = () => selectedHue === -2 ? CARD_COLOR_WHITE : selectedHue === -1 ? CARD_COLOR_GRAY : hslToHex(selectedHue, CARD_COLOR_SATURATION, CARD_COLOR_LIGHTNESS);
+  const currentHex = () => selectedHue === -2 ? null : selectedHue === -1 ? CARD_COLOR_GRAY : hslToHex(selectedHue, CARD_COLOR_SATURATION, CARD_COLOR_LIGHTNESS);
   const updatePreview = () => {
     const hex = currentHex();
+    if (hex === null) {
+      preview.style.border = "1px solid var(--background-modifier-border)";
+      preview.style.background = "var(--kb-card-bg,var(--background-secondary))";
+      return;
+    }
     const { h, s, l } = hexToHsl(hex);
     preview.style.border = `6px solid ${hslToHex(h, s, l / 2)}`;
     preview.style.background = hex;
@@ -2143,7 +2155,7 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
   const addSubBtn = `<button class="kb-add-sub" style="${addSubBtnStyle}">+</button>`;
   const TITLE_LINE_H = 1.5;
   const iconSpacer = (width) => `<span aria-hidden="true" style="float:right;width:${width}px;height:${TITLE_LINE_H}em;"></span>`;
-  const cardColor = extractCardColor(item.item.text);
+  const cardColor = extractCardColor(item.item.text) || item.inheritedColor || null;
   let frameColor = "";
   let textColor = "var(--kb-text)";
   if (cardColor) {
