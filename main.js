@@ -72,13 +72,12 @@ function buildConfig(settings) {
   const satC = clamp(settings.colorSaturation ?? 55, 0, 100);
   const baseL = clamp(settings.colorLightness ?? 80, 0, 100);
   const textL = clamp(settings.textLightness ?? 30, 0, 100);
-  const cardBgL = clamp(settings.lightnessCardBg ?? 100, 0, 100);
   const hueHex = (hue, light) => hue === null || hue === void 0 ? "" : hslToHex((hue % 360 + 360) % 360, satC, light);
   const generalHex = (hue) => hueHex(hue, baseL);
   const textHex = (hue) => hueHex(hue, textL);
   const columnTitleL = clamp(settings.lightnessColumnTitle ?? 10, 0, 25);
   const colorColumnTitleDark = hueHex(settings.hueColumnTitle ?? settings.hueText ?? 225, columnTitleL);
-  const colorColumnTitleThreshold = clamp(settings.columnTitleContrastThreshold ?? 18, 0, 100);
+  const colorTextContrastThreshold = clamp(settings.textContrastThreshold ?? 18, 0, 100);
   const boldL = clamp(textL + (settings.boldLightnessDelta ?? 0), 0, 100);
   const italicStarL = clamp(textL + (settings.italicStarLightnessDelta ?? 0), 0, 100);
   const italicUnderscoreL = clamp(textL + (settings.italicUnderscoreLightnessDelta ?? 0), 0, 100);
@@ -112,7 +111,6 @@ function buildConfig(settings) {
       (settings.kanban || []).map((tag, i) => [normalizeTag(tag), (settings.columnMaxCards || [])[i] || 0])
     ),
     colorColumnOverLimit: generalHex(settings.hueColumnOverLimit) || "#5c1a1a",
-    colorCardBg: hueHex(settings.hueCardBg, cardBgL),
     colorColumnBg: generalHex(settings.hueColumnBg),
     colorAccent: generalHex(settings.hueAccent),
     colorFamilySelf: generalHex(settings.hueFamilySelf) || "#e03e3e",
@@ -121,7 +119,7 @@ function buildConfig(settings) {
     fontDate: settings.fontDate || "monospace",
     colorText: textHex(settings.hueText),
     colorColumnTitleDark,
-    colorColumnTitleThreshold,
+    colorTextContrastThreshold,
     columnTitleShadowLength: clamp(settings.columnTitleShadowLength ?? 2, 0, 10),
     colorLink: textHex(settings.hueLink),
     colorDate: textHex(settings.hueDate) || "#7ab8e8",
@@ -1997,7 +1995,7 @@ function showCardColorDialog(existingColor, onApply) {
   const swatchesHtml = CARD_COLOR_HUES.map(([name, h]) => `<button type="button" class="kb-color-swatch" data-hue="${h}" title="${name}" style="${swatchBtnStyle(h, h === selectedHue)}"></button>`).join("") + `<button type="button" class="kb-color-swatch" data-hue="-1" title="Gray" style="${swatchBtnStyle(-1, selectedHue === -1)}"></button><button type="button" class="kb-color-swatch" data-hue="-2" title="White" style="${swatchBtnStyle(-2, selectedHue === -2)}"></button>`;
   dialog.innerHTML = `
     <h3 style="margin:0 0 12px;font-size:1.1em;">Highlight card</h3>
-    <div id="k-color-preview" style="width:100%;height:44px;border-radius:8px;margin-bottom:14px;border:1px solid var(--background-modifier-border);"></div>
+    <div id="k-color-preview" style="width:100%;height:44px;border-radius:8px;margin-bottom:14px;background:var(--kb-card-bg,var(--background-secondary));"></div>
     <div id="k-color-swatches" style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-bottom:14px;">${swatchesHtml}</div>
     <div id="k-color-actions" style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">${buttonHtml("Apply", true)}${buttonHtml("Cancel", false)}</div>`;
   const preview = dialog.querySelector("#k-color-preview");
@@ -2005,7 +2003,10 @@ function showCardColorDialog(existingColor, onApply) {
   const [applyBtn, cancelBtn] = dialog.querySelectorAll("#k-color-actions button");
   const currentHex = () => selectedHue === -2 ? CARD_COLOR_WHITE : selectedHue === -1 ? CARD_COLOR_GRAY : hslToHex(selectedHue, CARD_COLOR_SATURATION, CARD_COLOR_LIGHTNESS);
   const updatePreview = () => {
-    preview.style.background = currentHex();
+    const hex = currentHex();
+    const { h, s, l } = hexToHsl(hex);
+    preview.style.border = `6px solid ${hslToHex(h, s, l / 2)}`;
+    preview.style.background = hex;
   };
   updatePreview();
   swatchWrap.addEventListener("click", (e) => {
@@ -2141,7 +2142,17 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
   const addSubBtn = `<button class="kb-add-sub" style="${addSubBtnStyle}">+</button>`;
   const TITLE_LINE_H = 1.5;
   const iconSpacer = (width) => `<span aria-hidden="true" style="float:right;width:${width}px;height:${TITLE_LINE_H}em;"></span>`;
-  const titleStyle = `padding:6px 0;font-weight:${TITLE_FONT_WEIGHT};color:var(--kb-text);text-align:left;line-height:${TITLE_LINE_H};${config.fontSizeCardTitle ? `font-size:${config.fontSizeCardTitle};` : ""}`;
+  const cardColor = extractCardColor(item.item.text);
+  let frameColor = "";
+  let textColor = "var(--kb-text)";
+  if (cardColor) {
+    const { h, s, l } = hexToHsl(cardColor);
+    frameColor = hslToHex(h, s, l / 2);
+    const configuredDarkText = config.colorText && config.colorText.trim() ? config.colorText.trim() : "#1a1a1a";
+    textColor = columnTitleTextColor(cardColor, configuredDarkText, config.colorColumnTitleDark, config.colorTextContrastThreshold);
+  }
+  const colorStyle = cardColor ? `border:6px solid ${frameColor}!important;background:${cardColor}!important;color:${textColor}!important;` : "";
+  const titleStyle = `padding:6px 0;font-weight:${TITLE_FONT_WEIGHT};color:${textColor};text-align:left;line-height:${TITLE_LINE_H};${config.fontSizeCardTitle ? `font-size:${config.fontSizeCardTitle};` : ""}`;
   const bodyHTML = hasSubs ? `<div style="position:relative;">
          <div class="card-title" style="${titleStyle}cursor:pointer;"
               onclick="this.closest('.kanban-card').querySelector('details').toggleAttribute('open')">
@@ -2158,11 +2169,9 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
          <button class="kb-add-sub" style="${addSubBtnStyle}position:absolute;top:4px;right:0;">+</button>
        </div>`;
   const border = isMulti ? "background:var(--background-modifier-error-hover);border:1px solid var(--background-modifier-error);" : hasUnmanagedWork ? `border:2px solid var(--kb-children-done);background:color-mix(in srgb,var(--kb-children-done) 20%,var(--kb-card-bg));` : "border:1px solid var(--background-modifier-border);";
-  const cardColor = extractCardColor(item.item.text);
-  const colorStyle = cardColor ? `background:${cardColor}!important;color:${textOnBg(cardColor, "#ffffff", config.colorText && config.colorText.trim() ? config.colorText.trim() : "#1a1a1a")}!important;` : "";
   const src = item.source.path.split("/").pop().replace(/\.md$/, "");
   const href = `obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(item.filePath)}`;
-  const badge = `<div style="margin-top:8px;font-size:.8em;color:var(--kb-text);">
+  const badge = `<div style="margin-top:8px;font-size:.8em;color:${textColor};">
     from: <a href="${href}" style="color:var(--kb-link);text-decoration:none;">${src}</a></div>`;
   const lastSubLn = maxSubLine(item.item.subs) || item.item.line;
   return `<div class="kanban-card"
@@ -2202,19 +2211,45 @@ function hexLuminance(hex) {
 function textOnBg(bgHex, lightText, darkText) {
   return hexLuminance(bgHex) > 0.179 ? darkText : lightText;
 }
-var COLUMN_TITLE_HUE_PENALTY = 0.5;
+var APCA = {
+  sRco: 0.2126729,
+  sGco: 0.7151522,
+  sBco: 0.072175,
+  normBG: 0.56,
+  normTXT: 0.57,
+  revBG: 0.65,
+  revTXT: 0.62,
+  blkThrs: 0.022,
+  blkClmp: 1.414,
+  scale: 1.14,
+  loBoWoffset: 0.027,
+  loWoBoffset: 0.027,
+  deltaYmin: 5e-4,
+  loClip: 0.1
+};
+function sRGBtoY(hex) {
+  const clean = hex.replace(/^#/, "");
+  const chan = (h) => Math.pow(parseInt(h, 16) / 255, 2.4);
+  return APCA.sRco * chan(clean.slice(0, 2)) + APCA.sGco * chan(clean.slice(2, 4)) + APCA.sBco * chan(clean.slice(4, 6));
+}
+function apcaLc(txtY, bgY) {
+  const soften = (y) => y > APCA.blkThrs ? y : y + Math.pow(APCA.blkThrs - y, APCA.blkClmp);
+  txtY = soften(txtY);
+  bgY = soften(bgY);
+  if (Math.abs(bgY - txtY) < APCA.deltaYmin)
+    return 0;
+  if (bgY > txtY) {
+    const sapc2 = (Math.pow(bgY, APCA.normBG) - Math.pow(txtY, APCA.normTXT)) * APCA.scale;
+    return (sapc2 < APCA.loClip ? 0 : sapc2 - APCA.loBoWoffset) * 100;
+  }
+  const sapc = (Math.pow(bgY, APCA.revBG) - Math.pow(txtY, APCA.revTXT)) * APCA.scale;
+  return (sapc > -APCA.loClip ? 0 : sapc + APCA.loWoBoffset) * 100;
+}
 function columnTitleTextColor(bgHex, fallback, darkColor, thresholdPct) {
   if (!bgHex)
     return fallback;
-  const lumDiff = Math.abs(hexLuminance(bgHex) - hexLuminance(darkColor));
-  const bgHsl = hexToHsl(bgHex);
-  const darkHue = hexToHsl(darkColor).h;
-  const rawHueDiff = Math.abs(bgHsl.h - darkHue);
-  const hueDiff = Math.min(rawHueDiff, 360 - rawHueDiff);
-  const hueSimilarity = 1 - hueDiff / 180;
-  const bgSatFactor = bgHsl.s / 100;
-  const adjustedDiff = lumDiff * (1 - COLUMN_TITLE_HUE_PENALTY * hueSimilarity * bgSatFactor);
-  return adjustedDiff < clamp(thresholdPct, 0, 100) / 100 ? "#ffffff" : darkColor;
+  const lc = apcaLc(sRGBtoY(darkColor), sRGBtoY(bgHex));
+  return Math.abs(lc) < clamp(thresholdPct, 0, 108) ? "#ffffff" : darkColor;
 }
 function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v));
@@ -2259,7 +2294,7 @@ function buildColorCSS(config) {
   const overLimit = cv(config.colorColumnOverLimit, "#5c1a1a");
   const overText = textOnBg(overLimit, "#ffffff", configuredDarkText);
   const perColRules = Object.entries(config.columnColors).filter(([, c]) => c).map(([norm, color]) => {
-    const text = columnTitleTextColor(color, configuredDarkText, config.colorColumnTitleDark, config.colorColumnTitleThreshold);
+    const text = columnTitleTextColor(color, configuredDarkText, config.colorColumnTitleDark, config.colorTextContrastThreshold);
     return `
       #kanban-wrapper [data-col-container="${norm}"]{background:${color};}
       #kanban-wrapper [data-col-norm="${norm}"]{background:${color};color:${text};}
@@ -2268,7 +2303,7 @@ function buildColorCSS(config) {
   return `
     :root{--kb-dialog-text:${cv(config.colorText, "var(--text-normal)")};--kb-dialog-muted:${cv(config.colorText, "var(--text-muted)")}}
     #kanban-wrapper{
-      --kb-card-bg:${cv(config.colorCardBg, "var(--background-secondary)")};
+      --kb-card-bg:#ffffff;
       --kb-col-bg:${cv(config.colorColumnBg, "var(--background-secondary)")};
       --kb-text:${cv(config.colorText, "var(--text-normal)")};
       --kb-accent:${cv(config.colorAccent, "var(--interactive-accent)")};
@@ -2381,7 +2416,7 @@ function buildColumnHeader(norm, col, config, doc) {
   const header = doc.createElement("div");
   header.className = "kb-col-header";
   header.style.cssText = "display:flex;align-items:center;margin-bottom:10px;padding:0 4px;";
-  const titleColor = columnTitleTextColor(config.columnColors[norm] || "", "var(--kb-text)", config.colorColumnTitleDark, config.colorColumnTitleThreshold);
+  const titleColor = columnTitleTextColor(config.columnColors[norm] || "", "var(--kb-text)", config.colorColumnTitleDark, config.colorTextContrastThreshold);
   const shadowLen = config.columnTitleShadowLength;
   const titleShadow = shadowLen > 0 && titleColor.toLowerCase() !== "#ffffff" ? `text-shadow:${shadowLen}px ${shadowLen}px ${shadowLen / 2}px rgba(255,255,255,0.9);` : "";
   const h4 = doc.createElement("h4");
@@ -3970,8 +4005,6 @@ var DEFAULT_COLORS = {
   textLightness: 30,
   hueColumnOverLimit: 0,
   hueAllChildrenDone: 6,
-  hueCardBg: 0,
-  lightnessCardBg: 100,
   hueColumnBg: 345,
   hueAccent: 237,
   hueFamilySelf: 55,
@@ -3990,7 +4023,7 @@ var DEFAULT_COLORS = {
   hueDate: 244,
   hueColumnTitle: 225,
   lightnessColumnTitle: 10,
-  columnTitleContrastThreshold: 18,
+  textContrastThreshold: 45,
   columnTitleShadowLength: 2,
   hueDoneColumn: 345,
   hueDueColumn: 345,
@@ -4461,26 +4494,13 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
       plainSlider(
         containerEl,
         "Lightness",
-        "Shared lightness for every color choice below except text colors and Card background, which have their own Lightness instead.",
+        "Shared lightness for every color choice below except text colors, which have their own Lightness instead.",
         () => s.colorLightness,
         (v) => {
           s.colorLightness = v;
         },
         "kb-lightness"
       );
-      plainSlider(
-        containerEl,
-        "Card background lightness",
-        "Independent of the general Lightness above, so cards default to white (100) instead of following it.",
-        () => s.lightnessCardBg,
-        (v) => {
-          s.lightnessCardBg = v;
-        },
-        "kb-lightness"
-      );
-      hueSetting(containerEl, "Card background", "Background color of each card. At Lightness 100 (default), always white regardless of Hue.", () => s.hueCardBg, (v) => {
-        s.hueCardBg = v;
-      }, s.lightnessCardBg, { nullable: true });
       hueSetting(containerEl, "Column background", "Base column background, drawn before the per-column color applies. Every column now always resolves a color via Active/Non-active, so this rarely shows through.", () => s.hueColumnBg, (v) => {
         s.hueColumnBg = v;
       }, s.colorLightness, { nullable: true });
@@ -4531,13 +4551,14 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
         );
         plainSlider(
           box,
-          "Column title contrast threshold",
-          "How different a column's background needs to be from the dark color above before switching to white for that column. 0 = never switch, 100 = always switch. A background with a similar hue to the dark color (e.g. blue on blue) switches to white sooner than a same-luminance but different-hue background (e.g. blue on red).",
-          () => s.columnTitleContrastThreshold,
+          "Text contrast threshold",
+          "Minimum required APCA Lc contrast (see apcacontrast.com) between a background and the dark color above before switching to white \u2014 shared by column titles and card highlight text. 0 = never switch, 108 = always switch. Lc 45 (default) is APCA's documented minimum for bold/large text like these titles; Lc 60 is its minimum for body text.",
+          () => s.textContrastThreshold,
           (v) => {
-            s.columnTitleContrastThreshold = v;
+            s.textContrastThreshold = v;
           },
-          "kb-saturation"
+          "kb-saturation",
+          [0, 108]
         );
         plainSlider(
           box,

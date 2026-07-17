@@ -44,14 +44,14 @@ export interface KanbanConfig {
   columnMaxCards: Record<string, number>;
   // Shared warning background for columns that exceed their max card count.
   colorColumnOverLimit: string;
-  colorCardBg: string;
   colorColumnBg: string;
   colorText: string;
-  // The dark option for column title text (see columnTitleTextColor) —
-  // white is used instead when a column's own background is too similar in
-  // luminance to this color. 0-100, see columnTitleTextColor's thresholdPct.
+  // The dark option for column title and card highlight text (see
+  // columnTitleTextColor) — white is used instead when the background is too
+  // similar in luminance to this color. 0-100, see columnTitleTextColor's
+  // thresholdPct.
   colorColumnTitleDark: string;
-  colorColumnTitleThreshold: number;
+  colorTextContrastThreshold: number;
   // Length (px) of the directional (top-left-lit) white title shadow. 0 = none.
   columnTitleShadowLength: number;
   colorAccent: string;
@@ -134,14 +134,12 @@ export function buildConfig(settings: KanbanSettings): KanbanConfig {
 
   // Saturation is shared by every color choice, including text, but not the
   // card-highlight dialog (which uses its own fixed constants). Lightness is
-  // shared by every color choice except text colors (their own Text
-  // lightness) and Card background (its own Lightness, defaulting to 100 =
-  // white) — so text stays legible and cards stay white by default
-  // regardless of how light/dark the general Lightness is set.
+  // shared by every color choice except text colors, which use their own
+  // Text lightness instead — so text stays legible regardless of how
+  // light/dark the general Lightness is set.
   const satC = clamp(settings.colorSaturation ?? 55, 0, 100);
   const baseL = clamp(settings.colorLightness ?? 80, 0, 100);
   const textL = clamp(settings.textLightness ?? 30, 0, 100);
-  const cardBgL = clamp(settings.lightnessCardBg ?? 100, 0, 100);
 
   // hue == null → "use Obsidian theme default" (resolves to "").
   const hueHex = (hue: number | null | undefined, light: number): string =>
@@ -154,7 +152,7 @@ export function buildConfig(settings: KanbanSettings): KanbanConfig {
   // columnTitleTextColor / textOnBg). Unset hue → Font color's current hue.
   const columnTitleL = clamp(settings.lightnessColumnTitle ?? 10, 0, 25);
   const colorColumnTitleDark = hueHex(settings.hueColumnTitle ?? settings.hueText ?? 225, columnTitleL);
-  const colorColumnTitleThreshold = clamp(settings.columnTitleContrastThreshold ?? 18, 0, 100);
+  const colorTextContrastThreshold = clamp(settings.textContrastThreshold ?? 18, 0, 100);
   // Bold/Italic/Italic each shift up to ±50% away from Text lightness.
   const boldL = clamp(textL + (settings.boldLightnessDelta ?? 0), 0, 100);
   const italicStarL = clamp(textL + (settings.italicStarLightnessDelta ?? 0), 0, 100);
@@ -190,7 +188,6 @@ export function buildConfig(settings: KanbanSettings): KanbanConfig {
       (settings.kanban || []).map((tag, i) => [normalizeTag(tag), (settings.columnMaxCards || [])[i] || 0])
     ),
     colorColumnOverLimit: generalHex(settings.hueColumnOverLimit) || "#5c1a1a",
-    colorCardBg: hueHex(settings.hueCardBg, cardBgL),
     colorColumnBg: generalHex(settings.hueColumnBg),
     colorAccent: generalHex(settings.hueAccent),
     colorFamilySelf: generalHex(settings.hueFamilySelf) || "#e03e3e",
@@ -199,7 +196,7 @@ export function buildConfig(settings: KanbanSettings): KanbanConfig {
     fontDate: settings.fontDate || "monospace",
     colorText: textHex(settings.hueText),
     colorColumnTitleDark,
-    colorColumnTitleThreshold,
+    colorTextContrastThreshold,
     columnTitleShadowLength: clamp(settings.columnTitleShadowLength ?? 2, 0, 10),
     colorLink: textHex(settings.hueLink),
     colorDate: textHex(settings.hueDate) || "#7ab8e8",
@@ -2594,7 +2591,7 @@ function showCardColorDialog(
 
   dialog.innerHTML = `
     <h3 style="margin:0 0 12px;font-size:1.1em;">Highlight card</h3>
-    <div id="k-color-preview" style="width:100%;height:44px;border-radius:8px;margin-bottom:14px;border:1px solid var(--background-modifier-border);"></div>
+    <div id="k-color-preview" style="width:100%;height:44px;border-radius:8px;margin-bottom:14px;background:var(--kb-card-bg,var(--background-secondary));"></div>
     <div id="k-color-swatches" style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-bottom:14px;">${swatchesHtml}</div>
     <div id="k-color-actions" style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">${buttonHtml("Apply", true)}${buttonHtml("Cancel", false)}</div>`;
 
@@ -2606,7 +2603,12 @@ function showCardColorDialog(
     selectedHue === -2 ? CARD_COLOR_WHITE :
     selectedHue === -1 ? CARD_COLOR_GRAY :
     hslToHex(selectedHue, CARD_COLOR_SATURATION, CARD_COLOR_LIGHTNESS);
-  const updatePreview = () => { preview.style.background = currentHex(); };
+  const updatePreview = () => {
+    const hex = currentHex();
+    const { h, s, l } = hexToHsl(hex);
+    preview.style.border = `6px solid ${hslToHex(h, s, l / 2)}`;
+    preview.style.background = hex;
+  };
   updatePreview();
 
   swatchWrap.addEventListener("click", (e) => {
@@ -2787,7 +2789,28 @@ function createCardHTML(
   const TITLE_LINE_H = 1.5; // em
   const iconSpacer = (width: number) =>
     `<span aria-hidden="true" style="float:right;width:${width}px;height:${TITLE_LINE_H}em;"></span>`;
-  const titleStyle = `padding:6px 0;font-weight:${TITLE_FONT_WEIGHT};color:var(--kb-text);text-align:left;line-height:${TITLE_LINE_H};${
+
+  // A card's chosen highlight color always wins over the structural
+  // border/background rules below. The card fill uses the full color; the
+  // frame uses a half-lightness (darker) shade of the same color; and the
+  // title/meta text switches to white using the same threshold as column
+  // titles, so it stays readable against the fill. Computed here (before
+  // titleStyle/badge) so those explicit per-element colors — which would
+  // otherwise block inheritance from the card wrapper below — pick it up too.
+  const cardColor = extractCardColor(item.item.text);
+  let frameColor = "";
+  let textColor = "var(--kb-text)";
+  if (cardColor) {
+    const { h, s, l } = hexToHsl(cardColor);
+    frameColor = hslToHex(h, s, l / 2);
+    const configuredDarkText = (config.colorText && config.colorText.trim()) ? config.colorText.trim() : "#1a1a1a";
+    textColor = columnTitleTextColor(cardColor, configuredDarkText, config.colorColumnTitleDark, config.colorTextContrastThreshold);
+  }
+  const colorStyle = cardColor
+    ? `border:6px solid ${frameColor}!important;background:${cardColor}!important;color:${textColor}!important;`
+    : "";
+
+  const titleStyle = `padding:6px 0;font-weight:${TITLE_FONT_WEIGHT};color:${textColor};text-align:left;line-height:${TITLE_LINE_H};${
     config.fontSizeCardTitle ? `font-size:${config.fontSizeCardTitle};` : ""
   }`;
 
@@ -2815,16 +2838,9 @@ function createCardHTML(
       ? `border:2px solid var(--kb-children-done);background:color-mix(in srgb,var(--kb-children-done) 20%,var(--kb-card-bg));`
       : "border:1px solid var(--background-modifier-border);";
 
-  // A card's chosen highlight color always wins over the structural
-  // background rules above.
-  const cardColor = extractCardColor(item.item.text);
-  const colorStyle = cardColor
-    ? `background:${cardColor}!important;color:${textOnBg(cardColor, "#ffffff", (config.colorText && config.colorText.trim()) ? config.colorText.trim() : "#1a1a1a")}!important;`
-    : "";
-
   const src = item.source.path.split("/").pop().replace(/\.md$/, "");
   const href = `obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(item.filePath)}`;
-  const badge = `<div style="margin-top:8px;font-size:.8em;color:var(--kb-text);">
+  const badge = `<div style="margin-top:8px;font-size:.8em;color:${textColor};">
     from: <a href="${href}" style="color:var(--kb-link);text-decoration:none;">${src}</a></div>`;
 
   const lastSubLn = maxSubLine(item.item.subs) || item.item.line;
@@ -2881,34 +2897,56 @@ function textOnBg(bgHex: string, lightText: string, darkText: string): string {
   return hexLuminance(bgHex) > 0.179 ? darkText : lightText;
 }
 
-// How much a same-hue background shrinks the effective luminance
-// difference before comparing against the threshold (0 = hue never
-// matters, 1 = a same-hue background at matching luminance always reads as
-// zero contrast). Scaled by how saturated the background actually is, so a
-// gray background isn't treated as "same hue" as anything.
-const COLUMN_TITLE_HUE_PENALTY = 0.5;
+// APCA (Accessible Perceptual Contrast Algorithm) — the WCAG 3 candidate
+// replacement for the 2.x luminance-ratio contrast formula, and the
+// standards-track answer to "are these two colors distinguishable enough to
+// read." Unlike a Hue/Lightness heuristic, it's purely a function of
+// (gamma-corrected) luminance — hue plays no part in real text legibility.
+// Constants and formula are the reference implementation, W3-licensed:
+// https://github.com/Myndex/apca-w3 (SA98G / "0.1.9" G-4g constants).
+const APCA = {
+  sRco: 0.2126729, sGco: 0.7151522, sBco: 0.0721750,
+  normBG: 0.56, normTXT: 0.57, revBG: 0.65, revTXT: 0.62,
+  blkThrs: 0.022, blkClmp: 1.414,
+  scale: 1.14, loBoWoffset: 0.027, loWoBoffset: 0.027,
+  deltaYmin: 0.0005, loClip: 0.1,
+};
 
-// Column title text color for a given column background: `darkColor` (the
-// user's chosen dark, hue-selectable color) unless it's too similar to the
-// background to read, in which case white is used instead. Similarity is
-// luminance difference, reduced when the background's hue is close to
-// `darkColor`'s own hue — e.g. blue-on-blue reads as less contrasty than
-// blue-on-red at the same luminance difference, so it should switch to
-// white sooner. `thresholdPct` (0-100) is the minimum (hue-adjusted)
-// luminance difference required to keep using `darkColor` — 0 never
-// switches to white, 100 always does. Falls back to `fallback` (e.g. the
-// general Font color) when there's no literal background hex to check.
+// sRGB hex color to APCA's "Y" luminance (0-1).
+function sRGBtoY(hex: string): number {
+  const clean = hex.replace(/^#/, "");
+  const chan = (h: string) => Math.pow(parseInt(h, 16) / 255, 2.4);
+  return APCA.sRco * chan(clean.slice(0, 2)) + APCA.sGco * chan(clean.slice(2, 4)) + APCA.sBco * chan(clean.slice(4, 6));
+}
+
+// APCA Lc contrast between text-Y and background-Y: signed, positive for
+// dark-on-light and negative for light-on-dark, roughly ±0-108. Order
+// matters — swapping text/background changes the result (polarity).
+function apcaLc(txtY: number, bgY: number): number {
+  const soften = (y: number) => (y > APCA.blkThrs ? y : y + Math.pow(APCA.blkThrs - y, APCA.blkClmp));
+  txtY = soften(txtY);
+  bgY = soften(bgY);
+  if (Math.abs(bgY - txtY) < APCA.deltaYmin) return 0;
+  if (bgY > txtY) {
+    const sapc = (Math.pow(bgY, APCA.normBG) - Math.pow(txtY, APCA.normTXT)) * APCA.scale;
+    return (sapc < APCA.loClip ? 0 : sapc - APCA.loBoWoffset) * 100;
+  }
+  const sapc = (Math.pow(bgY, APCA.revBG) - Math.pow(txtY, APCA.revTXT)) * APCA.scale;
+  return (sapc > -APCA.loClip ? 0 : sapc + APCA.loWoBoffset) * 100;
+}
+
+// Column title text color for a given background: `darkColor` (the user's
+// chosen dark, hue-selectable color) unless its APCA contrast against the
+// background is too weak to read, in which case white is used instead.
+// `thresholdPct` is used directly as the minimum required |Lc| (APCA's own
+// scale is ~0-108, not a percentage — see https://apcacontrast.com; Lc 45 is
+// APCA's documented minimum for bold/large text, Lc 60 for body text). 0
+// never switches to white, 108 always does. Falls back to `fallback` (e.g.
+// the general Font color) when there's no literal background hex to check.
 function columnTitleTextColor(bgHex: string, fallback: string, darkColor: string, thresholdPct: number): string {
   if (!bgHex) return fallback;
-  const lumDiff = Math.abs(hexLuminance(bgHex) - hexLuminance(darkColor));
-  const bgHsl = hexToHsl(bgHex);
-  const darkHue = hexToHsl(darkColor).h;
-  const rawHueDiff = Math.abs(bgHsl.h - darkHue);
-  const hueDiff = Math.min(rawHueDiff, 360 - rawHueDiff); // 0 (same) - 180 (opposite)
-  const hueSimilarity = 1 - hueDiff / 180;
-  const bgSatFactor = bgHsl.s / 100;
-  const adjustedDiff = lumDiff * (1 - COLUMN_TITLE_HUE_PENALTY * hueSimilarity * bgSatFactor);
-  return adjustedDiff < clamp(thresholdPct, 0, 100) / 100 ? "#ffffff" : darkColor;
+  const lc = apcaLc(sRGBtoY(darkColor), sRGBtoY(bgHex));
+  return Math.abs(lc) < clamp(thresholdPct, 0, 108) ? "#ffffff" : darkColor;
 }
 
 export function clamp(v: number, min: number, max: number): number {
@@ -2956,7 +2994,7 @@ function buildColorCSS(config: KanbanConfig): string {
   const perColRules = Object.entries(config.columnColors)
     .filter(([, c]) => c)
     .map(([norm, color]) => {
-      const text = columnTitleTextColor(color, configuredDarkText, config.colorColumnTitleDark, config.colorColumnTitleThreshold);
+      const text = columnTitleTextColor(color, configuredDarkText, config.colorColumnTitleDark, config.colorTextContrastThreshold);
       return `
       #kanban-wrapper [data-col-container="${norm}"]{background:${color};}
       #kanban-wrapper [data-col-norm="${norm}"]{background:${color};color:${text};}
@@ -2965,7 +3003,7 @@ function buildColorCSS(config: KanbanConfig): string {
   return `
     :root{--kb-dialog-text:${cv(config.colorText,"var(--text-normal)")};--kb-dialog-muted:${cv(config.colorText,"var(--text-muted)")}}
     #kanban-wrapper{
-      --kb-card-bg:${cv(config.colorCardBg,"var(--background-secondary)")};
+      --kb-card-bg:#ffffff;
       --kb-col-bg:${cv(config.colorColumnBg,"var(--background-secondary)")};
       --kb-text:${cv(config.colorText,"var(--text-normal)")};
       --kb-accent:${cv(config.colorAccent,"var(--interactive-accent)")};
@@ -3090,7 +3128,7 @@ function buildColumnHeader(norm: string, col: { rawTag: string; cards: any[] }, 
   header.className = "kb-col-header";
   header.style.cssText = "display:flex;align-items:center;margin-bottom:10px;padding:0 4px;";
 
-  const titleColor = columnTitleTextColor(config.columnColors[norm] || "", "var(--kb-text)", config.colorColumnTitleDark, config.colorColumnTitleThreshold);
+  const titleColor = columnTitleTextColor(config.columnColors[norm] || "", "var(--kb-text)", config.colorColumnTitleDark, config.colorTextContrastThreshold);
   const shadowLen = config.columnTitleShadowLength;
   const titleShadow = shadowLen > 0 && titleColor.toLowerCase() !== "#ffffff"
     ? `text-shadow:${shadowLen}px ${shadowLen}px ${shadowLen / 2}px rgba(255,255,255,0.9);`

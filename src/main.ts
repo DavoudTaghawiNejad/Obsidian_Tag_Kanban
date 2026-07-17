@@ -26,11 +26,6 @@ export interface KanbanSettings {
   colorLightness: number;
   hueColumnOverLimit: number;
   hueAllChildrenDone: number;
-  // Card background has its own independent Lightness (default 100 = white,
-  // regardless of Hue/Saturation), so it stays white by default instead of
-  // following the general Lightness like other backgrounds.
-  hueCardBg: number | null;
-  lightnessCardBg: number;
   hueColumnBg: number | null;
   hueAccent: number | null;
   hueFamilySelf: number;
@@ -59,10 +54,11 @@ export interface KanbanSettings {
   // for this dark color to read. null hue → use Font color's current Hue.
   hueColumnTitle: number | null;
   lightnessColumnTitle: number;
-  // 0-100: minimum luminance difference (as a %) required between a
-  // column's background and the dark title color before white is used
-  // instead. 0 = never switch to white, 100 = always switch.
-  columnTitleContrastThreshold: number;
+  // Minimum required APCA Lc contrast (0-108, not a percentage — see
+  // https://apcacontrast.com) between a background and the dark text color
+  // above before white is used instead. 0 = never switch to white, 108 =
+  // always switch. Shared by column titles and card highlight text.
+  textContrastThreshold: number;
   // Length (px) of a directional white shadow behind the column title text,
   // as if lit from the top-left (so it falls toward the bottom-right). 0 =
   // no shadow. Skipped when the title itself resolved to white.
@@ -109,8 +105,6 @@ export const DEFAULT_COLORS = {
   textLightness: 30,
   hueColumnOverLimit: 0,
   hueAllChildrenDone: 6,
-  hueCardBg: 0,
-  lightnessCardBg: 100,
   hueColumnBg: 345,
   hueAccent: 237,
   hueFamilySelf: 55,
@@ -129,7 +123,7 @@ export const DEFAULT_COLORS = {
   hueDate: 244,
   hueColumnTitle: 225,
   lightnessColumnTitle: 10,
-  columnTitleContrastThreshold: 18,
+  textContrastThreshold: 45,
   columnTitleShadowLength: 2,
   hueDoneColumn: 345,
   hueDueColumn: 345,
@@ -795,21 +789,12 @@ class KanbanSettingTab extends PluginSettingTab {
     plainSlider(
       containerEl,
       "Lightness",
-      "Shared lightness for every color choice below except text colors and Card background, which have their own Lightness instead.",
+      "Shared lightness for every color choice below except text colors, which have their own Lightness instead.",
       () => s.colorLightness,
       (v) => { s.colorLightness = v; },
       "kb-lightness"
     );
 
-    plainSlider(
-      containerEl,
-      "Card background lightness",
-      "Independent of the general Lightness above, so cards default to white (100) instead of following it.",
-      () => s.lightnessCardBg,
-      (v) => { s.lightnessCardBg = v; },
-      "kb-lightness"
-    );
-    hueSetting(containerEl, "Card background", "Background color of each card. At Lightness 100 (default), always white regardless of Hue.", () => s.hueCardBg, (v) => { s.hueCardBg = v; }, s.lightnessCardBg, { nullable: true });
     hueSetting(containerEl, "Column background", "Base column background, drawn before the per-column color applies. Every column now always resolves a color via Active/Non-active, so this rarely shows through.", () => s.hueColumnBg, (v) => { s.hueColumnBg = v; }, s.colorLightness, { nullable: true });
     hueSetting(containerEl, "Accent / symbol color", "Color for ▶ promote, ▲/▼ expand, active column tab, and drag highlight.", () => s.hueAccent, (v) => { s.hueAccent = v; }, s.colorLightness, { nullable: true });
 
@@ -852,11 +837,12 @@ class KanbanSettingTab extends PluginSettingTab {
       );
       plainSlider(
         box,
-        "Column title contrast threshold",
-        "How different a column's background needs to be from the dark color above before switching to white for that column. 0 = never switch, 100 = always switch. A background with a similar hue to the dark color (e.g. blue on blue) switches to white sooner than a same-luminance but different-hue background (e.g. blue on red).",
-        () => s.columnTitleContrastThreshold,
-        (v) => { s.columnTitleContrastThreshold = v; },
-        "kb-saturation"
+        "Text contrast threshold",
+        "Minimum required APCA Lc contrast (see apcacontrast.com) between a background and the dark color above before switching to white — shared by column titles and card highlight text. 0 = never switch, 108 = always switch. Lc 45 (default) is APCA's documented minimum for bold/large text like these titles; Lc 60 is its minimum for body text.",
+        () => s.textContrastThreshold,
+        (v) => { s.textContrastThreshold = v; },
+        "kb-saturation",
+        [0, 108]
       );
       plainSlider(
         box,
