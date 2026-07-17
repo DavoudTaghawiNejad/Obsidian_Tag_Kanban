@@ -2694,6 +2694,22 @@ function createCardHTML(
   </div>`;
 }
 
+// Parses createCardHTML's output into a real (detached) element, for the
+// reconciler below to insert/compare/replace without going through
+// zone.innerHTML += (which re-parses every already-appended card each time).
+function createCardNode(
+  item: any,
+  isMulti: boolean,
+  currentNorm: string,
+  config: KanbanConfig,
+  vaultName: string,
+  doc: Document
+): HTMLElement {
+  const wrap = doc.createElement("div");
+  wrap.innerHTML = createCardHTML(item, isMulti, currentNorm, config, vaultName);
+  return wrap.firstElementChild as HTMLElement;
+}
+
 // ─── BOARD BUILD ─────────────────────────────────────────────────────────────
 
 function hexLuminance(hex: string): number {
@@ -2902,6 +2918,251 @@ export function isNarrowLayout(width: number): boolean {
   return isPhone || width < KANBAN_NARROW_BREAKPOINT;
 }
 
+// ─── BOARD RECONCILIATION ─────────────────────────────────────────────────────
+// Instead of tearing down and rebuilding the whole board on every render
+// (every column, every card — a visible flash for a change to exactly one
+// card), buildBoard diffs the freshly computed columns/cards against the DOM
+// nodes already on screen (matched by data-col-container / data-file+line)
+// and applies only the add/remove/move/update operations actually needed.
+// Every render trigger (drag, add, edit, external file change, settings
+// change, ...) goes through this same path — none of the action handlers in
+// attachListeners needed to change.
+
+// Header contents depend only on (norm, col, config) — rebuilt fresh and
+// swapped in whole rather than patched field-by-field, since it holds no
+// per-element state worth preserving (no focus/open/scroll state lives here).
+function buildColumnHeader(norm: string, col: { rawTag: string; cards: any[] }, config: KanbanConfig, doc: Document): HTMLElement {
+  const header = doc.createElement("div");
+  header.className = "kb-col-header";
+  header.style.cssText = "display:flex;align-items:center;margin-bottom:10px;padding:0 4px;";
+
+  const titleColor = columnTitleTextColor(config.columnColors[norm] || "", "var(--kb-text)", config.colorColumnTitleDark, config.colorColumnTitleThreshold);
+  const shadowLen = config.columnTitleShadowLength;
+  const titleShadow = shadowLen > 0 && titleColor.toLowerCase() !== "#ffffff"
+    ? `text-shadow:${shadowLen}px ${shadowLen}px ${shadowLen / 2}px rgba(255,255,255,0.9);`
+    : "";
+
+  const h4 = doc.createElement("h4");
+  h4.textContent = col.rawTag.replace(/^#/, "").toUpperCase();
+  h4.style.cssText = `margin:0;flex-grow:1;font-weight:bold;color:${titleColor};${titleShadow}${
+    config.fontSizeColumnTitle ? `font-size:${config.fontSizeColumnTitle};` : ""
+  }`;
+  header.appendChild(h4);
+
+  const countSpan = doc.createElement("span");
+  countSpan.className = "kb-col-count";
+  countSpan.textContent = String(col.cards.length);
+  countSpan.style.cssText = `margin-right:6px;font-size:.75em;color:${titleColor};background:transparent;border:1px solid var(--background-modifier-border);border-radius:50%;width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;`;
+  header.appendChild(countSpan);
+
+  const btn = doc.createElement("button");
+  btn.className = "kb-col-add-btn";
+  (btn as HTMLButtonElement).dataset.column = norm;
+  if (norm !== config.normDone) {
+    btn.textContent = "+";
+    btn.style.cssText = `width:24px;height:24px;border-radius:50%;border:1px solid var(--background-modifier-border);background:none;cursor:pointer;display:flex;align-items:center;justify-content:center;color:${titleColor};`;
+    (btn as HTMLButtonElement).dataset.tag = col.rawTag;
+  } else {
+    btn.textContent = "Archive";
+    btn.style.cssText = `height:24px;padding:0 8px;border-radius:12px;border:1px solid var(--background-modifier-border);background:none;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:0.75em;color:${titleColor};`;
+  }
+  header.appendChild(btn);
+
+  return header;
+}
+
+// Creates a new column container (shell only — header + empty drop-zone, no
+// cards/insert-slots yet) and appends it to scroll. Used only the first time
+// a given norm appears; reconcileColumns reuses the container on every
+// subsequent render instead of calling this again.
+function buildColumnShell(
+  scroll: HTMLElement,
+  norm: string,
+  col: { rawTag: string; cards: any[] },
+  doc: Document
+): { colDiv: HTMLElement; zone: HTMLElement } {
+  const colDiv = doc.createElement("div");
+  colDiv.dataset.colContainer = norm;
+  scroll.appendChild(colDiv);
+
+  // Placeholder — updateColumnChrome (always called right after, for both
+  // new and reused columns) replaces this with a real header immediately.
+  const headerPlaceholder = doc.createElement("div");
+  headerPlaceholder.className = "kb-col-header";
+  colDiv.appendChild(headerPlaceholder);
+
+  const zone = doc.createElement("div");
+  zone.className = `drop-zone drop-zone-${norm}`;
+  zone.style.cssText = "min-height:200px;border:2px dashed var(--background-modifier-border);border-right:none;border-radius:0;padding:5px;flex-grow:1;display:flex;flex-direction:column;";
+  colDiv.appendChild(zone);
+
+  return { colDiv, zone };
+}
+
+// Applies (or re-applies) the column's own layout style (narrow/wide,
+// narrow-mode active/inactive visibility), the over-limit warning flag, and
+// a freshly built header — run on every column on every render, new or
+// reused, since any of these can change without the column itself being new
+// (a resize, a settings change, a card crossing the max-count threshold).
+function updateColumnChrome(
+  colDiv: HTMLElement,
+  norm: string,
+  col: { rawTag: string; cards: any[] },
+  config: KanbanConfig,
+  isNarrow: boolean,
+  activeNorm: string,
+  doc: Document
+): void {
+  const colStyle = isNarrow
+    ? `width:calc(100% - 16px);margin:0 8px 20px;padding:10px;`
+    : `flex:1;min-width:200px;max-width:260px;padding:10px 0 10px 0;margin:0;display:flex;flex-direction:column;`;
+  // Narrow mode never set an explicit `display` before (every column but the
+  // active one simply didn't exist) — matching that means "block" (a div's
+  // default), not "flex", for the visible one; only "none" is new here.
+  colDiv.style.cssText = colStyle + (isNarrow ? `display:${norm === activeNorm ? "block" : "none"};` : "");
+
+  const colMax = config.columnMaxCards[norm] || 0;
+  if (colMax > 0 && col.cards.length > colMax) colDiv.dataset.colOverlimit = "1";
+  else delete colDiv.dataset.colOverlimit;
+
+  const oldHeader = colDiv.querySelector(":scope > .kb-col-header");
+  const newHeader = buildColumnHeader(norm, col, config, doc);
+  if (oldHeader) oldHeader.replaceWith(newHeader);
+  else colDiv.insertBefore(newHeader, colDiv.firstChild);
+}
+
+// Reconciles one column's cards against its drop-zone's current DOM,
+// matched by "filePath:line". Cards whose rendered HTML hasn't changed are
+// left completely untouched; changed ones are regenerated (via the same
+// createCardHTML used for a full build, so there's no separate diffing rule
+// to keep in sync) and swapped in place; gone ones are removed; new ones are
+// created. Comparing normalized outerHTML-to-outerHTML (not raw string vs
+// DOM) avoids false "changed" positives from the browser's own HTML
+// normalization on parse.
+function reconcileZoneCards(
+  zone: HTMLElement,
+  cards: any[],
+  norm: string,
+  config: KanbanConfig,
+  vaultName: string,
+  doc: Document
+): void {
+  const existing = new Map<string, HTMLElement>();
+  zone.querySelectorAll<HTMLElement>(":scope > .kanban-card").forEach((el) => {
+    existing.set(`${el.dataset.file}:${el.dataset.line}`, el);
+  });
+
+  const seen = new Set<string>();
+  for (const card of cards) {
+    const key = `${card.filePath}:${card.item.line}`;
+    seen.add(key);
+    const current = existing.get(key);
+    const fresh = createCardNode(card, card.multiTag, norm, config, vaultName, doc);
+    let node: HTMLElement;
+    if (current && current.outerHTML === fresh.outerHTML) {
+      node = current;
+    } else {
+      if (current) current.replaceWith(fresh);
+      node = fresh;
+    }
+    zone.appendChild(node); // (re)positions into final order; a no-op if already last
+  }
+
+  for (const [key, el] of existing) {
+    if (!seen.has(key)) el.remove();
+  }
+
+  // Insert-slots are cheap and stateless (drop-target hit-testing only) —
+  // simplest to just rebuild them fresh rather than diff them too.
+  zone.querySelectorAll(".insert-slot").forEach((s) => s.remove());
+  const insertSlot = (idx: number) => {
+    const s = doc.createElement("div");
+    s.className = "insert-slot";
+    s.style.cssText = "height:0;border-top:2px dashed transparent;width:100%";
+    s.dataset.index = String(idx);
+    return s;
+  };
+  const cardEls = Array.from(zone.querySelectorAll<HTMLElement>(":scope > .kanban-card"));
+  if (cardEls.length > 0) zone.insertBefore(insertSlot(0), cardEls[0]);
+  cardEls.forEach((el, i) => {
+    if (i < cardEls.length - 1) zone.insertBefore(insertSlot(i + 1), cardEls[i + 1]);
+  });
+  zone.appendChild(insertSlot(cardEls.length));
+}
+
+// Reconciles every column against scroll's current DOM: removes columns no
+// longer present (e.g. the due column just emptied), creates newly-present
+// ones (e.g. the due column just got its first card), and keeps the rest in
+// place — then reconciles each column's own cards. Always builds/reconciles
+// every column, even in narrow mode (unlike the old behavior of only ever
+// building the active column's DOM) — visibility is CSS-only, via
+// updateColumnChrome — so switching tabs never needs a rebuild either.
+function reconcileColumns(
+  scroll: HTMLElement,
+  columns: Record<string, { rawTag: string; cards: any[] }>,
+  allNorms: string[],
+  activeNorm: string,
+  isNarrow: boolean,
+  config: KanbanConfig,
+  vaultName: string,
+  doc: Document
+): void {
+  let tabBar = scroll.querySelector<HTMLElement>(":scope > .kb-tab-bar");
+  if (isNarrow) {
+    if (!tabBar) {
+      tabBar = doc.createElement("div");
+      tabBar.className = "kb-tab-bar";
+      scroll.insertBefore(tabBar, scroll.firstChild);
+    } else {
+      tabBar.innerHTML = "";
+      scroll.insertBefore(tabBar, scroll.firstChild);
+    }
+    tabBar.style.cssText = "display:flex;gap:6px;flex-wrap:wrap;padding:4px 8px 14px;width:100%;box-sizing:border-box;touch-action:none;";
+    for (const norm of allNorms) {
+      const col = columns[norm];
+      const tab = doc.createElement("button");
+      tab.textContent = col.rawTag.replace(/^#/, "").toUpperCase();
+      tab.style.cssText = `min-height:44px;padding:8px 18px;border-radius:22px;
+        border:1px solid var(--background-modifier-border);
+        font-size:.9em;cursor:pointer;
+        transition:transform .1s,outline .1s;touch-action:none;`;
+      (tab as HTMLButtonElement).dataset.colNorm = norm;
+      (tab as HTMLButtonElement).dataset.colActive = norm === activeNorm ? "1" : "0";
+      const tabMax = config.columnMaxCards[norm] || 0;
+      if (tabMax > 0 && col.cards.length > tabMax) (tab as HTMLButtonElement).dataset.colOverlimit = "1";
+      tabBar.appendChild(tab);
+    }
+  } else if (tabBar) {
+    tabBar.remove();
+  }
+
+  const existingCols = new Map<string, HTMLElement>();
+  scroll.querySelectorAll<HTMLElement>(":scope > [data-col-container]").forEach((el) => {
+    existingCols.set(el.dataset.colContainer!, el);
+  });
+
+  for (const [norm, el] of existingCols) {
+    if (!allNorms.includes(norm)) el.remove();
+  }
+
+  for (const norm of allNorms) {
+    const col = columns[norm];
+    let colDiv = existingCols.get(norm) ?? null;
+    let zone: HTMLElement;
+    if (!colDiv) {
+      const built = buildColumnShell(scroll, norm, col, doc);
+      colDiv = built.colDiv;
+      zone = built.zone;
+    } else {
+      zone = colDiv.querySelector(".drop-zone") as HTMLElement;
+    }
+    scroll.appendChild(colDiv); // (re)positions into allNorms order; a no-op if already last
+
+    updateColumnChrome(colDiv, norm, col, config, isNarrow, activeNorm, doc);
+    reconcileZoneCards(zone, col.cards, norm, config, vaultName, doc);
+  }
+}
+
 export async function buildBoard(
   app: App,
   containerEl: HTMLElement,
@@ -3024,17 +3285,23 @@ export async function buildBoard(
         #kanban-scroll>div{flex:none!important;width:calc(100% - 16px)!important;max-width:none!important;margin:0 8px 16px!important;}
       }`;
 
-  // Build DOM
-  const wrapper = containerEl.createEl("div", {
-    attr: { id: "kanban-wrapper" },
-  });
-  const scroll = wrapper.createEl("div", {
-    attr: {
-      id: "kanban-scroll",
-      style:
-        "display:flex;overflow-x:auto;gap:0;padding:12px 0;-webkit-overflow-scrolling:touch;",
-    },
-  });
+  // Build (first render) or reuse (every render since) the wrapper/scroll —
+  // reused so reconcileColumns below can diff against what's already on
+  // screen instead of starting from nothing.
+  let wrapper = containerEl.querySelector<HTMLElement>("#kanban-wrapper");
+  let scroll: HTMLElement;
+  if (!wrapper) {
+    wrapper = containerEl.createEl("div", { attr: { id: "kanban-wrapper" } });
+    scroll = wrapper.createEl("div", {
+      attr: {
+        id: "kanban-scroll",
+        style:
+          "display:flex;overflow-x:auto;gap:0;padding:12px 0;-webkit-overflow-scrolling:touch;",
+      },
+    });
+  } else {
+    scroll = wrapper.querySelector<HTMLElement>("#kanban-scroll")!;
+  }
 
   const isNarrow = isNarrowLayout(
     wrapper.clientWidth > 0 ? wrapper.clientWidth : window.innerWidth
@@ -3049,125 +3316,19 @@ export async function buildBoard(
   let activeNorm = (savedActiveCol && allNorms.includes(savedActiveCol)) ? savedActiveCol : config.normStart;
   if (!allNorms.includes(activeNorm)) activeNorm = allNorms[0];
 
-  if (isNarrow) {
-    const tabBar = scroll.createEl("div", {
+  reconcileColumns(scroll, columns, allNorms, activeNorm, isNarrow, config, vaultName, boardDoc);
+
+  let statusEl = wrapper.querySelector<HTMLElement>("#kanban-status");
+  if (!statusEl) {
+    statusEl = wrapper.createEl("p", {
       attr: {
+        id: "kanban-status",
         style:
-          "display:flex;gap:6px;flex-wrap:wrap;padding:4px 8px 14px;width:100%;box-sizing:border-box;touch-action:none;",
+          "margin-top:20px;text-align:center;color:var(--text-muted);font-size:.9em;",
       },
     });
-    for (const norm of allNorms) {
-      const col = columns[norm];
-      const isActive = norm === activeNorm;
-      const tab = tabBar.createEl("button", {
-        text: col.rawTag.replace(/^#/, "").toUpperCase(),
-        attr: {
-          style: `min-height:44px;padding:8px 18px;border-radius:22px;
-            border:1px solid var(--background-modifier-border);
-            font-size:.9em;cursor:pointer;
-            transition:transform .1s,outline .1s;touch-action:none;`,
-        },
-      });
-      (tab as HTMLButtonElement).dataset.colNorm = norm;
-      (tab as HTMLButtonElement).dataset.colActive = isActive ? "1" : "0";
-      const tabMax = config.columnMaxCards[norm] || 0;
-      if (tabMax > 0 && col.cards.length > tabMax) {
-        (tab as HTMLButtonElement).dataset.colOverlimit = "1";
-      }
-    }
   }
-
-  const colKeys = isNarrow ? [activeNorm] : allNorms;
-
-  for (const norm of colKeys) {
-    const col = columns[norm];
-    if (!col) continue;
-
-    const colStyle = isNarrow
-      ? `width:calc(100% - 16px);margin:0 8px 20px;padding:10px;`
-      : `flex:1;min-width:200px;max-width:260px;padding:10px 0 10px 0;margin:0;display:flex;flex-direction:column;`;
-    const colMax = config.columnMaxCards[norm] || 0;
-    const colAttr: Record<string, string> = { style: colStyle, "data-col-container": norm };
-    if (colMax > 0 && col.cards.length > colMax) colAttr["data-col-overlimit"] = "1";
-    const colDiv = scroll.createEl("div", { attr: colAttr });
-
-    const header = colDiv.createEl("div", {
-      attr: { style: "display:flex;align-items:center;margin-bottom:10px;padding:0 4px;" },
-    });
-    const titleColor = columnTitleTextColor(config.columnColors[norm] || "", "var(--kb-text)", config.colorColumnTitleDark, config.colorColumnTitleThreshold);
-    // Light from the top-left casts the shadow toward the bottom-right.
-    const shadowLen = config.columnTitleShadowLength;
-    const titleShadow = shadowLen > 0 && titleColor.toLowerCase() !== "#ffffff"
-      ? `text-shadow:${shadowLen}px ${shadowLen}px ${shadowLen / 2}px rgba(255,255,255,0.9);`
-      : "";
-    header.createEl("h4", {
-      text: col.rawTag.replace(/^#/, "").toUpperCase(),
-      attr: {
-        style: `margin:0;flex-grow:1;font-weight:bold;color:${titleColor};${titleShadow}${
-          config.fontSizeColumnTitle ? `font-size:${config.fontSizeColumnTitle};` : ""
-        }`,
-      },
-    });
-    header.createEl("span", {
-      text: String(col.cards.length),
-      attr: { class: "kb-col-count", style: `margin-right:6px;font-size:.75em;color:${titleColor};background:transparent;border:1px solid var(--background-modifier-border);border-radius:50%;width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;` },
-    });
-
-    if (norm !== config.normDone) {
-      const btn = header.createEl("button", {
-        text: "+",
-        attr: {
-          class: "kb-col-add-btn",
-          style:
-            `width:24px;height:24px;border-radius:50%;border:1px solid var(--background-modifier-border);background:none;cursor:pointer;display:flex;align-items:center;justify-content:center;color:${titleColor};`,
-        },
-      });
-      (btn as HTMLButtonElement).dataset.column = norm;
-      (btn as HTMLButtonElement).dataset.tag = col.rawTag;
-    } else {
-      const btn = header.createEl("button", {
-        text: "Archive",
-        attr: {
-          class: "kb-col-add-btn",
-          style:
-            `height:24px;padding:0 8px;border-radius:12px;border:1px solid var(--background-modifier-border);background:none;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:0.75em;color:${titleColor};`,
-        },
-      });
-      (btn as HTMLButtonElement).dataset.column = norm;
-    }
-
-    const zone = colDiv.createEl("div", {
-      attr: {
-        class: `drop-zone drop-zone-${norm}`,
-        style:
-          "min-height:200px;border:2px dashed var(--background-modifier-border);border-right:none;border-radius:0;padding:5px;flex-grow:1;display:flex;flex-direction:column;",
-      },
-    });
-
-    const insertSlot = (idx: number) => {
-      const s = boardDoc.createElement("div");
-      s.className = "insert-slot";
-      s.style.cssText = "height:0;border-top:2px dashed transparent;width:100%";
-      s.dataset.index = String(idx);
-      return s;
-    };
-
-    if (col.cards.length > 0) zone.appendChild(insertSlot(0));
-    col.cards.forEach((card: any, i: number) => {
-      zone.innerHTML += createCardHTML(card, card.multiTag, norm, config, vaultName);
-      if (i < col.cards.length - 1) zone.appendChild(insertSlot(i + 1));
-    });
-    zone.appendChild(insertSlot(col.cards.length));
-  }
-
-  wrapper.createEl("p", {
-    attr: {
-      id: "kanban-status",
-      style:
-        "margin-top:20px;text-align:center;color:var(--text-muted);font-size:.9em;",
-    },
-    text: `Found: ${items.length} items`,
-  });
+  statusEl.textContent = `Found: ${items.length} items`;
 }
 
 // ─── EVENT LISTENERS ──────────────────────────────────────────────────────────

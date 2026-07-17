@@ -107,25 +107,26 @@ export class KanbanView extends ItemView {
 
     const container = this.contentEl;
 
-    // Preserve horizontal scroll position across re-renders
-    const oldScroll = container.querySelector<HTMLElement>("#kanban-scroll");
-    const scrollLeft = oldScroll?.scrollLeft ?? 0;
-
     // Preserve active column selection across re-renders
     const savedActiveCol = container.querySelector<HTMLElement>("#kanban-wrapper")?.dataset.activeCol ?? null;
 
-    // Remove previous event listeners before rebuilding the DOM
+    // Remove previous event listeners before reconciling the DOM
     this.listenerCleanup?.();
     this.listenerCleanup = null;
-
-    container.empty();
 
     try {
       const error = validateConfig(this.plugin.settings);
       if (error) {
+        container.empty();
         this.renderError(container, error);
         return;
       }
+
+      // buildBoard reconciles against an existing #kanban-wrapper rather than
+      // rebuilding from scratch (that's what avoids the flash on every
+      // action) — only clear the container when there's nothing to reconcile
+      // against (first render, or recovering from a previous error state).
+      if (!container.querySelector("#kanban-wrapper")) container.empty();
 
       const config = buildConfig(this.plugin.settings);
       await buildBoard(this.app, container, config, savedActiveCol);
@@ -139,12 +140,9 @@ export class KanbanView extends ItemView {
           () => this.renderBoard()
         );
       }
-
-      // Restore scroll position
-      const newScroll = container.querySelector<HTMLElement>("#kanban-scroll");
-      if (newScroll && scrollLeft) newScroll.scrollLeft = scrollLeft;
     } catch (e: any) {
       console.error("Kanban render error:", e);
+      container.empty();
       this.renderError(container, e.message ?? String(e));
     } finally {
       this.isRefreshing = false;

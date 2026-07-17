@@ -2075,6 +2075,11 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
     ${badge}
   </div>`;
 }
+function createCardNode(item, isMulti, currentNorm, config, vaultName, doc) {
+  const wrap = doc.createElement("div");
+  wrap.innerHTML = createCardHTML(item, isMulti, currentNorm, config, vaultName);
+  return wrap.firstElementChild;
+}
 function hexLuminance(hex) {
   const clean = hex.replace(/^#/, "");
   const full = clean.length === 3 ? clean.split("").map((c) => c + c).join("") : clean;
@@ -2264,6 +2269,160 @@ function isNarrowLayout(width) {
   const isPhone = /iPhone|iPod|(Android.*Mobile)/i.test(navigator.userAgent);
   return isPhone || width < KANBAN_NARROW_BREAKPOINT;
 }
+function buildColumnHeader(norm, col, config, doc) {
+  const header = doc.createElement("div");
+  header.className = "kb-col-header";
+  header.style.cssText = "display:flex;align-items:center;margin-bottom:10px;padding:0 4px;";
+  const titleColor = columnTitleTextColor(config.columnColors[norm] || "", "var(--kb-text)", config.colorColumnTitleDark, config.colorColumnTitleThreshold);
+  const shadowLen = config.columnTitleShadowLength;
+  const titleShadow = shadowLen > 0 && titleColor.toLowerCase() !== "#ffffff" ? `text-shadow:${shadowLen}px ${shadowLen}px ${shadowLen / 2}px rgba(255,255,255,0.9);` : "";
+  const h4 = doc.createElement("h4");
+  h4.textContent = col.rawTag.replace(/^#/, "").toUpperCase();
+  h4.style.cssText = `margin:0;flex-grow:1;font-weight:bold;color:${titleColor};${titleShadow}${config.fontSizeColumnTitle ? `font-size:${config.fontSizeColumnTitle};` : ""}`;
+  header.appendChild(h4);
+  const countSpan = doc.createElement("span");
+  countSpan.className = "kb-col-count";
+  countSpan.textContent = String(col.cards.length);
+  countSpan.style.cssText = `margin-right:6px;font-size:.75em;color:${titleColor};background:transparent;border:1px solid var(--background-modifier-border);border-radius:50%;width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;`;
+  header.appendChild(countSpan);
+  const btn = doc.createElement("button");
+  btn.className = "kb-col-add-btn";
+  btn.dataset.column = norm;
+  if (norm !== config.normDone) {
+    btn.textContent = "+";
+    btn.style.cssText = `width:24px;height:24px;border-radius:50%;border:1px solid var(--background-modifier-border);background:none;cursor:pointer;display:flex;align-items:center;justify-content:center;color:${titleColor};`;
+    btn.dataset.tag = col.rawTag;
+  } else {
+    btn.textContent = "Archive";
+    btn.style.cssText = `height:24px;padding:0 8px;border-radius:12px;border:1px solid var(--background-modifier-border);background:none;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:0.75em;color:${titleColor};`;
+  }
+  header.appendChild(btn);
+  return header;
+}
+function buildColumnShell(scroll, norm, col, doc) {
+  const colDiv = doc.createElement("div");
+  colDiv.dataset.colContainer = norm;
+  scroll.appendChild(colDiv);
+  const headerPlaceholder = doc.createElement("div");
+  headerPlaceholder.className = "kb-col-header";
+  colDiv.appendChild(headerPlaceholder);
+  const zone = doc.createElement("div");
+  zone.className = `drop-zone drop-zone-${norm}`;
+  zone.style.cssText = "min-height:200px;border:2px dashed var(--background-modifier-border);border-right:none;border-radius:0;padding:5px;flex-grow:1;display:flex;flex-direction:column;";
+  colDiv.appendChild(zone);
+  return { colDiv, zone };
+}
+function updateColumnChrome(colDiv, norm, col, config, isNarrow, activeNorm, doc) {
+  const colStyle = isNarrow ? `width:calc(100% - 16px);margin:0 8px 20px;padding:10px;` : `flex:1;min-width:200px;max-width:260px;padding:10px 0 10px 0;margin:0;display:flex;flex-direction:column;`;
+  colDiv.style.cssText = colStyle + (isNarrow ? `display:${norm === activeNorm ? "block" : "none"};` : "");
+  const colMax = config.columnMaxCards[norm] || 0;
+  if (colMax > 0 && col.cards.length > colMax)
+    colDiv.dataset.colOverlimit = "1";
+  else
+    delete colDiv.dataset.colOverlimit;
+  const oldHeader = colDiv.querySelector(":scope > .kb-col-header");
+  const newHeader = buildColumnHeader(norm, col, config, doc);
+  if (oldHeader)
+    oldHeader.replaceWith(newHeader);
+  else
+    colDiv.insertBefore(newHeader, colDiv.firstChild);
+}
+function reconcileZoneCards(zone, cards, norm, config, vaultName, doc) {
+  const existing = /* @__PURE__ */ new Map();
+  zone.querySelectorAll(":scope > .kanban-card").forEach((el) => {
+    existing.set(`${el.dataset.file}:${el.dataset.line}`, el);
+  });
+  const seen = /* @__PURE__ */ new Set();
+  for (const card of cards) {
+    const key = `${card.filePath}:${card.item.line}`;
+    seen.add(key);
+    const current = existing.get(key);
+    const fresh = createCardNode(card, card.multiTag, norm, config, vaultName, doc);
+    let node;
+    if (current && current.outerHTML === fresh.outerHTML) {
+      node = current;
+    } else {
+      if (current)
+        current.replaceWith(fresh);
+      node = fresh;
+    }
+    zone.appendChild(node);
+  }
+  for (const [key, el] of existing) {
+    if (!seen.has(key))
+      el.remove();
+  }
+  zone.querySelectorAll(".insert-slot").forEach((s) => s.remove());
+  const insertSlot = (idx) => {
+    const s = doc.createElement("div");
+    s.className = "insert-slot";
+    s.style.cssText = "height:0;border-top:2px dashed transparent;width:100%";
+    s.dataset.index = String(idx);
+    return s;
+  };
+  const cardEls = Array.from(zone.querySelectorAll(":scope > .kanban-card"));
+  if (cardEls.length > 0)
+    zone.insertBefore(insertSlot(0), cardEls[0]);
+  cardEls.forEach((el, i) => {
+    if (i < cardEls.length - 1)
+      zone.insertBefore(insertSlot(i + 1), cardEls[i + 1]);
+  });
+  zone.appendChild(insertSlot(cardEls.length));
+}
+function reconcileColumns(scroll, columns, allNorms, activeNorm, isNarrow, config, vaultName, doc) {
+  let tabBar = scroll.querySelector(":scope > .kb-tab-bar");
+  if (isNarrow) {
+    if (!tabBar) {
+      tabBar = doc.createElement("div");
+      tabBar.className = "kb-tab-bar";
+      scroll.insertBefore(tabBar, scroll.firstChild);
+    } else {
+      tabBar.innerHTML = "";
+      scroll.insertBefore(tabBar, scroll.firstChild);
+    }
+    tabBar.style.cssText = "display:flex;gap:6px;flex-wrap:wrap;padding:4px 8px 14px;width:100%;box-sizing:border-box;touch-action:none;";
+    for (const norm of allNorms) {
+      const col = columns[norm];
+      const tab = doc.createElement("button");
+      tab.textContent = col.rawTag.replace(/^#/, "").toUpperCase();
+      tab.style.cssText = `min-height:44px;padding:8px 18px;border-radius:22px;
+        border:1px solid var(--background-modifier-border);
+        font-size:.9em;cursor:pointer;
+        transition:transform .1s,outline .1s;touch-action:none;`;
+      tab.dataset.colNorm = norm;
+      tab.dataset.colActive = norm === activeNorm ? "1" : "0";
+      const tabMax = config.columnMaxCards[norm] || 0;
+      if (tabMax > 0 && col.cards.length > tabMax)
+        tab.dataset.colOverlimit = "1";
+      tabBar.appendChild(tab);
+    }
+  } else if (tabBar) {
+    tabBar.remove();
+  }
+  const existingCols = /* @__PURE__ */ new Map();
+  scroll.querySelectorAll(":scope > [data-col-container]").forEach((el) => {
+    existingCols.set(el.dataset.colContainer, el);
+  });
+  for (const [norm, el] of existingCols) {
+    if (!allNorms.includes(norm))
+      el.remove();
+  }
+  for (const norm of allNorms) {
+    const col = columns[norm];
+    let colDiv = existingCols.get(norm) ?? null;
+    let zone;
+    if (!colDiv) {
+      const built = buildColumnShell(scroll, norm, col, doc);
+      colDiv = built.colDiv;
+      zone = built.zone;
+    } else {
+      zone = colDiv.querySelector(".drop-zone");
+    }
+    scroll.appendChild(colDiv);
+    updateColumnChrome(colDiv, norm, col, config, isNarrow, activeNorm, doc);
+    reconcileZoneCards(zone, col.cards, norm, config, vaultName, doc);
+  }
+}
 async function buildBoard(app, containerEl, config, savedActiveCol) {
   _dialogDoc = containerEl.ownerDocument;
   const vaultName = app.vault.getName();
@@ -2380,15 +2539,19 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
         #kanban-scroll{flex-direction:column;overflow-x:hidden;}
         #kanban-scroll>div{flex:none!important;width:calc(100% - 16px)!important;max-width:none!important;margin:0 8px 16px!important;}
       }`;
-  const wrapper = containerEl.createEl("div", {
-    attr: { id: "kanban-wrapper" }
-  });
-  const scroll = wrapper.createEl("div", {
-    attr: {
-      id: "kanban-scroll",
-      style: "display:flex;overflow-x:auto;gap:0;padding:12px 0;-webkit-overflow-scrolling:touch;"
-    }
-  });
+  let wrapper = containerEl.querySelector("#kanban-wrapper");
+  let scroll;
+  if (!wrapper) {
+    wrapper = containerEl.createEl("div", { attr: { id: "kanban-wrapper" } });
+    scroll = wrapper.createEl("div", {
+      attr: {
+        id: "kanban-scroll",
+        style: "display:flex;overflow-x:auto;gap:0;padding:12px 0;-webkit-overflow-scrolling:touch;"
+      }
+    });
+  } else {
+    scroll = wrapper.querySelector("#kanban-scroll");
+  }
   const isNarrow = isNarrowLayout(
     wrapper.clientWidth > 0 ? wrapper.clientWidth : window.innerWidth
   );
@@ -2399,108 +2562,17 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
   let activeNorm = savedActiveCol && allNorms.includes(savedActiveCol) ? savedActiveCol : config.normStart;
   if (!allNorms.includes(activeNorm))
     activeNorm = allNorms[0];
-  if (isNarrow) {
-    const tabBar = scroll.createEl("div", {
+  reconcileColumns(scroll, columns, allNorms, activeNorm, isNarrow, config, vaultName, boardDoc);
+  let statusEl = wrapper.querySelector("#kanban-status");
+  if (!statusEl) {
+    statusEl = wrapper.createEl("p", {
       attr: {
-        style: "display:flex;gap:6px;flex-wrap:wrap;padding:4px 8px 14px;width:100%;box-sizing:border-box;touch-action:none;"
+        id: "kanban-status",
+        style: "margin-top:20px;text-align:center;color:var(--text-muted);font-size:.9em;"
       }
     });
-    for (const norm of allNorms) {
-      const col = columns[norm];
-      const isActive = norm === activeNorm;
-      const tab = tabBar.createEl("button", {
-        text: col.rawTag.replace(/^#/, "").toUpperCase(),
-        attr: {
-          style: `min-height:44px;padding:8px 18px;border-radius:22px;
-            border:1px solid var(--background-modifier-border);
-            font-size:.9em;cursor:pointer;
-            transition:transform .1s,outline .1s;touch-action:none;`
-        }
-      });
-      tab.dataset.colNorm = norm;
-      tab.dataset.colActive = isActive ? "1" : "0";
-      const tabMax = config.columnMaxCards[norm] || 0;
-      if (tabMax > 0 && col.cards.length > tabMax) {
-        tab.dataset.colOverlimit = "1";
-      }
-    }
   }
-  const colKeys = isNarrow ? [activeNorm] : allNorms;
-  for (const norm of colKeys) {
-    const col = columns[norm];
-    if (!col)
-      continue;
-    const colStyle = isNarrow ? `width:calc(100% - 16px);margin:0 8px 20px;padding:10px;` : `flex:1;min-width:200px;max-width:260px;padding:10px 0 10px 0;margin:0;display:flex;flex-direction:column;`;
-    const colMax = config.columnMaxCards[norm] || 0;
-    const colAttr = { style: colStyle, "data-col-container": norm };
-    if (colMax > 0 && col.cards.length > colMax)
-      colAttr["data-col-overlimit"] = "1";
-    const colDiv = scroll.createEl("div", { attr: colAttr });
-    const header = colDiv.createEl("div", {
-      attr: { style: "display:flex;align-items:center;margin-bottom:10px;padding:0 4px;" }
-    });
-    const titleColor = columnTitleTextColor(config.columnColors[norm] || "", "var(--kb-text)", config.colorColumnTitleDark, config.colorColumnTitleThreshold);
-    const shadowLen = config.columnTitleShadowLength;
-    const titleShadow = shadowLen > 0 && titleColor.toLowerCase() !== "#ffffff" ? `text-shadow:${shadowLen}px ${shadowLen}px ${shadowLen / 2}px rgba(255,255,255,0.9);` : "";
-    header.createEl("h4", {
-      text: col.rawTag.replace(/^#/, "").toUpperCase(),
-      attr: {
-        style: `margin:0;flex-grow:1;font-weight:bold;color:${titleColor};${titleShadow}${config.fontSizeColumnTitle ? `font-size:${config.fontSizeColumnTitle};` : ""}`
-      }
-    });
-    header.createEl("span", {
-      text: String(col.cards.length),
-      attr: { class: "kb-col-count", style: `margin-right:6px;font-size:.75em;color:${titleColor};background:transparent;border:1px solid var(--background-modifier-border);border-radius:50%;width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;` }
-    });
-    if (norm !== config.normDone) {
-      const btn = header.createEl("button", {
-        text: "+",
-        attr: {
-          class: "kb-col-add-btn",
-          style: `width:24px;height:24px;border-radius:50%;border:1px solid var(--background-modifier-border);background:none;cursor:pointer;display:flex;align-items:center;justify-content:center;color:${titleColor};`
-        }
-      });
-      btn.dataset.column = norm;
-      btn.dataset.tag = col.rawTag;
-    } else {
-      const btn = header.createEl("button", {
-        text: "Archive",
-        attr: {
-          class: "kb-col-add-btn",
-          style: `height:24px;padding:0 8px;border-radius:12px;border:1px solid var(--background-modifier-border);background:none;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:0.75em;color:${titleColor};`
-        }
-      });
-      btn.dataset.column = norm;
-    }
-    const zone = colDiv.createEl("div", {
-      attr: {
-        class: `drop-zone drop-zone-${norm}`,
-        style: "min-height:200px;border:2px dashed var(--background-modifier-border);border-right:none;border-radius:0;padding:5px;flex-grow:1;display:flex;flex-direction:column;"
-      }
-    });
-    const insertSlot = (idx) => {
-      const s = boardDoc.createElement("div");
-      s.className = "insert-slot";
-      s.style.cssText = "height:0;border-top:2px dashed transparent;width:100%";
-      s.dataset.index = String(idx);
-      return s;
-    };
-    if (col.cards.length > 0)
-      zone.appendChild(insertSlot(0));
-    col.cards.forEach((card, i) => {
-      zone.innerHTML += createCardHTML(card, card.multiTag, norm, config, vaultName);
-      if (i < col.cards.length - 1)
-        zone.appendChild(insertSlot(i + 1));
-    });
-    zone.appendChild(insertSlot(col.cards.length));
-  }
-  wrapper.createEl("p", {
-    attr: {
-      id: "kanban-status",
-      style: "margin-top:20px;text-align:center;color:var(--text-muted);font-size:.9em;"
-    },
-    text: `Found: ${items.length} items`
-  });
+  statusEl.textContent = `Found: ${items.length} items`;
 }
 function attachListeners(boardEl, config, app, refresh) {
   const ownerDoc = () => boardEl.ownerDocument;
@@ -3727,18 +3799,18 @@ var KanbanView = class extends import_obsidian2.ItemView {
     }
     this.isRefreshing = true;
     const container = this.contentEl;
-    const oldScroll = container.querySelector("#kanban-scroll");
-    const scrollLeft = oldScroll?.scrollLeft ?? 0;
     const savedActiveCol = container.querySelector("#kanban-wrapper")?.dataset.activeCol ?? null;
     this.listenerCleanup?.();
     this.listenerCleanup = null;
-    container.empty();
     try {
       const error = validateConfig(this.plugin.settings);
       if (error) {
+        container.empty();
         this.renderError(container, error);
         return;
       }
+      if (!container.querySelector("#kanban-wrapper"))
+        container.empty();
       const config = buildConfig(this.plugin.settings);
       await buildBoard(this.app, container, config, savedActiveCol);
       const boardEl = container.querySelector("#kanban-wrapper");
@@ -3750,11 +3822,9 @@ var KanbanView = class extends import_obsidian2.ItemView {
           () => this.renderBoard()
         );
       }
-      const newScroll = container.querySelector("#kanban-scroll");
-      if (newScroll && scrollLeft)
-        newScroll.scrollLeft = scrollLeft;
     } catch (e) {
       console.error("Kanban render error:", e);
+      container.empty();
       this.renderError(container, e.message ?? String(e));
     } finally {
       this.isRefreshing = false;
