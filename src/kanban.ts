@@ -35,7 +35,10 @@ export interface KanbanConfig {
   normActive: string[];
   projectsDocument: string;
   allChildrenDoneColor: string;
-  // Colors (empty string → fall back to Obsidian theme variable)
+  // Colors (empty string → fall back to Obsidian theme variable). These are
+  // resolved hex values — computed by buildConfig() from each field's own
+  // Hue plus the shared central Saturation/Lightness (or, for text colors,
+  // Text lightness).
   columnColors: Record<string, string>;
   // Per-column max card count keyed by normalized tag. 0 = no limit.
   columnMaxCards: Record<string, number>;
@@ -44,6 +47,13 @@ export interface KanbanConfig {
   colorCardBg: string;
   colorColumnBg: string;
   colorText: string;
+  // The dark option for column title text (see columnTitleTextColor) —
+  // white is used instead when a column's own background is too similar in
+  // luminance to this color. 0-100, see columnTitleTextColor's thresholdPct.
+  colorColumnTitleDark: string;
+  colorColumnTitleThreshold: number;
+  // Length (px) of the directional (top-left-lit) white title shadow. 0 = none.
+  columnTitleShadowLength: number;
   colorAccent: string;
   colorLink: string;
   colorFamilySelf: string;
@@ -60,8 +70,96 @@ export interface KanbanConfig {
   fontSizeSubtask: string;
 }
 
+// A column's specific type (Done/Due/Later/Recurrent/Start/Project), if it
+// matches one — precedence order below, first match wins. A column that
+// matches none of these is classified only by Active/Non-active (see
+// resolveColumnColorHex).
+type SpecificColumnType =
+  "doneColumn" | "dueColumn" | "laterColumn" | "recurrentColumn" | "startColumn" | "projectColumns";
+
+const SPECIFIC_HUE_FIELD: Record<SpecificColumnType, keyof KanbanSettings> = {
+  doneColumn: "hueDoneColumn",
+  dueColumn: "hueDueColumn",
+  laterColumn: "hueLaterColumn",
+  recurrentColumn: "hueRecurrentColumn",
+  startColumn: "hueStartColumn",
+  projectColumns: "hueProjectColumns",
+};
+
+function classifySpecificColumnType(
+  norm: string,
+  settings: KanbanSettings,
+  normProject: string[]
+): SpecificColumnType | null {
+  if (norm === normalizeTag(settings.doneColumn)) return "doneColumn";
+  if (norm === normalizeTag(settings.dueColumn)) return "dueColumn";
+  if (norm === normalizeTag(settings.laterColumn)) return "laterColumn";
+  if (norm === normalizeTag(settings.recurrentColumn || "#recurrent")) return "recurrentColumn";
+  if (norm === normalizeTag(settings.startColumn)) return "startColumn";
+  if (normProject.includes(norm)) return "projectColumns";
+  return null;
+}
+
+// Resolves a column's color: its specific type's own color (Done/Due/Later/
+// Recurrent/Start/Project), if that type's Hue is set; otherwise Column
+// background's Hue. Active columns use it at the general Lightness
+// unmodified; Non-active columns shift by nonActiveLightnessDelta. Active/
+// Non-active never fall through further (no separate Hue of their own).
+function resolveColumnColorHex(
+  norm: string,
+  settings: KanbanSettings,
+  normProject: string[],
+  normActive: string[],
+  generalHex: (hue: number | null | undefined) => string,
+  hueHex: (hue: number | null | undefined, light: number) => string,
+  baseL: number
+): string {
+  const specific = classifySpecificColumnType(norm, settings, normProject);
+  if (specific) {
+    const hue = settings[SPECIFIC_HUE_FIELD[specific]] as number | null;
+    if (hue !== null && hue !== undefined) return generalHex(hue);
+  }
+  const isActive = normActive.includes(norm);
+  const light = isActive ? baseL : clamp(baseL + (settings.nonActiveLightnessDelta ?? 0), 0, 100);
+  return hueHex(settings.hueColumnBg, light);
+}
+
 export function buildConfig(settings: KanbanSettings): KanbanConfig {
   const normKanban = settings.kanban.map(normalizeTag);
+  const normActive = (settings.activeColumns && settings.activeColumns.length
+    ? settings.activeColumns
+    : ["#next", "#important", "#today"]
+  ).map(normalizeTag);
+  const normProject = (settings.projectColumns || []).map(normalizeTag);
+
+  // Saturation is shared by every color choice, including text, but not the
+  // card-highlight dialog (which uses its own fixed constants). Lightness is
+  // shared by every color choice except text colors (their own Text
+  // lightness) and Card background (its own Lightness, defaulting to 100 =
+  // white) — so text stays legible and cards stay white by default
+  // regardless of how light/dark the general Lightness is set.
+  const satC = clamp(settings.colorSaturation ?? 55, 0, 100);
+  const baseL = clamp(settings.colorLightness ?? 80, 0, 100);
+  const textL = clamp(settings.textLightness ?? 30, 0, 100);
+  const cardBgL = clamp(settings.lightnessCardBg ?? 100, 0, 100);
+
+  // hue == null → "use Obsidian theme default" (resolves to "").
+  const hueHex = (hue: number | null | undefined, light: number): string =>
+    hue === null || hue === undefined ? "" : hslToHex(((hue % 360) + 360) % 360, satC, light);
+  const generalHex = (hue: number | null | undefined) => hueHex(hue, baseL);
+  const textHex = (hue: number | null | undefined) => hueHex(hue, textL);
+  // Column title text: a hue-selectable dark color constrained to 0-25%
+  // lightness (i.e. 75-100% "dark") — white is substituted per-column when
+  // the column's own background is too dark for this to read (see
+  // columnTitleTextColor / textOnBg). Unset hue → Font color's current hue.
+  const columnTitleL = clamp(settings.lightnessColumnTitle ?? 10, 0, 25);
+  const colorColumnTitleDark = hueHex(settings.hueColumnTitle ?? settings.hueText ?? 225, columnTitleL);
+  const colorColumnTitleThreshold = clamp(settings.columnTitleContrastThreshold ?? 18, 0, 100);
+  // Bold/Italic/Italic each shift up to ±50% away from Text lightness.
+  const boldL = clamp(textL + (settings.boldLightnessDelta ?? 0), 0, 100);
+  const italicStarL = clamp(textL + (settings.italicStarLightnessDelta ?? 0), 0, 100);
+  const italicUnderscoreL = clamp(textL + (settings.italicUnderscoreLightnessDelta ?? 0), 0, 100);
+
   return {
     kanban: settings.kanban,
     parentPages: settings.parentPages,
@@ -78,33 +176,36 @@ export function buildConfig(settings: KanbanSettings): KanbanConfig {
     normLater: normalizeTag(settings.laterColumn),
     recurrentColumn: settings.recurrentColumn || "#recurrent",
     normRecurrent: normalizeTag(settings.recurrentColumn || "#recurrent"),
-    normProject: (settings.projectColumns || []).map(normalizeTag),
-    normActive: (settings.activeColumns && settings.activeColumns.length
-      ? settings.activeColumns
-      : ["#next", "#important", "#today"]
-    ).map(normalizeTag),
+    normProject,
+    normActive,
     projectsDocument: settings.projectsDocument || "",
-    allChildrenDoneColor: settings.allChildrenDoneColor,
+    allChildrenDoneColor: generalHex(settings.hueAllChildrenDone) || "#e03e3e",
     columnColors: Object.fromEntries(
-      (settings.kanban || []).map((tag, i) => [normalizeTag(tag), (settings.columnColors || [])[i] || ""])
+      (settings.kanban || []).map((tag) => {
+        const norm = normalizeTag(tag);
+        return [norm, resolveColumnColorHex(norm, settings, normProject, normActive, generalHex, hueHex, baseL)];
+      })
     ),
     columnMaxCards: Object.fromEntries(
       (settings.kanban || []).map((tag, i) => [normalizeTag(tag), (settings.columnMaxCards || [])[i] || 0])
     ),
-    colorColumnOverLimit: settings.colorColumnOverLimit || "#5c1a1a",
-    colorCardBg: settings.colorCardBg || "",
-    colorColumnBg: settings.colorColumnBg || "",
-    colorText: settings.colorText || "",
-    colorAccent: settings.colorAccent || "",
-    colorLink: settings.colorLink || "",
-    colorFamilySelf: settings.colorFamilySelf || "#e03e3e",
-    colorFamilyParent: settings.colorFamilyParent || "#2db55d",
-    colorFamilySibling: settings.colorFamilySibling || "#4a90d9",
-    colorDate: settings.colorDate || "#7ab8e8",
+    colorColumnOverLimit: generalHex(settings.hueColumnOverLimit) || "#5c1a1a",
+    colorCardBg: hueHex(settings.hueCardBg, cardBgL),
+    colorColumnBg: generalHex(settings.hueColumnBg),
+    colorAccent: generalHex(settings.hueAccent),
+    colorFamilySelf: generalHex(settings.hueFamilySelf) || "#e03e3e",
+    colorFamilyParent: generalHex(settings.hueFamilyParent) || "#2db55d",
+    colorFamilySibling: generalHex(settings.hueFamilySibling) || "#4a90d9",
     fontDate: settings.fontDate || "monospace",
-    colorBold: settings.colorBold || "",
-    colorItalicStar: settings.colorItalicStar || "",
-    colorItalicUnderscore: settings.colorItalicUnderscore || "",
+    colorText: textHex(settings.hueText),
+    colorColumnTitleDark,
+    colorColumnTitleThreshold,
+    columnTitleShadowLength: clamp(settings.columnTitleShadowLength ?? 2, 0, 10),
+    colorLink: textHex(settings.hueLink),
+    colorDate: textHex(settings.hueDate) || "#7ab8e8",
+    colorBold: hueHex(settings.hueBold, boldL),
+    colorItalicStar: hueHex(settings.hueItalicStar, italicStarL),
+    colorItalicUnderscore: hueHex(settings.hueItalicUnderscore, italicUnderscoreL),
     fontSizeColumnTitle: (Platform.isMobile
       ? settings.fontSizeColumnTitleMobile
       : settings.fontSizeColumnTitle) || "",
@@ -2227,16 +2328,16 @@ function showSubtaskDialog(onSubmit: (text: string) => void) {
   taskInput.setSelectionRange(taskInput.value.length, taskInput.value.length);
 }
 
-// A small fixed set of basic hues (plus gray and white); saturation is the
-// only continuous control ("saturation lever"), lightness is fixed so every
-// resulting color reads well as a card background. Gray/white are achromatic
-// quick picks — the saturation slider doesn't apply to them.
+// A small fixed set of basic hues (plus gray and white); saturation and
+// lightness are fixed constants so only hue is picked here. Gray/white are
+// achromatic quick picks that bypass hue/saturation/lightness entirely.
 const CARD_COLOR_HUES: [string, number][] = [
   ["Red", 0], ["Orange", 28], ["Yellow", 48], ["Green", 130],
   ["Teal", 175], ["Blue", 212], ["Purple", 265], ["Pink", 325],
 ];
 const CARD_COLOR_GRAY = "#888888";
 const CARD_COLOR_WHITE = "#ffffff";
+const CARD_COLOR_SATURATION = 65;
 const CARD_COLOR_LIGHTNESS = 55;
 
 function showCardColorDialog(
@@ -2257,12 +2358,11 @@ function showCardColorDialog(
           : CARD_COLOR_HUES.reduce((best, [, h]) =>
               Math.abs(h - existingHsl.h) < Math.abs(best - existingHsl.h) ? h : best, CARD_COLOR_HUES[0][1]))
     : CARD_COLOR_HUES[5][1]; // Blue
-  let initialSat = Math.round(existingHsl ? existingHsl.s : 60);
 
   const swatchBtnStyle = (h: number, active: boolean) =>
     `width:32px;height:32px;border-radius:50%;cursor:pointer;` +
     `border:2px solid ${active ? "var(--kb-accent)" : h === -2 ? "var(--background-modifier-border)" : "transparent"};` +
-    `background:${h === -2 ? CARD_COLOR_WHITE : h === -1 ? CARD_COLOR_GRAY : hslToHex(h, 65, 55)};`;
+    `background:${h === -2 ? CARD_COLOR_WHITE : h === -1 ? CARD_COLOR_GRAY : hslToHex(h, CARD_COLOR_SATURATION, CARD_COLOR_LIGHTNESS)};`;
 
   const swatchesHtml = CARD_COLOR_HUES
     .map(([name, h]) => `<button type="button" class="kb-color-swatch" data-hue="${h}" title="${name}" style="${swatchBtnStyle(h, h === selectedHue)}"></button>`)
@@ -2274,21 +2374,16 @@ function showCardColorDialog(
     <h3 style="margin:0 0 12px;font-size:1.1em;">Highlight card</h3>
     <div id="k-color-preview" style="width:100%;height:44px;border-radius:8px;margin-bottom:14px;border:1px solid var(--background-modifier-border);"></div>
     <div id="k-color-swatches" style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-bottom:14px;">${swatchesHtml}</div>
-    <div style="margin-bottom:16px;text-align:left;">
-      <span style="font-size:.8em;opacity:.75;display:block;margin-bottom:4px;">Saturation</span>
-      <input id="k-saturation" type="range" min="0" max="100" value="${initialSat}" style="width:100%;" ${selectedHue < 0 ? "disabled" : ""}>
-    </div>
     <div id="k-color-actions" style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">${buttonHtml("Apply", true)}${buttonHtml("Cancel", false)}</div>`;
 
   const preview = dialog.querySelector("#k-color-preview") as HTMLElement;
-  const satInput = dialog.querySelector("#k-saturation") as HTMLInputElement;
   const swatchWrap = dialog.querySelector("#k-color-swatches") as HTMLElement;
   const [applyBtn, cancelBtn] = dialog.querySelectorAll<HTMLButtonElement>("#k-color-actions button");
 
   const currentHex = () =>
     selectedHue === -2 ? CARD_COLOR_WHITE :
     selectedHue === -1 ? CARD_COLOR_GRAY :
-    hslToHex(selectedHue, parseInt(satInput.value, 10), CARD_COLOR_LIGHTNESS);
+    hslToHex(selectedHue, CARD_COLOR_SATURATION, CARD_COLOR_LIGHTNESS);
   const updatePreview = () => { preview.style.background = currentHex(); };
   updatePreview();
 
@@ -2299,10 +2394,8 @@ function showCardColorDialog(
     swatchWrap.querySelectorAll<HTMLButtonElement>(".kb-color-swatch").forEach((b) => {
       b.style.cssText = swatchBtnStyle(parseInt(b.dataset.hue!, 10), parseInt(b.dataset.hue!, 10) === selectedHue);
     });
-    satInput.disabled = selectedHue < 0;
     updatePreview();
   });
-  satInput.addEventListener("input", updatePreview);
 
   applyBtn.onclick = () => { close(); onApply(currentHex()); };
   cancelBtn.onclick = close;
@@ -2550,8 +2643,42 @@ function textOnBg(bgHex: string, lightText: string, darkText: string): string {
   return hexLuminance(bgHex) > 0.179 ? darkText : lightText;
 }
 
+// How much a same-hue background shrinks the effective luminance
+// difference before comparing against the threshold (0 = hue never
+// matters, 1 = a same-hue background at matching luminance always reads as
+// zero contrast). Scaled by how saturated the background actually is, so a
+// gray background isn't treated as "same hue" as anything.
+const COLUMN_TITLE_HUE_PENALTY = 0.5;
+
+// Column title text color for a given column background: `darkColor` (the
+// user's chosen dark, hue-selectable color) unless it's too similar to the
+// background to read, in which case white is used instead. Similarity is
+// luminance difference, reduced when the background's hue is close to
+// `darkColor`'s own hue — e.g. blue-on-blue reads as less contrasty than
+// blue-on-red at the same luminance difference, so it should switch to
+// white sooner. `thresholdPct` (0-100) is the minimum (hue-adjusted)
+// luminance difference required to keep using `darkColor` — 0 never
+// switches to white, 100 always does. Falls back to `fallback` (e.g. the
+// general Font color) when there's no literal background hex to check.
+function columnTitleTextColor(bgHex: string, fallback: string, darkColor: string, thresholdPct: number): string {
+  if (!bgHex) return fallback;
+  const lumDiff = Math.abs(hexLuminance(bgHex) - hexLuminance(darkColor));
+  const bgHsl = hexToHsl(bgHex);
+  const darkHue = hexToHsl(darkColor).h;
+  const rawHueDiff = Math.abs(bgHsl.h - darkHue);
+  const hueDiff = Math.min(rawHueDiff, 360 - rawHueDiff); // 0 (same) - 180 (opposite)
+  const hueSimilarity = 1 - hueDiff / 180;
+  const bgSatFactor = bgHsl.s / 100;
+  const adjustedDiff = lumDiff * (1 - COLUMN_TITLE_HUE_PENALTY * hueSimilarity * bgSatFactor);
+  return adjustedDiff < clamp(thresholdPct, 0, 100) / 100 ? "#ffffff" : darkColor;
+}
+
+export function clamp(v: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, v));
+}
+
 // h: 0-360, s/l: 0-100
-function hslToHex(h: number, s: number, l: number): string {
+export function hslToHex(h: number, s: number, l: number): string {
   const sN = s / 100, lN = l / 100;
   const k = (n: number) => (n + h / 30) % 12;
   const a = sN * Math.min(lN, 1 - lN);
@@ -2560,7 +2687,7 @@ function hslToHex(h: number, s: number, l: number): string {
   return `#${toHex(f(0))}${toHex(f(8))}${toHex(f(4))}`;
 }
 
-function hexToHsl(hex: string): { h: number; s: number; l: number } {
+export function hexToHsl(hex: string): { h: number; s: number; l: number } {
   const clean = hex.replace(/^#/, "");
   const r = parseInt(clean.slice(0, 2), 16) / 255;
   const g = parseInt(clean.slice(2, 4), 16) / 255;
@@ -2591,7 +2718,7 @@ function buildColorCSS(config: KanbanConfig): string {
   const perColRules = Object.entries(config.columnColors)
     .filter(([, c]) => c)
     .map(([norm, color]) => {
-      const text = textOnBg(color, "#ffffff", configuredDarkText);
+      const text = columnTitleTextColor(color, configuredDarkText, config.colorColumnTitleDark, config.colorColumnTitleThreshold);
       return `
       #kanban-wrapper [data-col-container="${norm}"]{background:${color};}
       #kanban-wrapper [data-col-norm="${norm}"]{background:${color};color:${text};}
@@ -2903,17 +3030,23 @@ export async function buildBoard(
     const header = colDiv.createEl("div", {
       attr: { style: "display:flex;align-items:center;margin-bottom:10px;padding:0 4px;" },
     });
+    const titleColor = columnTitleTextColor(config.columnColors[norm] || "", "var(--kb-text)", config.colorColumnTitleDark, config.colorColumnTitleThreshold);
+    // Light from the top-left casts the shadow toward the bottom-right.
+    const shadowLen = config.columnTitleShadowLength;
+    const titleShadow = shadowLen > 0 && titleColor.toLowerCase() !== "#ffffff"
+      ? `text-shadow:${shadowLen}px ${shadowLen}px ${shadowLen / 2}px rgba(255,255,255,0.9);`
+      : "";
     header.createEl("h4", {
       text: col.rawTag.replace(/^#/, "").toUpperCase(),
       attr: {
-        style: `margin:0;flex-grow:1;font-weight:bold;color:var(--kb-text);${
+        style: `margin:0;flex-grow:1;font-weight:bold;color:${titleColor};${titleShadow}${
           config.fontSizeColumnTitle ? `font-size:${config.fontSizeColumnTitle};` : ""
         }`,
       },
     });
     header.createEl("span", {
       text: String(col.cards.length),
-      attr: { class: "kb-col-count", style: "margin-right:6px;font-size:.75em;color:var(--kb-text);background:transparent;border:1px solid var(--background-modifier-border);border-radius:50%;width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;" },
+      attr: { class: "kb-col-count", style: `margin-right:6px;font-size:.75em;color:${titleColor};background:transparent;border:1px solid var(--background-modifier-border);border-radius:50%;width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;` },
     });
 
     if (norm !== config.normDone) {
@@ -2922,7 +3055,7 @@ export async function buildBoard(
         attr: {
           class: "kb-col-add-btn",
           style:
-            "width:24px;height:24px;border-radius:50%;border:1px solid var(--background-modifier-border);background:none;cursor:pointer;display:flex;align-items:center;justify-content:center;color:var(--kb-text);",
+            `width:24px;height:24px;border-radius:50%;border:1px solid var(--background-modifier-border);background:none;cursor:pointer;display:flex;align-items:center;justify-content:center;color:${titleColor};`,
         },
       });
       (btn as HTMLButtonElement).dataset.column = norm;
@@ -2933,7 +3066,7 @@ export async function buildBoard(
         attr: {
           class: "kb-col-add-btn",
           style:
-            "height:24px;padding:0 8px;border-radius:12px;border:1px solid var(--background-modifier-border);background:none;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:0.75em;color:var(--kb-text);",
+            `height:24px;padding:0 8px;border-radius:12px;border:1px solid var(--background-modifier-border);background:none;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:0.75em;color:${titleColor};`,
         },
       });
       (btn as HTMLButtonElement).dataset.column = norm;
