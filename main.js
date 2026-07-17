@@ -970,7 +970,7 @@ async function addNewItem(app, columnTag, userText, dateStr, config, notesText =
     if (!projFile) {
       await ensureParentFolder(app, wantedPath);
       projFile = await app.vault.create(wantedPath, "");
-      showInfoDialog(`Created new note "${projFile.path}".`);
+      new import_obsidian.Notice(`Created new note "${projFile.path}".`);
     }
     let newLine = `- [ ] ${cardText} ${columnTag}`;
     if (dateStr)
@@ -1515,14 +1515,6 @@ function showConfirmDialog(message) {
       resolve(false);
     };
   });
-}
-function showInfoDialog(message) {
-  const { dialog, close } = makeOverlay("kanban-info-dialog");
-  dialog.innerHTML = `
-    <p style="margin:0 0 16px;font-size:.95em;">${message}</p>
-    <div style="text-align:center;">${buttonHtml("OK", false)}</div>`;
-  const [okBtn] = dialog.querySelectorAll("button");
-  okBtn.onclick = close;
 }
 var DocSuggest = class extends import_obsidian.AbstractInputSuggest {
   constructor(app, inputEl) {
