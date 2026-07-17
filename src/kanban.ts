@@ -132,27 +132,29 @@ export function buildConfig(settings: KanbanSettings): KanbanConfig {
   ).map(normalizeTag);
   const normProject = (settings.projectColumns || []).map(normalizeTag);
 
-  // Saturation is shared by every color choice, including text, but not the
-  // card-highlight dialog (which uses its own fixed constants). Lightness is
-  // shared by every color choice except text colors, which use their own
-  // Text lightness instead — so text stays legible regardless of how
-  // light/dark the general Lightness is set.
+  // Saturation and Lightness are shared by every color choice except text
+  // colors and the card-highlight dialog (fixed constants of its own). Text
+  // colors use their own Text saturation/Text lightness instead, so text
+  // stays legible regardless of how saturated/light/dark the general
+  // Saturation/Lightness are set.
   const satC = clamp(settings.colorSaturation ?? 55, 0, 100);
   const baseL = clamp(settings.colorLightness ?? 80, 0, 100);
+  const textSatC = clamp(settings.textSaturation ?? 55, 0, 100);
   const textL = clamp(settings.textLightness ?? 30, 0, 100);
 
   // hue == null → "use Obsidian theme default" (resolves to "").
   const hueHex = (hue: number | null | undefined, light: number): string =>
     hue === null || hue === undefined ? "" : hslToHex(((hue % 360) + 360) % 360, satC, light);
   const generalHex = (hue: number | null | undefined) => hueHex(hue, baseL);
-  const textHex = (hue: number | null | undefined) => hueHex(hue, textL);
-  // Column title text: a hue-selectable dark color constrained to 0-25%
-  // lightness (i.e. 75-100% "dark") — white is substituted per-column when
-  // the column's own background is too dark for this to read (see
+  const textHueHex = (hue: number | null | undefined, light: number): string =>
+    hue === null || hue === undefined ? "" : hslToHex(((hue % 360) + 360) % 360, textSatC, light);
+  const textHex = (hue: number | null | undefined) => textHueHex(hue, textL);
+  // Column title text: a hue-selectable dark color, at Font color's own
+  // Saturation/Lightness — white is substituted per-column when the
+  // column's own background is too dark for this to read (see
   // columnTitleTextColor / textOnBg). Unset hue → Font color's current hue.
-  const columnTitleL = clamp(settings.lightnessColumnTitle ?? 10, 0, 25);
-  const colorColumnTitleDark = hueHex(settings.hueColumnTitle ?? settings.hueText ?? 225, columnTitleL);
-  const colorTextContrastThreshold = clamp(settings.textContrastThreshold ?? 18, 0, 100);
+  const colorColumnTitleDark = textHex(settings.hueColumnTitle ?? settings.hueText ?? 225);
+  const colorTextContrastThreshold = clamp(settings.textContrastThreshold ?? 45, 0, 108);
   // Bold/Italic/Italic each shift up to ±50% away from Text lightness.
   const boldL = clamp(textL + (settings.boldLightnessDelta ?? 0), 0, 100);
   const italicStarL = clamp(textL + (settings.italicStarLightnessDelta ?? 0), 0, 100);
@@ -200,9 +202,9 @@ export function buildConfig(settings: KanbanSettings): KanbanConfig {
     columnTitleShadowLength: clamp(settings.columnTitleShadowLength ?? 2, 0, 10),
     colorLink: textHex(settings.hueLink),
     colorDate: textHex(settings.hueDate) || "#7ab8e8",
-    colorBold: hueHex(settings.hueBold, boldL),
-    colorItalicStar: hueHex(settings.hueItalicStar, italicStarL),
-    colorItalicUnderscore: hueHex(settings.hueItalicUnderscore, italicUnderscoreL),
+    colorBold: textHueHex(settings.hueBold, boldL),
+    colorItalicStar: textHueHex(settings.hueItalicStar, italicStarL),
+    colorItalicUnderscore: textHueHex(settings.hueItalicUnderscore, italicUnderscoreL),
     fontSizeColumnTitle: (Platform.isMobile
       ? settings.fontSizeColumnTitleMobile
       : settings.fontSizeColumnTitle) || "",

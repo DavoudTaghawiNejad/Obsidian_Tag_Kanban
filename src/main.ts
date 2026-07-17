@@ -18,10 +18,10 @@ export interface KanbanSettings {
   // ── Colors ─────────────────────────────────────────────────────────────
   // Every color choice is its own independent Hue (0-360). Saturation and
   // Lightness are shared/central (colorSaturation, colorLightness) for
-  // everything except text colors, which use their own Text lightness
-  // instead — and except the card-highlight dialog, which has fixed
-  // constants of its own. null means "use Obsidian theme default" (nullable
-  // fields only).
+  // everything except text colors, which use their own Text saturation and
+  // Text lightness instead — and except the card-highlight dialog, which has
+  // fixed constants of its own. null means "use Obsidian theme default"
+  // (nullable fields only).
   colorSaturation: number;
   colorLightness: number;
   hueColumnOverLimit: number;
@@ -32,9 +32,10 @@ export interface KanbanSettings {
   hueFamilyParent: number;
   hueFamilySibling: number;
   fontDate: string;
-  // Text colors share colorSaturation above, but use this Lightness instead
-  // of colorLightness, so text can stay legible regardless of how light/dark
-  // the general Lightness is set.
+  // Text colors use their own Saturation and Lightness instead of the
+  // general colorSaturation/colorLightness, so text can stay legible
+  // regardless of how saturated/light/dark backgrounds are set.
+  textSaturation: number;
   textLightness: number;
   hueText: number | null;
   // Bold/Italic/Italic can each shift up to ±50% away from Text lightness.
@@ -48,12 +49,11 @@ export interface KanbanSettings {
   italicUnderscoreLightnessDelta: number;
   hueLink: number | null;
   hueDate: number | null;
-  // Column title text: a hue-selectable dark color at standard text
-  // Saturation, constrained to 0-25% Lightness (75-100% "dark"). White is
-  // substituted per-column when that column's own background is too dark
-  // for this dark color to read. null hue → use Font color's current Hue.
+  // Column title text: a hue-selectable dark color at Font color's own
+  // Saturation/Lightness. White is substituted per-column when that
+  // column's own background is too dark for this dark color to read. null
+  // hue → use Font color's current Hue.
   hueColumnTitle: number | null;
-  lightnessColumnTitle: number;
   // Minimum required APCA Lc contrast (0-108, not a percentage — see
   // https://apcacontrast.com) between a background and the dark text color
   // above before white is used instead. 0 = never switch to white, 108 =
@@ -102,6 +102,7 @@ export interface KanbanSettings {
 export const DEFAULT_COLORS = {
   colorSaturation: 55,
   colorLightness: 80,
+  textSaturation: 55,
   textLightness: 30,
   hueColumnOverLimit: 0,
   hueAllChildrenDone: 6,
@@ -122,7 +123,6 @@ export const DEFAULT_COLORS = {
   hueLink: 237,
   hueDate: 244,
   hueColumnTitle: 225,
-  lightnessColumnTitle: 10,
   textContrastThreshold: 45,
   columnTitleShadowLength: 2,
   hueDoneColumn: 345,
@@ -379,7 +379,8 @@ class KanbanSettingTab extends PluginSettingTab {
         resetTo?: () => number | null;
         resetTooltip?: string;
         nullSuffix?: string;
-      }
+      },
+      saturation: number = s.colorSaturation
     ) => {
       const current = get();
       const setting = new Setting(container)
@@ -402,7 +403,7 @@ class KanbanSettingTab extends PluginSettingTab {
       const paint = (hue: number | null) => {
         swatch.style.background = hue === null
           ? "repeating-linear-gradient(45deg, var(--background-modifier-border), var(--background-modifier-border) 3px, transparent 3px, transparent 7px)"
-          : hslToHex(hue, s.colorSaturation, lightness);
+          : hslToHex(hue, saturation, lightness);
       };
       paint(current);
       setting.addSlider((slider) => {
@@ -780,7 +781,7 @@ class KanbanSettingTab extends PluginSettingTab {
     plainSlider(
       containerEl,
       "Saturation",
-      "Shared saturation for every color choice below, including text. Doesn't affect the card-highlight dialog (clicking a card), which has its own fixed saturation.",
+      "Shared saturation for every color choice below except text colors, which have their own Saturation instead. Doesn't affect the card-highlight dialog (clicking a card), which has its own fixed saturation.",
       () => s.colorSaturation,
       (v) => { s.colorSaturation = v; },
       "kb-saturation"
@@ -803,37 +804,38 @@ class KanbanSettingTab extends PluginSettingTab {
     plainSlider(
       containerEl,
       "Text lightness",
-      "Shared lightness for the text colors below, independent of the general Lightness above — so text can stay legible regardless of how light/dark backgrounds are set. Saturation still comes from the shared Saturation above.",
+      "Shared lightness for the text colors below, independent of the general Lightness above — so text can stay legible regardless of how light/dark backgrounds are set.",
       () => s.textLightness,
       (v) => { s.textLightness = v; },
       "kb-lightness"
     );
 
-    hueSetting(containerEl, "Font color", "Text color for cards and tabs.", () => s.hueText, (v) => { s.hueText = v; }, s.textLightness, { nullable: true });
+    plainSlider(
+      containerEl,
+      "Text saturation",
+      "Shared saturation for the text colors below, independent of the general Saturation above.",
+      () => s.textSaturation,
+      (v) => { s.textSaturation = v; },
+      "kb-saturation"
+    );
+
+    hueSetting(containerEl, "Font color", "Text color for cards and tabs.", () => s.hueText, (v) => { s.hueText = v; }, s.textLightness, { nullable: true }, s.textSaturation);
 
     typeGroup((box) => {
       hueSetting(
         box,
         "Column title color",
-        "Dark, hue-selectable color for column header titles, at standard text Saturation. White is used instead for any column whose own background is too dark to read this dark color against.",
+        "Dark, hue-selectable color for column header titles, at Font color's own Saturation/Lightness. White is used instead for any column whose own background is too dark to read this dark color against.",
         () => s.hueColumnTitle,
         (v) => { s.hueColumnTitle = v; },
-        s.lightnessColumnTitle,
+        s.textLightness,
         {
           nullable: true,
           resetTo: () => s.hueText,
           resetTooltip: "Reset to Font color's hue",
           nullSuffix: " (using Font color's hue)",
-        }
-      );
-      plainSlider(
-        box,
-        "Column title darkness",
-        "How dark the color above is — 75% to 100% dark (Lightness 25% down to 0%).",
-        () => s.lightnessColumnTitle,
-        (v) => { s.lightnessColumnTitle = v; },
-        "kb-lightness",
-        [0, 25]
+        },
+        s.textSaturation
       );
       plainSlider(
         box,
@@ -863,7 +865,8 @@ class KanbanSettingTab extends PluginSettingTab {
         () => s.hueBold,
         (v) => { s.hueBold = v; },
         clamp(s.textLightness + s.boldLightnessDelta, 0, 100),
-        { nullable: true, resetTo: () => s.hueText, resetTooltip: "Reset to Font color's hue" }
+        { nullable: true, resetTo: () => s.hueText, resetTooltip: "Reset to Font color's hue" },
+        s.textSaturation
       );
       plainSlider(
         box,
@@ -884,7 +887,8 @@ class KanbanSettingTab extends PluginSettingTab {
         () => s.hueItalicStar,
         (v) => { s.hueItalicStar = v; },
         clamp(s.textLightness + s.italicStarLightnessDelta, 0, 100),
-        { nullable: true, resetTo: () => s.hueText, resetTooltip: "Reset to Font color's hue" }
+        { nullable: true, resetTo: () => s.hueText, resetTooltip: "Reset to Font color's hue" },
+        s.textSaturation
       );
       plainSlider(
         box,
@@ -905,7 +909,8 @@ class KanbanSettingTab extends PluginSettingTab {
         () => s.hueItalicUnderscore,
         (v) => { s.hueItalicUnderscore = v; },
         clamp(s.textLightness + s.italicUnderscoreLightnessDelta, 0, 100),
-        { nullable: true, resetTo: () => s.hueText, resetTooltip: "Reset to Font color's hue" }
+        { nullable: true, resetTo: () => s.hueText, resetTooltip: "Reset to Font color's hue" },
+        s.textSaturation
       );
       plainSlider(
         box,
@@ -917,8 +922,8 @@ class KanbanSettingTab extends PluginSettingTab {
         [-50, 50]
       );
     });
-    hueSetting(containerEl, "Link color", "Color for wiki links and URL badges on cards.", () => s.hueLink, (v) => { s.hueLink = v; }, s.textLightness, { nullable: true });
-    hueSetting(containerEl, "Date color", "Color for date annotations on cards (e.g. 'Jun 24', 'next Mon').", () => s.hueDate, (v) => { s.hueDate = v; }, s.textLightness, { nullable: true });
+    hueSetting(containerEl, "Link color", "Color for wiki links and URL badges on cards.", () => s.hueLink, (v) => { s.hueLink = v; }, s.textLightness, { nullable: true }, s.textSaturation);
+    hueSetting(containerEl, "Date color", "Color for date annotations on cards (e.g. 'Jun 24', 'next Mon').", () => s.hueDate, (v) => { s.hueDate = v; }, s.textLightness, { nullable: true }, s.textSaturation);
 
     new Setting(containerEl)
       .setName("Date font")

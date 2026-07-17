@@ -71,13 +71,14 @@ function buildConfig(settings) {
   const normProject = (settings.projectColumns || []).map(normalizeTag);
   const satC = clamp(settings.colorSaturation ?? 55, 0, 100);
   const baseL = clamp(settings.colorLightness ?? 80, 0, 100);
+  const textSatC = clamp(settings.textSaturation ?? 55, 0, 100);
   const textL = clamp(settings.textLightness ?? 30, 0, 100);
   const hueHex = (hue, light) => hue === null || hue === void 0 ? "" : hslToHex((hue % 360 + 360) % 360, satC, light);
   const generalHex = (hue) => hueHex(hue, baseL);
-  const textHex = (hue) => hueHex(hue, textL);
-  const columnTitleL = clamp(settings.lightnessColumnTitle ?? 10, 0, 25);
-  const colorColumnTitleDark = hueHex(settings.hueColumnTitle ?? settings.hueText ?? 225, columnTitleL);
-  const colorTextContrastThreshold = clamp(settings.textContrastThreshold ?? 18, 0, 100);
+  const textHueHex = (hue, light) => hue === null || hue === void 0 ? "" : hslToHex((hue % 360 + 360) % 360, textSatC, light);
+  const textHex = (hue) => textHueHex(hue, textL);
+  const colorColumnTitleDark = textHex(settings.hueColumnTitle ?? settings.hueText ?? 225);
+  const colorTextContrastThreshold = clamp(settings.textContrastThreshold ?? 45, 0, 108);
   const boldL = clamp(textL + (settings.boldLightnessDelta ?? 0), 0, 100);
   const italicStarL = clamp(textL + (settings.italicStarLightnessDelta ?? 0), 0, 100);
   const italicUnderscoreL = clamp(textL + (settings.italicUnderscoreLightnessDelta ?? 0), 0, 100);
@@ -123,9 +124,9 @@ function buildConfig(settings) {
     columnTitleShadowLength: clamp(settings.columnTitleShadowLength ?? 2, 0, 10),
     colorLink: textHex(settings.hueLink),
     colorDate: textHex(settings.hueDate) || "#7ab8e8",
-    colorBold: hueHex(settings.hueBold, boldL),
-    colorItalicStar: hueHex(settings.hueItalicStar, italicStarL),
-    colorItalicUnderscore: hueHex(settings.hueItalicUnderscore, italicUnderscoreL),
+    colorBold: textHueHex(settings.hueBold, boldL),
+    colorItalicStar: textHueHex(settings.hueItalicStar, italicStarL),
+    colorItalicUnderscore: textHueHex(settings.hueItalicUnderscore, italicUnderscoreL),
     fontSizeColumnTitle: (import_obsidian.Platform.isMobile ? settings.fontSizeColumnTitleMobile : settings.fontSizeColumnTitle) || "",
     fontSizeCardTitle: (import_obsidian.Platform.isMobile ? settings.fontSizeCardTitleMobile : settings.fontSizeCardTitle) || "",
     fontSizeSubtask: (import_obsidian.Platform.isMobile ? settings.fontSizeSubtaskMobile : settings.fontSizeSubtask) || ""
@@ -4002,6 +4003,7 @@ var KanbanView = class extends import_obsidian2.ItemView {
 var DEFAULT_COLORS = {
   colorSaturation: 55,
   colorLightness: 80,
+  textSaturation: 55,
   textLightness: 30,
   hueColumnOverLimit: 0,
   hueAllChildrenDone: 6,
@@ -4022,7 +4024,6 @@ var DEFAULT_COLORS = {
   hueLink: 237,
   hueDate: 244,
   hueColumnTitle: 225,
-  lightnessColumnTitle: 10,
   textContrastThreshold: 45,
   columnTitleShadowLength: 2,
   hueDoneColumn: 345,
@@ -4226,7 +4227,7 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
     containerEl.createEl("h2", { text: "Kanban Board Settings" });
     try {
       const s = this.plugin.settings;
-      const hueSetting = (container, name, desc, get, set, lightness, opts) => {
+      const hueSetting = (container, name, desc, get, set, lightness, opts, saturation = s.colorSaturation) => {
         const current = get();
         const setting = new import_obsidian3.Setting(container).setName(name).setDesc((desc + (opts.nullable && current === null ? opts.nullSuffix ?? " (using theme default)" : "")).trim());
         setting.settingEl.style.flexWrap = "wrap";
@@ -4238,7 +4239,7 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
         const swatch = setting.controlEl.createDiv();
         swatch.style.cssText = "width:24px;height:24px;border-radius:5px;margin-right:8px;flex-shrink:0;border:1px solid var(--background-modifier-border);";
         const paint = (hue) => {
-          swatch.style.background = hue === null ? "repeating-linear-gradient(45deg, var(--background-modifier-border), var(--background-modifier-border) 3px, transparent 3px, transparent 7px)" : hslToHex(hue, s.colorSaturation, lightness);
+          swatch.style.background = hue === null ? "repeating-linear-gradient(45deg, var(--background-modifier-border), var(--background-modifier-border) 3px, transparent 3px, transparent 7px)" : hslToHex(hue, saturation, lightness);
         };
         paint(current);
         setting.addSlider((slider) => {
@@ -4484,7 +4485,7 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
       plainSlider(
         containerEl,
         "Saturation",
-        "Shared saturation for every color choice below, including text. Doesn't affect the card-highlight dialog (clicking a card), which has its own fixed saturation.",
+        "Shared saturation for every color choice below except text colors, which have their own Saturation instead. Doesn't affect the card-highlight dialog (clicking a card), which has its own fixed saturation.",
         () => s.colorSaturation,
         (v) => {
           s.colorSaturation = v;
@@ -4511,43 +4512,43 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
       plainSlider(
         containerEl,
         "Text lightness",
-        "Shared lightness for the text colors below, independent of the general Lightness above \u2014 so text can stay legible regardless of how light/dark backgrounds are set. Saturation still comes from the shared Saturation above.",
+        "Shared lightness for the text colors below, independent of the general Lightness above \u2014 so text can stay legible regardless of how light/dark backgrounds are set.",
         () => s.textLightness,
         (v) => {
           s.textLightness = v;
         },
         "kb-lightness"
       );
+      plainSlider(
+        containerEl,
+        "Text saturation",
+        "Shared saturation for the text colors below, independent of the general Saturation above.",
+        () => s.textSaturation,
+        (v) => {
+          s.textSaturation = v;
+        },
+        "kb-saturation"
+      );
       hueSetting(containerEl, "Font color", "Text color for cards and tabs.", () => s.hueText, (v) => {
         s.hueText = v;
-      }, s.textLightness, { nullable: true });
+      }, s.textLightness, { nullable: true }, s.textSaturation);
       typeGroup((box) => {
         hueSetting(
           box,
           "Column title color",
-          "Dark, hue-selectable color for column header titles, at standard text Saturation. White is used instead for any column whose own background is too dark to read this dark color against.",
+          "Dark, hue-selectable color for column header titles, at Font color's own Saturation/Lightness. White is used instead for any column whose own background is too dark to read this dark color against.",
           () => s.hueColumnTitle,
           (v) => {
             s.hueColumnTitle = v;
           },
-          s.lightnessColumnTitle,
+          s.textLightness,
           {
             nullable: true,
             resetTo: () => s.hueText,
             resetTooltip: "Reset to Font color's hue",
             nullSuffix: " (using Font color's hue)"
-          }
-        );
-        plainSlider(
-          box,
-          "Column title darkness",
-          "How dark the color above is \u2014 75% to 100% dark (Lightness 25% down to 0%).",
-          () => s.lightnessColumnTitle,
-          (v) => {
-            s.lightnessColumnTitle = v;
           },
-          "kb-lightness",
-          [0, 25]
+          s.textSaturation
         );
         plainSlider(
           box,
@@ -4582,7 +4583,8 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
             s.hueBold = v;
           },
           clamp(s.textLightness + s.boldLightnessDelta, 0, 100),
-          { nullable: true, resetTo: () => s.hueText, resetTooltip: "Reset to Font color's hue" }
+          { nullable: true, resetTo: () => s.hueText, resetTooltip: "Reset to Font color's hue" },
+          s.textSaturation
         );
         plainSlider(
           box,
@@ -4606,7 +4608,8 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
             s.hueItalicStar = v;
           },
           clamp(s.textLightness + s.italicStarLightnessDelta, 0, 100),
-          { nullable: true, resetTo: () => s.hueText, resetTooltip: "Reset to Font color's hue" }
+          { nullable: true, resetTo: () => s.hueText, resetTooltip: "Reset to Font color's hue" },
+          s.textSaturation
         );
         plainSlider(
           box,
@@ -4630,7 +4633,8 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
             s.hueItalicUnderscore = v;
           },
           clamp(s.textLightness + s.italicUnderscoreLightnessDelta, 0, 100),
-          { nullable: true, resetTo: () => s.hueText, resetTooltip: "Reset to Font color's hue" }
+          { nullable: true, resetTo: () => s.hueText, resetTooltip: "Reset to Font color's hue" },
+          s.textSaturation
         );
         plainSlider(
           box,
@@ -4646,10 +4650,10 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
       });
       hueSetting(containerEl, "Link color", "Color for wiki links and URL badges on cards.", () => s.hueLink, (v) => {
         s.hueLink = v;
-      }, s.textLightness, { nullable: true });
+      }, s.textLightness, { nullable: true }, s.textSaturation);
       hueSetting(containerEl, "Date color", "Color for date annotations on cards (e.g. 'Jun 24', 'next Mon').", () => s.hueDate, (v) => {
         s.hueDate = v;
-      }, s.textLightness, { nullable: true });
+      }, s.textLightness, { nullable: true }, s.textSaturation);
       new import_obsidian3.Setting(containerEl).setName("Date font").setDesc("Font family for date annotations. Default: monospace.").addText(
         (t) => t.setPlaceholder("monospace").setValue(this.plugin.settings.fontDate || "").onChange(async (v) => {
           this.plugin.settings.fontDate = v;
