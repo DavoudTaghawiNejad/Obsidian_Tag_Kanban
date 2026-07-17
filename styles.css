@@ -1,0 +1,24 @@
+/* Keep Obsidian's native suggestion popover (used by the "Insert into
+   document" file picker) above this plugin's custom dialog overlays, which
+   render at a very high z-index of their own. The doc-name field's #k-doc-spacer
+   (see wireDocNameField in kanban.ts) reserves real layout room for it so it
+   shouldn't need to overlap the Add/Cancel buttons at all in practice; the
+   z-index/pointer-events rules below are just a safety net in case that
+   estimate ever falls short. Height generous enough for 7 rows (the field's
+   suggestion limit), including two-line rows for files outside the vault root. */
+.suggestion-container {
+  z-index: 10050;
+  max-height: 340px;
+  overflow-y: auto;
+}
+
+#k-actions,
+#k-date-actions {
+  position: relative;
+  z-index: 10060;
+  pointer-events: none;
+}
+#k-actions button,
+#k-date-actions button {
+  pointer-events: auto;
+}

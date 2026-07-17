@@ -927,88 +927,50 @@ async function moveToColumn(app, filePath, lineNum, originalTags, targetTag, isD
     return false;
   }
 }
-async function addNewItem(app, rawInsertTarget, columnTag, userText, dateStr, config, createDoc = false, notesText = "", docName = "") {
+function computeDefaultDocName(rawInsertTarget, columnTag, config) {
+  const baseName = rawInsertTarget.trim().split("#")[0].replace(/\.md$/, "").trim();
+  const normColumn = normalizeTag(columnTag);
+  const isLater = normColumn === config.normLater;
+  const isRecurrent = !!config.normRecurrent && normColumn === config.normRecurrent;
+  let targetFileName;
+  if (isLater)
+    targetFileName = "Later";
+  else if (isRecurrent)
+    targetFileName = "Recurrent";
+  else {
+    const now = new Date();
+    const monthStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+    targetFileName = `${baseName}-${monthStr}`;
+  }
+  return `${baseName}/${targetFileName}`;
+}
+async function ensureParentFolder(app, path) {
+  const idx = path.lastIndexOf("/");
+  if (idx === -1)
+    return;
+  const dir = path.slice(0, idx);
+  if (!(app.vault.getAbstractFileByPath(dir) instanceof import_obsidian.TFolder)) {
+    await app.vault.createFolder(dir);
+  }
+}
+async function addNewItem(app, columnTag, userText, dateStr, config, notesText = "", docName = "", defaultDocName = "") {
   try {
     if (!userText?.trim())
       return false;
     let cardText = userText.trim();
     const noteLines = formatNoteLines("", notesText);
-    if (createDoc) {
-      const docTitle = sanitizeDocTitle(docName.trim() || cardText);
-      const docPath = `${docTitle.replace(/\.md$/i, "")}.md`;
-      let projFile = app.vault.getAbstractFileByPath(docPath);
-      const wasNew = !projFile;
-      if (!projFile) {
-        projFile = await app.vault.create(docPath, "");
-        showInfoDialog(`Created new note "${projFile.path}".`);
-      }
-      let newLine2 = `- [ ] ${cardText} ${columnTag}`;
-      if (dateStr)
-        newLine2 += ` ${dateStr}`;
-      {
-        const n = new Date();
-        const skipStr = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
-        if (config.normRecurrent && normalizeTag(columnTag) === config.normRecurrent && !hasValidTriggers(newLine2, config.normRecurrent) && !extractSkipDate(newLine2)) {
-          newLine2 = setSkipDate(newLine2, skipStr);
-        }
-        if (normalizeTag(columnTag) === config.normLater && !dateStr) {
-          newLine2 = setSkipDate(newLine2, skipStr);
-        }
-      }
-      const projLines = (await app.vault.read(projFile)).split("\n");
-      const insertAt2 = afterLeadingHeading(projLines, afterFrontMatter(projLines));
-      projLines.splice(insertAt2, 0, newLine2, ...noteLines);
-      await app.vault.modify(projFile, projLines.join("\n"));
-      const masterDocName = config.projectsDocument.trim();
-      if (wasNew && masterDocName) {
-        const masterPath = masterDocName.endsWith(".md") ? masterDocName : `${masterDocName}.md`;
-        let masterFile = app.vault.getAbstractFileByPath(masterPath);
-        if (!masterFile) {
-          masterFile = await app.vault.create(masterPath, `# ${masterDocName}
-`);
-        }
-        const masterLines = (await app.vault.read(masterFile)).split("\n");
-        masterLines.splice(afterFrontMatter(masterLines), 0, `[[${projFile.basename}]]`);
-        await app.vault.modify(masterFile, masterLines.join("\n"));
-      }
-      new import_obsidian.Notice(`Added "${userText}" to ${projFile.path}.`);
-      return true;
+    const docTitle = sanitizeDocTitle(docName.trim() || cardText);
+    const wantedPath = `${docTitle.replace(/\.md$/i, "")}.md`;
+    let projFile = app.vault.getAbstractFileByPath(wantedPath);
+    if (!projFile) {
+      const wantedLower = wantedPath.toLowerCase();
+      projFile = app.vault.getMarkdownFiles().find((f) => f.path.toLowerCase() === wantedLower) ?? null;
     }
-    const baseName = rawInsertTarget.trim().split("#")[0].replace(/\.md$/, "").trim();
-    const dirPath = baseName;
-    const indexPath = `${dirPath}/${baseName}.md`;
-    if (!(app.vault.getAbstractFileByPath(dirPath) instanceof import_obsidian.TFolder)) {
-      await app.vault.createFolder(dirPath);
-    }
-    const normColumn = normalizeTag(columnTag);
-    const isLater = normColumn === config.normLater;
-    const isRecurrent = !!config.normRecurrent && normColumn === config.normRecurrent;
-    let targetFileName;
-    if (isLater)
-      targetFileName = "Later";
-    else if (isRecurrent)
-      targetFileName = "Recurrent";
-    else {
-      const now = new Date();
-      const monthStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-      targetFileName = `${baseName}-${monthStr}`;
-    }
-    const targetPath = `${dirPath}/${targetFileName}.md`;
-    let targetFile = app.vault.getAbstractFileByPath(targetPath);
-    if (!targetFile) {
-      targetFile = await app.vault.create(targetPath, `# ${targetFileName}
-`);
-    }
-    const linkLine = `[[${targetFileName}]]`;
-    let indexFile = app.vault.getAbstractFileByPath(indexPath);
-    if (!indexFile) {
-      await app.vault.create(indexPath, linkLine + "\n");
-    } else {
-      const idxLines = (await app.vault.read(indexFile)).split("\n");
-      if (!idxLines.some((l) => l.trim() === linkLine)) {
-        idxLines.splice(afterFrontMatter(idxLines), 0, linkLine);
-        await app.vault.modify(indexFile, idxLines.join("\n"));
-      }
+    const wasNew = !projFile;
+    if (!projFile) {
+      await ensureParentFolder(app, wantedPath);
+      projFile = await app.vault.create(wantedPath, "");
+      showInfoDialog(`Created new note "${projFile.path}".`);
     }
     let newLine = `- [ ] ${cardText} ${columnTag}`;
     if (dateStr)
@@ -1016,18 +978,31 @@ async function addNewItem(app, rawInsertTarget, columnTag, userText, dateStr, co
     {
       const n = new Date();
       const skipStr = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
-      if (isRecurrent && !hasValidTriggers(newLine, config.normRecurrent) && !extractSkipDate(newLine)) {
+      if (config.normRecurrent && normalizeTag(columnTag) === config.normRecurrent && !hasValidTriggers(newLine, config.normRecurrent) && !extractSkipDate(newLine)) {
         newLine = setSkipDate(newLine, skipStr);
       }
-      if (isLater && !dateStr) {
+      if (normalizeTag(columnTag) === config.normLater && !dateStr) {
         newLine = setSkipDate(newLine, skipStr);
       }
     }
-    const targetLines = (await app.vault.read(targetFile)).split("\n");
-    const insertAt = afterLeadingHeading(targetLines, afterFrontMatter(targetLines));
-    targetLines.splice(insertAt, 0, newLine, ...noteLines);
-    await app.vault.modify(targetFile, targetLines.join("\n"));
-    new import_obsidian.Notice(`Added "${userText}" to ${columnTag.replace(/^#/, "").toUpperCase()}.`);
+    const projLines = (await app.vault.read(projFile)).split("\n");
+    const insertAt = afterLeadingHeading(projLines, afterFrontMatter(projLines));
+    projLines.splice(insertAt, 0, newLine, ...noteLines);
+    await app.vault.modify(projFile, projLines.join("\n"));
+    const isCustomTarget = docTitle.toLowerCase() !== sanitizeDocTitle(defaultDocName).toLowerCase();
+    const masterDocName = config.projectsDocument.trim();
+    if (wasNew && isCustomTarget && masterDocName) {
+      const masterPath = masterDocName.endsWith(".md") ? masterDocName : `${masterDocName}.md`;
+      let masterFile = app.vault.getAbstractFileByPath(masterPath);
+      if (!masterFile) {
+        masterFile = await app.vault.create(masterPath, `# ${masterDocName}
+`);
+      }
+      const masterLines = (await app.vault.read(masterFile)).split("\n");
+      masterLines.splice(afterFrontMatter(masterLines), 0, `[[${projFile.basename}]]`);
+      await app.vault.modify(masterFile, masterLines.join("\n"));
+    }
+    new import_obsidian.Notice(`Added "${userText}" to ${projFile.path}.`);
     return true;
   } catch (e) {
     console.error("addNewItem failed:", e);
@@ -1039,7 +1014,8 @@ async function addDueColumnExplanationCard(app, config) {
   if (!config.dueColumn)
     return false;
   const text = "This column only shows up while it has cards in it \u2014 it disappears automatically when it's empty, and reappears once the board moves a due-later or recurrent card into it.";
-  return addNewItem(app, config.newTaskInsert, config.dueColumn, text, null, config, false, "");
+  const docName = computeDefaultDocName(config.newTaskInsert, config.dueColumn, config);
+  return addNewItem(app, config.dueColumn, text, null, config, "", docName, docName);
 }
 async function moveCardToNewDoc(app, filePath, lineNum, plainTitle, targetTag, config) {
   const safeTitle = plainTitle.replace(/[\\/:*?"<>|#\[\]]/g, " ").replace(/\s+/g, " ").trim();
@@ -1474,6 +1450,19 @@ function checklistButtonHtml(id, title) {
   const style = "padding:3px 10px;border-radius:12px;border:1px solid var(--background-modifier-border);background:none;cursor:pointer;font-size:1em;line-height:1;display:inline-flex;align-items:center;gap:6px;color:inherit;margin-bottom:10px;";
   return `<button type="button" id="${id}" title="${title}" style="${style}">Insert &#9744;</button>`;
 }
+function docBrowseBtnStyle() {
+  return "padding:0 10px;border:1px solid var(--background-modifier-border);border-radius:4px;background:var(--background-secondary);color:var(--text-normal);cursor:pointer;font-size:1em;line-height:1;";
+}
+function docNameFieldHtml() {
+  return `<div style="text-align:left;margin-bottom:12px;">
+    <label style="display:block;margin-bottom:4px;color:var(--text-muted);font-size:.85em;">Insert into document</label>
+    <div style="display:flex;gap:6px;">
+      <input id="k-doc-name" type="text" style="${inputStyle()}margin-bottom:0;flex:1;">
+      <button type="button" id="k-doc-browse" title="Browse notes" style="${docBrowseBtnStyle()}">&#9662;</button>
+    </div>
+    <div id="k-doc-spacer" style="height:0;"></div>
+  </div>`;
+}
 function insertChecklistPrefix(textarea) {
   const value = textarea.value;
   const pos = textarea.selectionStart ?? value.length;
@@ -1539,7 +1528,28 @@ var DocSuggest = class extends import_obsidian.AbstractInputSuggest {
   constructor(app, inputEl) {
     super(app, inputEl);
     this.inputEl = inputEl;
+    // Fires whenever `enabled` changes, from any code path (wireDocNameField's
+    // reveal/Escape/Enter handling, or selectSuggestion below) — lets the
+    // dialog reserve/collapse layout space for the popover in lockstep with it
+    // actually opening or closing, rather than guessing at its real height.
+    this.onEnabledChange = null;
+    this._enabled = false;
     this.matches = /* @__PURE__ */ new Map();
+    this.limit = 7;
+  }
+  // Suppresses Obsidian's automatic open-on-focus/open-on-type behavior; the
+  // popover only actually renders once something explicitly flips this (arrow
+  // keys, Tab, or the browse button — see wireDocNameField) and calls open().
+  get enabled() {
+    return this._enabled;
+  }
+  set enabled(v) {
+    this._enabled = v;
+    this.onEnabledChange?.(v);
+  }
+  open() {
+    if (this.enabled)
+      super.open();
   }
   getSuggestions(query) {
     this.matches.clear();
@@ -1571,34 +1581,72 @@ var DocSuggest = class extends import_obsidian.AbstractInputSuggest {
   }
   selectSuggestion(file) {
     this.setValue(file.parent && !file.parent.isRoot() ? file.path.replace(/\.md$/, "") : file.basename);
+    this.enabled = false;
     this.close();
     this.inputEl.dispatchEvent(new Event("input"));
   }
 };
-function wireDocNameField(app, dialog, textInput) {
-  const docCheck = dialog.querySelector("#k-doc");
-  const docWrap = dialog.querySelector("#k-doc-wrap");
+function wireDocNameField(app, dialog, defaultDocName, onEnter) {
   const docNameInput = dialog.querySelector("#k-doc-name");
-  new DocSuggest(app, docNameInput);
-  let autoSync = true;
-  docNameInput.value = sanitizeDocTitle(textInput.value);
-  docCheck.addEventListener("change", () => {
-    docWrap.style.display = docCheck.checked ? "block" : "none";
-    if (docCheck.checked)
-      docNameInput.focus();
+  const browseBtn = dialog.querySelector("#k-doc-browse");
+  const spacer = dialog.querySelector("#k-doc-spacer");
+  const docSuggest = new DocSuggest(app, docNameInput);
+  docNameInput.value = defaultDocName;
+  docSuggest.onEnabledChange = (open) => {
+    spacer.style.height = open ? "300px" : "0";
+  };
+  let navigated = false;
+  let forwardingEnter = false;
+  const reveal = () => {
+    docSuggest.enabled = true;
+    docSuggest.open();
+  };
+  let firstFocus = true;
+  docNameInput.addEventListener("focus", () => {
+    if (firstFocus) {
+      firstFocus = false;
+      docNameInput.select();
+    }
   });
-  textInput.addEventListener("input", () => {
-    if (autoSync)
-      docNameInput.value = sanitizeDocTitle(textInput.value);
+  browseBtn.addEventListener("click", () => {
+    docNameInput.focus();
+    reveal();
+  });
+  docNameInput.addEventListener("blur", () => {
+    docSuggest.enabled = false;
   });
   docNameInput.addEventListener("input", () => {
-    autoSync = false;
+    navigated = false;
   });
+  docNameInput.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      navigated = true;
+      reveal();
+    } else if (e.key === "Tab") {
+      e.preventDefault();
+      if (!docSuggest.enabled) {
+        reveal();
+      } else {
+        forwardingEnter = true;
+        docNameInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+        forwardingEnter = false;
+      }
+    } else if (e.key === "Escape") {
+      docSuggest.enabled = false;
+      docSuggest.close();
+    } else if (e.key === "Enter" && !navigated && !forwardingEnter) {
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      docSuggest.enabled = false;
+      docSuggest.close();
+      onEnter();
+    }
+  }, true);
   return () => docNameInput.value.trim();
 }
-function showInputDialog(title, defaultCreateDoc, app, onSubmit) {
+function showInputDialog(title, app, defaultDocName, onSubmit) {
   const { dialog, close } = makeOverlay("kanban-input-dialog");
-  const chk = defaultCreateDoc ? "checked" : "";
   dialog.innerHTML = `<h3 style="margin:0 0 10px;font-size:1.1em;">${title}</h3>
     <input id="k-text" type="text" placeholder="Enter new item text..." style="${inputStyle()}" autofocus>
     <details id="k-notes-details" style="text-align:left;margin-bottom:10px;">
@@ -1606,27 +1654,21 @@ function showInputDialog(title, defaultCreateDoc, app, onSubmit) {
       <textarea id="k-notes" placeholder="Subtasks..." style="${textareaStyle()}margin-top:10px;"></textarea>
       <div style="text-align:left;">${checklistButtonHtml("k-notes-checklist", "Insert checklist item")}</div>
     </details>
-    <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px;cursor:pointer;font-size:.9em;">
-      <input id="k-doc" type="checkbox" ${chk}> Insert in document
-    </label>
-    <div id="k-doc-wrap" style="display:${defaultCreateDoc ? "block" : "none"};margin-bottom:12px;">
-      <input id="k-doc-name" type="text" placeholder="Document name..." style="${inputStyle()}margin-bottom:0;">
-    </div>
+    ${docNameFieldHtml()}
     <div id="k-actions" style="display:flex;gap:10px;justify-content:center;">${buttonHtml("Add", true)}${buttonHtml("Cancel", false)}</div>`;
   const [addBtn, cancelBtn] = dialog.querySelectorAll("#k-actions button");
   const input = dialog.querySelector("#k-text");
   const notesInput = dialog.querySelector("#k-notes");
   const checklistBtn = dialog.querySelector("#k-notes-checklist");
-  const docCheck = dialog.querySelector("#k-doc");
-  const getDocName = wireDocNameField(app, dialog, input);
-  const submit = () => {
+  let submit;
+  const getDocName = wireDocNameField(app, dialog, defaultDocName, () => submit());
+  submit = () => {
     const v = input.value.trim();
-    const createDoc = docCheck.checked;
     const notes = notesInput.value;
     const docName = getDocName();
     close();
     if (v)
-      onSubmit(v, createDoc, notes, docName);
+      onSubmit(v, notes, docName);
   };
   addBtn.onclick = submit;
   cancelBtn.onclick = close;
@@ -1644,9 +1686,8 @@ function showInputDialog(title, defaultCreateDoc, app, onSubmit) {
   input.focus();
 }
 function showDateDialog(title, defaultDate, app, onSubmit, opts = {}) {
-  const { withText, defaultCreateDoc } = opts;
+  const { withText, defaultDocName } = opts;
   const { dialog, close } = makeOverlay(withText ? "kanban-later-add-dialog" : "kanban-date-dialog");
-  const chk = defaultCreateDoc ? "checked" : "";
   const presetBtnStyle = (active) => `padding:4px 10px;border:none;border-radius:12px;cursor:pointer;font-size:.75em;` + (active ? `background:var(--interactive-accent);color:var(--text-on-accent);` : `background:var(--background-modifier-border);color:var(--text-normal);`);
   let selectedPreset = DATE_PRESETS.find(([, , fn]) => fn().toISOString().split("T")[0] === defaultDate)?.[0] ?? null;
   const presetBtnsHtml = DATE_PRESETS.map(
@@ -1661,20 +1702,15 @@ function showDateDialog(title, defaultDate, app, onSubmit, opts = {}) {
     </details>` : ""}
     <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:center;margin-bottom:8px;">${presetBtnsHtml}</div>
     <input id="k-date" type="date" value="${defaultDate}" style="${dateInputStyle()}" ${withText ? "" : "autofocus"}>
-    ${withText ? `<label style="display:flex;align-items:center;gap:8px;margin-bottom:8px;cursor:pointer;font-size:.9em;">
-      <input id="k-doc" type="checkbox" ${chk}> Insert in document
-    </label>
-    <div id="k-doc-wrap" style="display:${defaultCreateDoc ? "block" : "none"};margin-bottom:12px;">
-      <input id="k-doc-name" type="text" placeholder="Document name..." style="${inputStyle()}margin-bottom:0;">
-    </div>` : ""}
+    ${withText ? docNameFieldHtml() : ""}
     <div id="k-date-actions" style="display:flex;gap:10px;justify-content:center;">${buttonHtml(withText ? "Add" : "Set", true)}${buttonHtml("No date", false)}${buttonHtml("Cancel", false)}</div>`;
   const [actionBtn, noDateBtn, cancelBtn] = dialog.querySelectorAll("#k-date-actions button");
   const textInput = withText ? dialog.querySelector("#k-text") : null;
   const notesInput = withText ? dialog.querySelector("#k-notes") : null;
   const checklistBtn = withText ? dialog.querySelector("#k-notes-checklist") : null;
   const dateInput = dialog.querySelector("#k-date");
-  const docCheck = withText ? dialog.querySelector("#k-doc") : null;
-  const getDocName = withText && textInput ? wireDocNameField(app, dialog, textInput) : null;
+  let submit;
+  const getDocName = withText ? wireDocNameField(app, dialog, defaultDocName ?? "", () => submit(true)) : null;
   if (checklistBtn && notesInput) {
     checklistBtn.onclick = () => insertChecklistPrefix(notesInput);
   }
@@ -1689,7 +1725,7 @@ function showDateDialog(title, defaultDate, app, onSubmit, opts = {}) {
       });
     };
   });
-  const submit = (useDate) => {
+  submit = (useDate) => {
     const t = textInput?.value.trim() ?? "";
     if (withText && !t)
       return;
@@ -1697,7 +1733,7 @@ function showDateDialog(title, defaultDate, app, onSubmit, opts = {}) {
     const notes = notesInput?.value ?? "";
     const docName = getDocName?.();
     close();
-    onSubmit(d ? "@" + d : null, withText ? t : void 0, docCheck?.checked, withText ? notes : void 0, docName);
+    onSubmit(d ? "@" + d : null, withText ? t : void 0, withText ? notes : void 0, docName);
   };
   actionBtn.onclick = () => submit(true);
   noDateBtn.onclick = () => submit(false);
@@ -3641,27 +3677,27 @@ function attachListeners(boardEl, config, app, refresh) {
     const tag = btn.dataset.tag;
     const norm = btn.dataset.column;
     const title = `Add to ${tag.replace(/^#/, "").toUpperCase()} Column`;
-    const isProject = config.normProject.includes(norm);
+    const defaultDocName = computeDefaultDocName(config.newTaskInsert, tag, config);
     if (norm === config.normLater) {
       const defDate = getDefaultDate().toISOString().split("T")[0];
-      showDateDialog(title, defDate, app, async (dateStr, text, createDoc, notes, docName) => {
-        if (text && await addNewItem(app, config.newTaskInsert, tag, text, dateStr, config, !!createDoc, notes, docName))
+      showDateDialog(title, defDate, app, async (dateStr, text, notes, docName) => {
+        if (text && await addNewItem(app, tag, text, dateStr, config, notes, docName, defaultDocName))
           requestAnimationFrame(() => setTimeout(refresh, 50));
-      }, { withText: true, defaultCreateDoc: isProject });
+      }, { withText: true, defaultDocName });
     } else if (config.normRecurrent && norm === config.normRecurrent) {
-      showInputDialog(title, isProject, app, (text, createDoc, notes, docName) => {
+      showInputDialog(title, app, defaultDocName, (text, notes, docName) => {
         showRecurrentTriggerDialog(async (triggerStr) => {
           const n = new Date();
           const skipStr = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
           const triggerPart = triggerStr ? ` ${triggerStr}` : "";
           const annotated = `${text} @${config.normRecurrent}${triggerPart} %% @skip:${skipStr} %%`;
-          if (await addNewItem(app, config.newTaskInsert, tag, annotated, null, config, createDoc, notes, docName))
+          if (await addNewItem(app, tag, annotated, null, config, notes, docName, defaultDocName))
             requestAnimationFrame(() => setTimeout(refresh, 50));
         });
       });
     } else {
-      showInputDialog(title, isProject, app, async (text, createDoc, notes, docName) => {
-        if (await addNewItem(app, config.newTaskInsert, tag, text, null, config, createDoc, notes, docName))
+      showInputDialog(title, app, defaultDocName, async (text, notes, docName) => {
+        if (await addNewItem(app, tag, text, null, config, notes, docName, defaultDocName))
           requestAnimationFrame(() => setTimeout(refresh, 50));
       });
     }

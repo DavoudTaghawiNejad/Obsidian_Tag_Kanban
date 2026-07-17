@@ -1227,16 +1227,45 @@ async function moveToColumn(
   }
 }
 
+// The monthly/column doc a card lands in when the "Insert into document"
+// field is left untouched: {baseName}/{baseName}-YYYY-MM.md for ordinary
+// columns, {baseName}/Later.md and {baseName}/Recurrent.md for those columns.
+function computeDefaultDocName(rawInsertTarget: string, columnTag: string, config: KanbanConfig): string {
+  const baseName = rawInsertTarget.trim().split("#")[0].replace(/\.md$/, "").trim();
+  const normColumn = normalizeTag(columnTag);
+  const isLater = normColumn === config.normLater;
+  const isRecurrent = !!config.normRecurrent && normColumn === config.normRecurrent;
+
+  let targetFileName: string;
+  if (isLater) targetFileName = "Later";
+  else if (isRecurrent) targetFileName = "Recurrent";
+  else {
+    const now = new Date();
+    const monthStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+    targetFileName = `${baseName}-${monthStr}`;
+  }
+  return `${baseName}/${targetFileName}`;
+}
+
+// vault.create() fails if a nested path's parent folder doesn't exist yet.
+async function ensureParentFolder(app: App, path: string): Promise<void> {
+  const idx = path.lastIndexOf("/");
+  if (idx === -1) return;
+  const dir = path.slice(0, idx);
+  if (!(app.vault.getAbstractFileByPath(dir) instanceof TFolder)) {
+    await app.vault.createFolder(dir);
+  }
+}
+
 async function addNewItem(
   app: App,
-  rawInsertTarget: string,
   columnTag: string,
   userText: string,
   dateStr: string | null,
   config: KanbanConfig,
-  createDoc = false,
   notesText = "",
-  docName = ""
+  docName = "",
+  defaultDocName = ""
 ): Promise<boolean> {
   try {
     if (!userText?.trim()) return false;
@@ -1244,96 +1273,26 @@ async function addNewItem(
     let cardText = userText.trim();
     const noteLines = formatNoteLines("", notesText);
 
-    if (createDoc) {
-      // ── "Insert in document" path ────────────────────────────────────────────
-      // Task goes into the chosen (or newly created) doc; a [[link]] is added to
-      // the master doc only when the target note didn't already exist.
-      const docTitle = sanitizeDocTitle(docName.trim() || cardText);
-      const docPath = `${docTitle.replace(/\.md$/i, "")}.md`;
+    // Task goes into the chosen (or newly created) doc; a [[link]] is added
+    // to the master doc only when the target is both new and a deliberate
+    // departure from the default monthly/column doc — that default doc isn't
+    // a "project" just because it happened to be created just now.
+    const docTitle = sanitizeDocTitle(docName.trim() || cardText);
+    const wantedPath = `${docTitle.replace(/\.md$/i, "")}.md`;
 
-      let projFile = app.vault.getAbstractFileByPath(docPath) as TFile | null;
-      const wasNew = !projFile;
-      if (!projFile) {
-        projFile = await app.vault.create(docPath, "");
-        showInfoDialog(`Created new note "${projFile.path}".`);
-      }
-
-      let newLine = `- [ ] ${cardText} ${columnTag}`;
-      if (dateStr) newLine += ` ${dateStr}`;
-      {
-        const n = new Date();
-        const skipStr = `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;
-        if (config.normRecurrent && normalizeTag(columnTag) === config.normRecurrent
-            && !hasValidTriggers(newLine, config.normRecurrent) && !extractSkipDate(newLine)) {
-          newLine = setSkipDate(newLine, skipStr);
-        }
-        if (normalizeTag(columnTag) === config.normLater && !dateStr) {
-          newLine = setSkipDate(newLine, skipStr);
-        }
-      }
-      const projLines = (await app.vault.read(projFile)).split("\n");
-      const insertAt = afterLeadingHeading(projLines, afterFrontMatter(projLines));
-      projLines.splice(insertAt, 0, newLine, ...noteLines);
-      await app.vault.modify(projFile, projLines.join("\n"));
-
-      const masterDocName = config.projectsDocument.trim();
-      if (wasNew && masterDocName) {
-        const masterPath = masterDocName.endsWith(".md") ? masterDocName : `${masterDocName}.md`;
-        let masterFile = app.vault.getAbstractFileByPath(masterPath) as TFile | null;
-        if (!masterFile) {
-          masterFile = await app.vault.create(masterPath, `# ${masterDocName}\n`);
-        }
-        const masterLines = (await app.vault.read(masterFile)).split("\n");
-        masterLines.splice(afterFrontMatter(masterLines), 0, `[[${projFile.basename}]]`);
-        await app.vault.modify(masterFile, masterLines.join("\n"));
-      }
-
-      new Notice(`Added "${userText}" to ${projFile.path}.`);
-      return true;
+    // Case-insensitive match: a bare Enter (no exact suggestion picked)
+    // should still land in an existing note that only differs by case,
+    // rather than creating a near-duplicate file.
+    let projFile = app.vault.getAbstractFileByPath(wantedPath) as TFile | null;
+    if (!projFile) {
+      const wantedLower = wantedPath.toLowerCase();
+      projFile = app.vault.getMarkdownFiles().find((f) => f.path.toLowerCase() === wantedLower) ?? null;
     }
-
-    // ── Normal path ────────────────────────────────────────────────────────
-    // Later/Recurrent: {baseName}/{ColumnName}.md — one undated running doc per column
-    // Everything else: {baseName}/{baseName}-YYYY-MM.md — monthly document
-    // {baseName}/{baseName}.md — index linking to each target doc (newest on top)
-    const baseName = rawInsertTarget.trim().split("#")[0].replace(/\.md$/, "").trim();
-    const dirPath = baseName;
-    const indexPath = `${dirPath}/${baseName}.md`;
-
-    if (!(app.vault.getAbstractFileByPath(dirPath) instanceof TFolder)) {
-      await app.vault.createFolder(dirPath);
-    }
-
-    const normColumn = normalizeTag(columnTag);
-    const isLater = normColumn === config.normLater;
-    const isRecurrent = !!config.normRecurrent && normColumn === config.normRecurrent;
-
-    let targetFileName: string;
-    if (isLater) targetFileName = "Later";
-    else if (isRecurrent) targetFileName = "Recurrent";
-    else {
-      const now = new Date();
-      const monthStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-      targetFileName = `${baseName}-${monthStr}`;
-    }
-    const targetPath = `${dirPath}/${targetFileName}.md`;
-
-    let targetFile = app.vault.getAbstractFileByPath(targetPath) as TFile | null;
-    if (!targetFile) {
-      targetFile = await app.vault.create(targetPath, `# ${targetFileName}\n`);
-    }
-
-    // Add link to index only if not already present
-    const linkLine = `[[${targetFileName}]]`;
-    let indexFile = app.vault.getAbstractFileByPath(indexPath) as TFile | null;
-    if (!indexFile) {
-      await app.vault.create(indexPath, linkLine + "\n");
-    } else {
-      const idxLines = (await app.vault.read(indexFile)).split("\n");
-      if (!idxLines.some(l => l.trim() === linkLine)) {
-        idxLines.splice(afterFrontMatter(idxLines), 0, linkLine);
-        await app.vault.modify(indexFile, idxLines.join("\n"));
-      }
+    const wasNew = !projFile;
+    if (!projFile) {
+      await ensureParentFolder(app, wantedPath);
+      projFile = await app.vault.create(wantedPath, "");
+      showInfoDialog(`Created new note "${projFile.path}".`);
     }
 
     let newLine = `- [ ] ${cardText} ${columnTag}`;
@@ -1341,19 +1300,33 @@ async function addNewItem(
     {
       const n = new Date();
       const skipStr = `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;
-      if (isRecurrent && !hasValidTriggers(newLine, config.normRecurrent) && !extractSkipDate(newLine)) {
+      if (config.normRecurrent && normalizeTag(columnTag) === config.normRecurrent
+          && !hasValidTriggers(newLine, config.normRecurrent) && !extractSkipDate(newLine)) {
         newLine = setSkipDate(newLine, skipStr);
       }
-      if (isLater && !dateStr) {
+      if (normalizeTag(columnTag) === config.normLater && !dateStr) {
         newLine = setSkipDate(newLine, skipStr);
       }
     }
-    const targetLines = (await app.vault.read(targetFile)).split("\n");
-    const insertAt = afterLeadingHeading(targetLines, afterFrontMatter(targetLines));
-    targetLines.splice(insertAt, 0, newLine, ...noteLines);
-    await app.vault.modify(targetFile, targetLines.join("\n"));
+    const projLines = (await app.vault.read(projFile)).split("\n");
+    const insertAt = afterLeadingHeading(projLines, afterFrontMatter(projLines));
+    projLines.splice(insertAt, 0, newLine, ...noteLines);
+    await app.vault.modify(projFile, projLines.join("\n"));
 
-    new Notice(`Added "${userText}" to ${columnTag.replace(/^#/, "").toUpperCase()}.`);
+    const isCustomTarget = docTitle.toLowerCase() !== sanitizeDocTitle(defaultDocName).toLowerCase();
+    const masterDocName = config.projectsDocument.trim();
+    if (wasNew && isCustomTarget && masterDocName) {
+      const masterPath = masterDocName.endsWith(".md") ? masterDocName : `${masterDocName}.md`;
+      let masterFile = app.vault.getAbstractFileByPath(masterPath) as TFile | null;
+      if (!masterFile) {
+        masterFile = await app.vault.create(masterPath, `# ${masterDocName}\n`);
+      }
+      const masterLines = (await app.vault.read(masterFile)).split("\n");
+      masterLines.splice(afterFrontMatter(masterLines), 0, `[[${projFile.basename}]]`);
+      await app.vault.modify(masterFile, masterLines.join("\n"));
+    }
+
+    new Notice(`Added "${userText}" to ${projFile.path}.`);
     return true;
   } catch (e: any) {
     console.error("addNewItem failed:", e);
@@ -1370,7 +1343,8 @@ export async function addDueColumnExplanationCard(app: App, config: KanbanConfig
   const text =
     "This column only shows up while it has cards in it — it disappears automatically when it's empty, " +
     "and reappears once the board moves a due-later or recurrent card into it.";
-  return addNewItem(app, config.newTaskInsert, config.dueColumn, text, null, config, false, "");
+  const docName = computeDefaultDocName(config.newTaskInsert, config.dueColumn, config);
+  return addNewItem(app, config.dueColumn, text, null, config, "", docName, docName);
 }
 
 async function moveCardToNewDoc(
@@ -1965,6 +1939,23 @@ function checklistButtonHtml(id: string, title: string) {
   return `<button type="button" id="${id}" title="${title}" style="${style}">Insert &#9744;</button>`;
 }
 
+// The doc-name field's "▾" browse button: reveals the file-suggest popover
+// (see wireDocNameField) without needing to press an arrow/Tab key first.
+function docBrowseBtnStyle() {
+  return "padding:0 10px;border:1px solid var(--background-modifier-border);border-radius:4px;background:var(--background-secondary);color:var(--text-normal);cursor:pointer;font-size:1em;line-height:1;";
+}
+
+function docNameFieldHtml() {
+  return `<div style="text-align:left;margin-bottom:12px;">
+    <label style="display:block;margin-bottom:4px;color:var(--text-muted);font-size:.85em;">Insert into document</label>
+    <div style="display:flex;gap:6px;">
+      <input id="k-doc-name" type="text" style="${inputStyle()}margin-bottom:0;flex:1;">
+      <button type="button" id="k-doc-browse" title="Browse notes" style="${docBrowseBtnStyle()}">&#9662;</button>
+    </div>
+    <div id="k-doc-spacer" style="height:0;"></div>
+  </div>`;
+}
+
 // Inserts the checklist placeholder glyph at the start of the line the cursor is
 // currently on, after any existing leading whitespace so indentation is preserved.
 // The glyph is expanded to "- [ ] " by formatNoteLines when the card/subtask is saved.
@@ -2042,10 +2033,30 @@ function showInfoDialog(message: string) {
 // own [[link]] autocomplete) to a plain <input>, filtering the vault's
 // markdown files as the user types.
 class DocSuggest extends AbstractInputSuggest<TFile> {
+  // Fires whenever `enabled` changes, from any code path (wireDocNameField's
+  // reveal/Escape/Enter handling, or selectSuggestion below) — lets the
+  // dialog reserve/collapse layout space for the popover in lockstep with it
+  // actually opening or closing, rather than guessing at its real height.
+  onEnabledChange: ((enabled: boolean) => void) | null = null;
+  private _enabled = false;
+  // Suppresses Obsidian's automatic open-on-focus/open-on-type behavior; the
+  // popover only actually renders once something explicitly flips this (arrow
+  // keys, Tab, or the browse button — see wireDocNameField) and calls open().
+  get enabled(): boolean { return this._enabled; }
+  set enabled(v: boolean) {
+    this._enabled = v;
+    this.onEnabledChange?.(v);
+  }
   private matches = new Map<TFile, SearchResult>();
 
   constructor(app: App, private inputEl: HTMLInputElement) {
     super(app, inputEl);
+    // Never show more than the first 7 matches of the current filter.
+    this.limit = 7;
+  }
+
+  open(): void {
+    if (this.enabled) super.open();
   }
 
   getSuggestions(query: string): TFile[] {
@@ -2077,39 +2088,104 @@ class DocSuggest extends AbstractInputSuggest<TFile> {
 
   selectSuggestion(file: TFile): void {
     this.setValue(file.parent && !file.parent.isRoot() ? file.path.replace(/\.md$/, "") : file.basename);
+    this.enabled = false;
     this.close();
     this.inputEl.dispatchEvent(new Event("input"));
   }
 }
 
-// Shared by showInputDialog/showDateDialog's "Insert in document" section:
-// shows the doc-name field only while the checkbox is checked, keeps it
-// mirroring the card-text field's sanitized value until the user edits it (or
-// picks a suggestion, which counts as an edit) directly, and attaches the
-// native file-suggest popover.
-function wireDocNameField(app: App, dialog: HTMLElement, textInput: HTMLInputElement): () => string {
-  const docCheck = dialog.querySelector("#k-doc") as HTMLInputElement;
-  const docWrap = dialog.querySelector("#k-doc-wrap") as HTMLElement;
+// Shared by showInputDialog/showDateDialog's always-visible "Insert into
+// document" field: prepopulated with the computed default (the monthly/column
+// doc a card would land in anyway), with the native file-suggest popover
+// gated to open only on explicit request (arrow keys, Tab, or the browse
+// button) rather than on every keystroke or on focus.
+function wireDocNameField(app: App, dialog: HTMLElement, defaultDocName: string, onEnter: () => void): () => string {
   const docNameInput = dialog.querySelector("#k-doc-name") as HTMLInputElement;
-  new DocSuggest(app, docNameInput);
+  const browseBtn = dialog.querySelector("#k-doc-browse") as HTMLButtonElement;
+  const spacer = dialog.querySelector("#k-doc-spacer") as HTMLElement;
+  const docSuggest = new DocSuggest(app, docNameInput);
+  docNameInput.value = defaultDocName;
 
-  let autoSync = true;
-  docNameInput.value = sanitizeDocTitle(textInput.value);
-  docCheck.addEventListener("change", () => {
-    docWrap.style.display = docCheck.checked ? "block" : "none";
-    if (docCheck.checked) docNameInput.focus();
+  // Reserves real layout space for up to 7 suggestion rows (some two-line,
+  // for files outside the vault root) so the popover — which renders as an
+  // independent overlay, not as part of this dialog's flow — has its own
+  // room instead of needing to out-rank the Add/Cancel buttons below it.
+  docSuggest.onEnabledChange = (open) => {
+    spacer.style.height = open ? "300px" : "0";
+  };
+
+  // Tracks whether the user has explicitly moved the suggestion highlight
+  // with arrow keys since the last edit. Obsidian's popover auto-highlights
+  // the top match as soon as it renders, so a bare Enter would otherwise
+  // silently accept that match instead of the box's own text.
+  let navigated = false;
+  // Set while we're re-dispatching Enter ourselves (see Tab below), so our
+  // own listener doesn't re-intercept the very event it forwarded.
+  let forwardingEnter = false;
+  const reveal = () => {
+    docSuggest.enabled = true;
+    docSuggest.open();
+  };
+
+  // Select the prepopulated default the first time the field is focused, so
+  // typing immediately replaces it instead of inserting into the middle.
+  // Only the first time: once the user has actually edited it, later
+  // refocuses shouldn't blow their edit away.
+  let firstFocus = true;
+  docNameInput.addEventListener("focus", () => {
+    if (firstFocus) {
+      firstFocus = false;
+      docNameInput.select();
+    }
   });
-  textInput.addEventListener("input", () => {
-    if (autoSync) docNameInput.value = sanitizeDocTitle(textInput.value);
+
+  browseBtn.addEventListener("click", () => {
+    docNameInput.focus();
+    reveal();
   });
-  docNameInput.addEventListener("input", () => { autoSync = false; });
+  docNameInput.addEventListener("blur", () => { docSuggest.enabled = false; });
+  docNameInput.addEventListener("input", () => { navigated = false; });
+  // Capture phase so this runs before Obsidian's own suggest-popover key
+  // handling.
+  docNameInput.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      navigated = true;
+      reveal();
+    } else if (e.key === "Tab") {
+      e.preventDefault();
+      if (!docSuggest.enabled) {
+        // Not open yet — Tab's job here is just to open it, not to accept
+        // anything (there's nothing meaningfully highlighted yet).
+        reveal();
+      } else {
+        // Already open — accept whatever suggestion is currently highlighted
+        // (by arrow keys or mouse hover) without submitting, by handing off
+        // to Obsidian's own accept-highlighted-item handling rather than
+        // reimplementing highlight-tracking ourselves.
+        forwardingEnter = true;
+        docNameInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+        forwardingEnter = false;
+      }
+    } else if (e.key === "Escape") {
+      docSuggest.enabled = false;
+      docSuggest.close();
+    } else if (e.key === "Enter" && !navigated && !forwardingEnter) {
+      // An unnavigated Enter is ours to resolve (exact match or new document,
+      // handled downstream in addNewItem), not the popover's default pick.
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      docSuggest.enabled = false;
+      docSuggest.close();
+      onEnter();
+    }
+  }, true);
 
   return () => docNameInput.value.trim();
 }
 
-function showInputDialog(title: string, defaultCreateDoc: boolean, app: App, onSubmit: (v: string, createDoc: boolean, notes: string, docName: string) => void) {
+function showInputDialog(title: string, app: App, defaultDocName: string, onSubmit: (v: string, notes: string, docName: string) => void) {
   const { dialog, close } = makeOverlay("kanban-input-dialog");
-  const chk = defaultCreateDoc ? "checked" : "";
   dialog.innerHTML = `<h3 style="margin:0 0 10px;font-size:1.1em;">${title}</h3>
     <input id="k-text" type="text" placeholder="Enter new item text..." style="${inputStyle()}" autofocus>
     <details id="k-notes-details" style="text-align:left;margin-bottom:10px;">
@@ -2117,27 +2193,21 @@ function showInputDialog(title: string, defaultCreateDoc: boolean, app: App, onS
       <textarea id="k-notes" placeholder="Subtasks..." style="${textareaStyle()}margin-top:10px;"></textarea>
       <div style="text-align:left;">${checklistButtonHtml("k-notes-checklist", "Insert checklist item")}</div>
     </details>
-    <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px;cursor:pointer;font-size:.9em;">
-      <input id="k-doc" type="checkbox" ${chk}> Insert in document
-    </label>
-    <div id="k-doc-wrap" style="display:${defaultCreateDoc ? "block" : "none"};margin-bottom:12px;">
-      <input id="k-doc-name" type="text" placeholder="Document name..." style="${inputStyle()}margin-bottom:0;">
-    </div>
+    ${docNameFieldHtml()}
     <div id="k-actions" style="display:flex;gap:10px;justify-content:center;">${buttonHtml("Add", true)}${buttonHtml("Cancel", false)}</div>`;
 
   const [addBtn, cancelBtn] = dialog.querySelectorAll<HTMLButtonElement>("#k-actions button");
   const input = dialog.querySelector("#k-text") as HTMLInputElement;
   const notesInput = dialog.querySelector("#k-notes") as HTMLTextAreaElement;
   const checklistBtn = dialog.querySelector("#k-notes-checklist") as HTMLButtonElement;
-  const docCheck = dialog.querySelector("#k-doc") as HTMLInputElement;
-  const getDocName = wireDocNameField(app, dialog, input);
-  const submit = () => {
+  let submit: () => void;
+  const getDocName = wireDocNameField(app, dialog, defaultDocName, () => submit());
+  submit = () => {
     const v = input.value.trim();
-    const createDoc = docCheck.checked;
     const notes = notesInput.value;
     const docName = getDocName();
     close();
-    if (v) onSubmit(v, createDoc, notes, docName);
+    if (v) onSubmit(v, notes, docName);
   };
   addBtn.onclick = submit;
   cancelBtn.onclick = close;
@@ -2159,12 +2229,11 @@ function showDateDialog(
   title: string,
   defaultDate: string,
   app: App,
-  onSubmit: (dateStr: string | null, text?: string, createDoc?: boolean, notes?: string, docName?: string) => void,
-  opts: { withText?: boolean; defaultCreateDoc?: boolean } = {}
+  onSubmit: (dateStr: string | null, text?: string, notes?: string, docName?: string) => void,
+  opts: { withText?: boolean; defaultDocName?: string } = {}
 ) {
-  const { withText, defaultCreateDoc } = opts;
+  const { withText, defaultDocName } = opts;
   const { dialog, close } = makeOverlay(withText ? "kanban-later-add-dialog" : "kanban-date-dialog");
-  const chk = defaultCreateDoc ? "checked" : "";
   const presetBtnStyle = (active: boolean) =>
     `padding:4px 10px;border:none;border-radius:12px;cursor:pointer;font-size:.75em;` +
     (active
@@ -2185,12 +2254,7 @@ function showDateDialog(
     </details>` : ""}
     <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:center;margin-bottom:8px;">${presetBtnsHtml}</div>
     <input id="k-date" type="date" value="${defaultDate}" style="${dateInputStyle()}" ${withText ? "" : "autofocus"}>
-    ${withText ? `<label style="display:flex;align-items:center;gap:8px;margin-bottom:8px;cursor:pointer;font-size:.9em;">
-      <input id="k-doc" type="checkbox" ${chk}> Insert in document
-    </label>
-    <div id="k-doc-wrap" style="display:${defaultCreateDoc ? "block" : "none"};margin-bottom:12px;">
-      <input id="k-doc-name" type="text" placeholder="Document name..." style="${inputStyle()}margin-bottom:0;">
-    </div>` : ""}
+    ${withText ? docNameFieldHtml() : ""}
     <div id="k-date-actions" style="display:flex;gap:10px;justify-content:center;">${buttonHtml(withText ? "Add" : "Set", true)}${buttonHtml("No date", false)}${buttonHtml("Cancel", false)}</div>`;
 
   const [actionBtn, noDateBtn, cancelBtn] = dialog.querySelectorAll<HTMLButtonElement>("#k-date-actions button");
@@ -2198,8 +2262,8 @@ function showDateDialog(
   const notesInput = withText ? (dialog.querySelector("#k-notes") as HTMLTextAreaElement) : null;
   const checklistBtn = withText ? (dialog.querySelector("#k-notes-checklist") as HTMLButtonElement) : null;
   const dateInput = dialog.querySelector("#k-date") as HTMLInputElement;
-  const docCheck = withText ? (dialog.querySelector("#k-doc") as HTMLInputElement) : null;
-  const getDocName = withText && textInput ? wireDocNameField(app, dialog, textInput) : null;
+  let submit: (useDate: boolean) => void;
+  const getDocName = withText ? wireDocNameField(app, dialog, defaultDocName ?? "", () => submit(true)) : null;
 
   if (checklistBtn && notesInput) {
     checklistBtn.onclick = () => insertChecklistPrefix(notesInput);
@@ -2215,14 +2279,14 @@ function showDateDialog(
     };
   });
 
-  const submit = (useDate: boolean) => {
+  submit = (useDate: boolean) => {
     const t = textInput?.value.trim() ?? "";
     if (withText && !t) return;
     const d = useDate ? dateInput.value : "";
     const notes = notesInput?.value ?? "";
     const docName = getDocName?.();
     close();
-    onSubmit(d ? "@" + d : null, withText ? t : undefined, docCheck?.checked, withText ? notes : undefined, docName);
+    onSubmit(d ? "@" + d : null, withText ? t : undefined, withText ? notes : undefined, docName);
   };
   actionBtn.onclick = () => submit(true);
   noDateBtn.onclick = () => submit(false);
@@ -4511,28 +4575,28 @@ export function attachListeners(
     const tag = btn.dataset.tag!;
     const norm = btn.dataset.column!;
     const title = `Add to ${tag.replace(/^#/, "").toUpperCase()} Column`;
-    const isProject = config.normProject.includes(norm);
+    const defaultDocName = computeDefaultDocName(config.newTaskInsert, tag, config);
 
     if (norm === config.normLater) {
       const defDate = getDefaultDate().toISOString().split("T")[0];
-      showDateDialog(title, defDate, app, async (dateStr, text, createDoc, notes, docName) => {
-        if (text && await addNewItem(app, config.newTaskInsert, tag, text, dateStr, config, !!createDoc, notes, docName))
+      showDateDialog(title, defDate, app, async (dateStr, text, notes, docName) => {
+        if (text && await addNewItem(app, tag, text, dateStr, config, notes, docName, defaultDocName))
           requestAnimationFrame(() => setTimeout(refresh, 50));
-      }, { withText: true, defaultCreateDoc: isProject });
+      }, { withText: true, defaultDocName });
     } else if (config.normRecurrent && norm === config.normRecurrent) {
-      showInputDialog(title, isProject, app, (text: string, createDoc: boolean, notes: string, docName: string) => {
+      showInputDialog(title, app, defaultDocName, (text: string, notes: string, docName: string) => {
         showRecurrentTriggerDialog(async (triggerStr) => {
           const n = new Date();
           const skipStr = `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;
           const triggerPart = triggerStr ? ` ${triggerStr}` : '';
           const annotated = `${text} @${config.normRecurrent}${triggerPart} %% @skip:${skipStr} %%`;
-          if (await addNewItem(app, config.newTaskInsert, tag, annotated, null, config, createDoc, notes, docName))
+          if (await addNewItem(app, tag, annotated, null, config, notes, docName, defaultDocName))
             requestAnimationFrame(() => setTimeout(refresh, 50));
         });
       });
     } else {
-      showInputDialog(title, isProject, app, async (text: string, createDoc: boolean, notes: string, docName: string) => {
-        if (await addNewItem(app, config.newTaskInsert, tag, text, null, config, createDoc, notes, docName))
+      showInputDialog(title, app, defaultDocName, async (text: string, notes: string, docName: string) => {
+        if (await addNewItem(app, tag, text, null, config, notes, docName, defaultDocName))
           requestAnimationFrame(() => setTimeout(refresh, 50));
       });
     }
