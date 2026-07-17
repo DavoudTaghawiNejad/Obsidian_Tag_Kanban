@@ -1046,8 +1046,11 @@ async function moveCardToNewDoc(app, filePath, lineNum, plainTitle, targetTag, c
   const docPath = `${safeTitle}.md`;
   const { tFile, lines } = await readFileLines(app, filePath);
   const parsed = parseTaskLine(lines[lineNum - 1]);
+  const wasLater = parsed.tags.some((t) => normalizeTag(t) === config.normLater);
   parsed.tags = parsed.tags.filter((t) => !config.normKanban.includes(normalizeTag(t)));
   parsed.tags.push(targetTag);
+  if (wasLater)
+    parsed.date = null;
   parsed.orderDigits = null;
   parsed.orderState = null;
   const newTaskLine = serializeTaskLine(parsed);
@@ -2725,17 +2728,18 @@ function attachListeners(boardEl, config, app, refresh) {
     const isMulti = card.originalTags.map(normalizeTag).filter((t) => config.normKanban.includes(t)).length > 1;
     const newCalc = calcInsertOrder(siblings, insertIdx, isMulti);
     const colTitle = targetTag.replace(/^#/, "").replace(/\b\w/g, (l) => l.toUpperCase());
+    const wasLater = card.originalTags.some((t) => normalizeTag(t) === config.normLater);
     if (config.normRecurrent && targetNorm === config.normRecurrent) {
       const { lines } = await readFileLines(app, card.filePath);
       const lineTxt = lines[card.lineNum - 1] || "";
       if (!hasValidTriggers(lineTxt, config.normRecurrent)) {
         showRecurrentTriggerDialog(async (trigger) => {
-          await moveToColumn(app, card.filePath, card.lineNum, card.originalTags, targetTag, false, config, null, newCalc.digits, newState, trigger);
+          await moveToColumn(app, card.filePath, card.lineNum, card.originalTags, targetTag, false, config, null, newCalc.digits, newState, trigger, wasLater);
           requestAnimationFrame(() => setTimeout(refresh, 50));
         }, [], extractRepeatSpec(lineTxt));
         return;
       }
-      const ok = await moveToColumn(app, card.filePath, card.lineNum, card.originalTags, targetTag, false, config, null, newCalc.digits, newState);
+      const ok = await moveToColumn(app, card.filePath, card.lineNum, card.originalTags, targetTag, false, config, null, newCalc.digits, newState, null, wasLater);
       if (ok)
         requestAnimationFrame(() => setTimeout(refresh, 50));
     } else if (targetNorm === config.normLater) {
@@ -2777,7 +2781,9 @@ function attachListeners(boardEl, config, app, refresh) {
         config,
         null,
         newCalc.digits,
-        openOnDone ? "expanded" : newState
+        openOnDone ? "expanded" : newState,
+        null,
+        wasLater
       );
       if (ok)
         requestAnimationFrame(() => setTimeout(refresh, 50));

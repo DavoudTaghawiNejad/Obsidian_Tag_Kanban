@@ -1390,8 +1390,11 @@ async function moveCardToNewDoc(
 
   // Build task line for new document with target tag, strip ordering
   const parsed = parseTaskLine(lines[lineNum - 1]);
+  const wasLater = parsed.tags.some((t) => normalizeTag(t) === config.normLater);
   parsed.tags = parsed.tags.filter((t) => !config.normKanban.includes(normalizeTag(t)));
   parsed.tags.push(targetTag);
+  // Leaving Later: its @date annotation was a trigger date, meaningless elsewhere.
+  if (wasLater) parsed.date = null;
   parsed.orderDigits = null;
   parsed.orderState = null;
   const newTaskLine = serializeTaskLine(parsed);
@@ -3529,18 +3532,21 @@ export function attachListeners(
     const colTitle = targetTag
       .replace(/^#/, "")
       .replace(/\b\w/g, (l: string) => l.toUpperCase());
+    // Leaving Later for any other column: the @date annotation was Later's trigger
+    // date, which is meaningless once the card is no longer in Later.
+    const wasLater = card.originalTags.some((t: string) => normalizeTag(t) === config.normLater);
 
     if (config.normRecurrent && targetNorm === config.normRecurrent) {
       const { lines } = await readFileLines(app, card.filePath);
       const lineTxt = lines[card.lineNum - 1] || "";
       if (!hasValidTriggers(lineTxt, config.normRecurrent)) {
         showRecurrentTriggerDialog(async (trigger) => {
-          await moveToColumn(app, card.filePath, card.lineNum, card.originalTags, targetTag, false, config, null, newCalc.digits, newState, trigger);
+          await moveToColumn(app, card.filePath, card.lineNum, card.originalTags, targetTag, false, config, null, newCalc.digits, newState, trigger, wasLater);
           requestAnimationFrame(() => setTimeout(refresh, 50));
         }, [], extractRepeatSpec(lineTxt));
         return;
       }
-      const ok = await moveToColumn(app, card.filePath, card.lineNum, card.originalTags, targetTag, false, config, null, newCalc.digits, newState);
+      const ok = await moveToColumn(app, card.filePath, card.lineNum, card.originalTags, targetTag, false, config, null, newCalc.digits, newState, null, wasLater);
       if (ok) requestAnimationFrame(() => setTimeout(refresh, 50));
     } else if (targetNorm === config.normLater) {
       const { lines } = await readFileLines(app, card.filePath);
@@ -3590,7 +3596,9 @@ export function attachListeners(
         config,
         null,
         newCalc.digits,
-        openOnDone ? "expanded" : newState
+        openOnDone ? "expanded" : newState,
+        null,
+        wasLater
       );
       if (ok) requestAnimationFrame(() => setTimeout(refresh, 50));
     }
