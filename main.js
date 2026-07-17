@@ -927,19 +927,20 @@ async function moveToColumn(app, filePath, lineNum, originalTags, targetTag, isD
     return false;
   }
 }
-async function addNewItem(app, rawInsertTarget, columnTag, userText, dateStr, config, createDoc = false, notesText = "") {
+async function addNewItem(app, rawInsertTarget, columnTag, userText, dateStr, config, createDoc = false, notesText = "", docName = "") {
   try {
     if (!userText?.trim())
       return false;
     let cardText = userText.trim();
     const noteLines = formatNoteLines("", notesText);
     if (createDoc) {
-      const safeTitle = cardText.replace(/\s*%%[\s\S]*?%%\s*/g, " ").replace(/@\S+/g, "").replace(/[\\/:*?"<>|#\[\]]/g, " ").replace(/\s+/g, " ").trim();
-      const docPath = `${safeTitle}.md`;
+      const docTitle = sanitizeDocTitle(docName.trim() || cardText);
+      const docPath = `${docTitle.replace(/\.md$/i, "")}.md`;
       let projFile = app.vault.getAbstractFileByPath(docPath);
+      const wasNew = !projFile;
       if (!projFile) {
         projFile = await app.vault.create(docPath, "");
-        showInfoDialog(`Created new note "${safeTitle}.md".`);
+        showInfoDialog(`Created new note "${projFile.path}".`);
       }
       let newLine2 = `- [ ] ${cardText} ${columnTag}`;
       if (dateStr)
@@ -955,10 +956,11 @@ async function addNewItem(app, rawInsertTarget, columnTag, userText, dateStr, co
         }
       }
       const projLines = (await app.vault.read(projFile)).split("\n");
-      projLines.splice(afterFrontMatter(projLines), 0, newLine2, ...noteLines);
+      const insertAt2 = afterLeadingHeading(projLines, afterFrontMatter(projLines));
+      projLines.splice(insertAt2, 0, newLine2, ...noteLines);
       await app.vault.modify(projFile, projLines.join("\n"));
       const masterDocName = config.projectsDocument.trim();
-      if (masterDocName) {
+      if (wasNew && masterDocName) {
         const masterPath = masterDocName.endsWith(".md") ? masterDocName : `${masterDocName}.md`;
         let masterFile = app.vault.getAbstractFileByPath(masterPath);
         if (!masterFile) {
@@ -966,10 +968,10 @@ async function addNewItem(app, rawInsertTarget, columnTag, userText, dateStr, co
 `);
         }
         const masterLines = (await app.vault.read(masterFile)).split("\n");
-        masterLines.splice(afterFrontMatter(masterLines), 0, `[[${safeTitle}]]`);
+        masterLines.splice(afterFrontMatter(masterLines), 0, `[[${projFile.basename}]]`);
         await app.vault.modify(masterFile, masterLines.join("\n"));
       }
-      new import_obsidian.Notice(`Added "${userText}" to ${safeTitle}.`);
+      new import_obsidian.Notice(`Added "${userText}" to ${projFile.path}.`);
       return true;
     }
     const baseName = rawInsertTarget.trim().split("#")[0].replace(/\.md$/, "").trim();
@@ -1022,9 +1024,7 @@ async function addNewItem(app, rawInsertTarget, columnTag, userText, dateStr, co
       }
     }
     const targetLines = (await app.vault.read(targetFile)).split("\n");
-    let insertAt = afterFrontMatter(targetLines);
-    if (targetLines[insertAt]?.match(/^#\s/))
-      insertAt++;
+    const insertAt = afterLeadingHeading(targetLines, afterFrontMatter(targetLines));
     targetLines.splice(insertAt, 0, newLine, ...noteLines);
     await app.vault.modify(targetFile, targetLines.join("\n"));
     new import_obsidian.Notice(`Added "${userText}" to ${columnTag.replace(/^#/, "").toUpperCase()}.`);
@@ -1504,6 +1504,12 @@ function afterFrontMatter(lines) {
   }
   return 0;
 }
+function sanitizeDocTitle(text) {
+  return text.replace(/\s*%%[\s\S]*?%%\s*/g, " ").replace(/@\S+/g, "").replace(/[\\:*?"<>|#\[\]]/g, " ").replace(/\s+/g, " ").trim();
+}
+function afterLeadingHeading(lines, insertAt) {
+  return lines[insertAt]?.match(/^#\s/) ? insertAt + 1 : insertAt;
+}
 function showConfirmDialog(message) {
   return new Promise((resolve) => {
     const { dialog, close } = makeOverlay("kanban-confirm-dialog");
@@ -1529,7 +1535,68 @@ function showInfoDialog(message) {
   const [okBtn] = dialog.querySelectorAll("button");
   okBtn.onclick = close;
 }
-function showInputDialog(title, defaultCreateDoc, onSubmit) {
+var DocSuggest = class extends import_obsidian.AbstractInputSuggest {
+  constructor(app, inputEl) {
+    super(app, inputEl);
+    this.inputEl = inputEl;
+    this.matches = /* @__PURE__ */ new Map();
+  }
+  getSuggestions(query) {
+    this.matches.clear();
+    if (!query.trim())
+      return this.app.vault.getMarkdownFiles().slice(0, this.limit || 100);
+    const search = (0, import_obsidian.prepareFuzzySearch)(query);
+    const scored = [];
+    for (const file of this.app.vault.getMarkdownFiles()) {
+      const result = search(file.path);
+      if (result) {
+        this.matches.set(file, result);
+        scored.push({ file, score: result.score });
+      }
+    }
+    scored.sort((a, b) => b.score - a.score);
+    return scored.map((s) => s.file);
+  }
+  renderSuggestion(file, el) {
+    el.createDiv({ text: file.basename });
+    const match = this.matches.get(file);
+    if (file.parent && !file.parent.isRoot()) {
+      const pathEl = el.createDiv();
+      pathEl.style.cssText = "font-size:.8em;color:var(--text-muted);";
+      if (match)
+        (0, import_obsidian.renderResults)(pathEl, file.path, match);
+      else
+        pathEl.setText(file.parent.path);
+    }
+  }
+  selectSuggestion(file) {
+    this.setValue(file.parent && !file.parent.isRoot() ? file.path.replace(/\.md$/, "") : file.basename);
+    this.close();
+    this.inputEl.dispatchEvent(new Event("input"));
+  }
+};
+function wireDocNameField(app, dialog, textInput) {
+  const docCheck = dialog.querySelector("#k-doc");
+  const docWrap = dialog.querySelector("#k-doc-wrap");
+  const docNameInput = dialog.querySelector("#k-doc-name");
+  new DocSuggest(app, docNameInput);
+  let autoSync = true;
+  docNameInput.value = sanitizeDocTitle(textInput.value);
+  docCheck.addEventListener("change", () => {
+    docWrap.style.display = docCheck.checked ? "block" : "none";
+    if (docCheck.checked)
+      docNameInput.focus();
+  });
+  textInput.addEventListener("input", () => {
+    if (autoSync)
+      docNameInput.value = sanitizeDocTitle(textInput.value);
+  });
+  docNameInput.addEventListener("input", () => {
+    autoSync = false;
+  });
+  return () => docNameInput.value.trim();
+}
+function showInputDialog(title, defaultCreateDoc, app, onSubmit) {
   const { dialog, close } = makeOverlay("kanban-input-dialog");
   const chk = defaultCreateDoc ? "checked" : "";
   dialog.innerHTML = `<h3 style="margin:0 0 10px;font-size:1.1em;">${title}</h3>
@@ -1539,22 +1606,27 @@ function showInputDialog(title, defaultCreateDoc, onSubmit) {
       <textarea id="k-notes" placeholder="Subtasks..." style="${textareaStyle()}margin-top:10px;"></textarea>
       <div style="text-align:left;">${checklistButtonHtml("k-notes-checklist", "Insert checklist item")}</div>
     </details>
-    <label style="display:flex;align-items:center;gap:8px;margin-bottom:12px;cursor:pointer;font-size:.9em;">
-      <input id="k-doc" type="checkbox" ${chk}> Create new document
+    <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px;cursor:pointer;font-size:.9em;">
+      <input id="k-doc" type="checkbox" ${chk}> Insert in document
     </label>
+    <div id="k-doc-wrap" style="display:${defaultCreateDoc ? "block" : "none"};margin-bottom:12px;">
+      <input id="k-doc-name" type="text" placeholder="Document name..." style="${inputStyle()}margin-bottom:0;">
+    </div>
     <div id="k-actions" style="display:flex;gap:10px;justify-content:center;">${buttonHtml("Add", true)}${buttonHtml("Cancel", false)}</div>`;
   const [addBtn, cancelBtn] = dialog.querySelectorAll("#k-actions button");
   const input = dialog.querySelector("#k-text");
   const notesInput = dialog.querySelector("#k-notes");
   const checklistBtn = dialog.querySelector("#k-notes-checklist");
   const docCheck = dialog.querySelector("#k-doc");
+  const getDocName = wireDocNameField(app, dialog, input);
   const submit = () => {
     const v = input.value.trim();
     const createDoc = docCheck.checked;
     const notes = notesInput.value;
+    const docName = getDocName();
     close();
     if (v)
-      onSubmit(v, createDoc, notes);
+      onSubmit(v, createDoc, notes, docName);
   };
   addBtn.onclick = submit;
   cancelBtn.onclick = close;
@@ -1571,7 +1643,7 @@ function showInputDialog(title, defaultCreateDoc, onSubmit) {
   };
   input.focus();
 }
-function showDateDialog(title, defaultDate, onSubmit, opts = {}) {
+function showDateDialog(title, defaultDate, app, onSubmit, opts = {}) {
   const { withText, defaultCreateDoc } = opts;
   const { dialog, close } = makeOverlay(withText ? "kanban-later-add-dialog" : "kanban-date-dialog");
   const chk = defaultCreateDoc ? "checked" : "";
@@ -1589,9 +1661,12 @@ function showDateDialog(title, defaultDate, onSubmit, opts = {}) {
     </details>` : ""}
     <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:center;margin-bottom:8px;">${presetBtnsHtml}</div>
     <input id="k-date" type="date" value="${defaultDate}" style="${dateInputStyle()}" ${withText ? "" : "autofocus"}>
-    ${withText ? `<label style="display:flex;align-items:center;gap:8px;margin-bottom:12px;cursor:pointer;font-size:.9em;">
-      <input id="k-doc" type="checkbox" ${chk}> Create new document
-    </label>` : ""}
+    ${withText ? `<label style="display:flex;align-items:center;gap:8px;margin-bottom:8px;cursor:pointer;font-size:.9em;">
+      <input id="k-doc" type="checkbox" ${chk}> Insert in document
+    </label>
+    <div id="k-doc-wrap" style="display:${defaultCreateDoc ? "block" : "none"};margin-bottom:12px;">
+      <input id="k-doc-name" type="text" placeholder="Document name..." style="${inputStyle()}margin-bottom:0;">
+    </div>` : ""}
     <div id="k-date-actions" style="display:flex;gap:10px;justify-content:center;">${buttonHtml(withText ? "Add" : "Set", true)}${buttonHtml("No date", false)}${buttonHtml("Cancel", false)}</div>`;
   const [actionBtn, noDateBtn, cancelBtn] = dialog.querySelectorAll("#k-date-actions button");
   const textInput = withText ? dialog.querySelector("#k-text") : null;
@@ -1599,6 +1674,7 @@ function showDateDialog(title, defaultDate, onSubmit, opts = {}) {
   const checklistBtn = withText ? dialog.querySelector("#k-notes-checklist") : null;
   const dateInput = dialog.querySelector("#k-date");
   const docCheck = withText ? dialog.querySelector("#k-doc") : null;
+  const getDocName = withText && textInput ? wireDocNameField(app, dialog, textInput) : null;
   if (checklistBtn && notesInput) {
     checklistBtn.onclick = () => insertChecklistPrefix(notesInput);
   }
@@ -1619,8 +1695,9 @@ function showDateDialog(title, defaultDate, onSubmit, opts = {}) {
       return;
     const d = useDate ? dateInput.value : "";
     const notes = notesInput?.value ?? "";
+    const docName = getDocName?.();
     close();
-    onSubmit(d ? "@" + d : null, withText ? t : void 0, docCheck?.checked, withText ? notes : void 0);
+    onSubmit(d ? "@" + d : null, withText ? t : void 0, docCheck?.checked, withText ? notes : void 0, docName);
   };
   actionBtn.onclick = () => submit(true);
   noDateBtn.onclick = () => submit(false);
@@ -2751,6 +2828,7 @@ function attachListeners(boardEl, config, app, refresh) {
       showDateDialog(
         `Set date for ${colTitle}`,
         defDate,
+        app,
         async (dateStr) => {
           await moveToColumn(
             app,
@@ -2841,7 +2919,7 @@ function attachListeners(boardEl, config, app, refresh) {
     showSubtaskDialog(async (text) => {
       if (isLater) {
         const defDate = getDefaultDate().toISOString().split("T")[0];
-        showDateDialog("Set date for subtask", defDate, async (dateStr) => {
+        showDateDialog("Set date for subtask", defDate, app, async (dateStr) => {
           await doAdd(dateStr ? appendToFirstLine(text, dateStr) : text);
         });
       } else if (isRecurrent) {
@@ -2909,7 +2987,7 @@ function attachListeners(boardEl, config, app, refresh) {
     const currentDateStr = span.dataset.date || "";
     const existing = currentDateStr ? new Date(currentDateStr + "T00:00:00") : null;
     const defDate = (existing && !isNaN(existing.getTime()) ? existing : getDefaultDate()).toISOString().split("T")[0];
-    showDateDialog("Change date", defDate, async (dateStr) => {
+    showDateDialog("Change date", defDate, app, async (dateStr) => {
       await updateCardDate(app, card.dataset.file, parseInt(card.dataset.line, 10), dateStr);
       requestAnimationFrame(() => setTimeout(refresh, 50));
     });
@@ -3566,24 +3644,24 @@ function attachListeners(boardEl, config, app, refresh) {
     const isProject = config.normProject.includes(norm);
     if (norm === config.normLater) {
       const defDate = getDefaultDate().toISOString().split("T")[0];
-      showDateDialog(title, defDate, async (dateStr, text, createDoc, notes) => {
-        if (text && await addNewItem(app, config.newTaskInsert, tag, text, dateStr, config, !!createDoc, notes))
+      showDateDialog(title, defDate, app, async (dateStr, text, createDoc, notes, docName) => {
+        if (text && await addNewItem(app, config.newTaskInsert, tag, text, dateStr, config, !!createDoc, notes, docName))
           requestAnimationFrame(() => setTimeout(refresh, 50));
       }, { withText: true, defaultCreateDoc: isProject });
     } else if (config.normRecurrent && norm === config.normRecurrent) {
-      showInputDialog(title, isProject, (text, createDoc, notes) => {
+      showInputDialog(title, isProject, app, (text, createDoc, notes, docName) => {
         showRecurrentTriggerDialog(async (triggerStr) => {
           const n = new Date();
           const skipStr = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
           const triggerPart = triggerStr ? ` ${triggerStr}` : "";
           const annotated = `${text} @${config.normRecurrent}${triggerPart} %% @skip:${skipStr} %%`;
-          if (await addNewItem(app, config.newTaskInsert, tag, annotated, null, config, createDoc, notes))
+          if (await addNewItem(app, config.newTaskInsert, tag, annotated, null, config, createDoc, notes, docName))
             requestAnimationFrame(() => setTimeout(refresh, 50));
         });
       });
     } else {
-      showInputDialog(title, isProject, async (text, createDoc, notes) => {
-        if (await addNewItem(app, config.newTaskInsert, tag, text, null, config, createDoc, notes))
+      showInputDialog(title, isProject, app, async (text, createDoc, notes, docName) => {
+        if (await addNewItem(app, config.newTaskInsert, tag, text, null, config, createDoc, notes, docName))
           requestAnimationFrame(() => setTimeout(refresh, 50));
       });
     }

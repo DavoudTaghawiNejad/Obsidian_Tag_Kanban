@@ -10,7 +10,7 @@
  *   new Notice(...)      → same (global in plugin context)
  */
 
-import { App, Notice, Platform, TFile, TFolder } from "obsidian";
+import { AbstractInputSuggest, App, Notice, Platform, prepareFuzzySearch, renderResults, SearchResult, TFile, TFolder } from "obsidian";
 import { KanbanSettings } from "./main";
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
@@ -1235,7 +1235,8 @@ async function addNewItem(
   dateStr: string | null,
   config: KanbanConfig,
   createDoc = false,
-  notesText = ""
+  notesText = "",
+  docName = ""
 ): Promise<boolean> {
   try {
     if (!userText?.trim()) return false;
@@ -1244,20 +1245,17 @@ async function addNewItem(
     const noteLines = formatNoteLines("", notesText);
 
     if (createDoc) {
-      // ── "Create new document" path ───────────────────────────────────────────
-      // Task goes into the new project doc; a [[link]] is added to the master doc.
-      const safeTitle = cardText
-        .replace(/\s*%%[\s\S]*?%%\s*/g, " ")
-        .replace(/@\S+/g, "")
-        .replace(/[\\/:*?"<>|#\[\]]/g, " ")
-        .replace(/\s+/g, " ")
-        .trim();
-      const docPath = `${safeTitle}.md`;
+      // ── "Insert in document" path ────────────────────────────────────────────
+      // Task goes into the chosen (or newly created) doc; a [[link]] is added to
+      // the master doc only when the target note didn't already exist.
+      const docTitle = sanitizeDocTitle(docName.trim() || cardText);
+      const docPath = `${docTitle.replace(/\.md$/i, "")}.md`;
 
       let projFile = app.vault.getAbstractFileByPath(docPath) as TFile | null;
+      const wasNew = !projFile;
       if (!projFile) {
         projFile = await app.vault.create(docPath, "");
-        showInfoDialog(`Created new note "${safeTitle}.md".`);
+        showInfoDialog(`Created new note "${projFile.path}".`);
       }
 
       let newLine = `- [ ] ${cardText} ${columnTag}`;
@@ -1274,22 +1272,23 @@ async function addNewItem(
         }
       }
       const projLines = (await app.vault.read(projFile)).split("\n");
-      projLines.splice(afterFrontMatter(projLines), 0, newLine, ...noteLines);
+      const insertAt = afterLeadingHeading(projLines, afterFrontMatter(projLines));
+      projLines.splice(insertAt, 0, newLine, ...noteLines);
       await app.vault.modify(projFile, projLines.join("\n"));
 
       const masterDocName = config.projectsDocument.trim();
-      if (masterDocName) {
+      if (wasNew && masterDocName) {
         const masterPath = masterDocName.endsWith(".md") ? masterDocName : `${masterDocName}.md`;
         let masterFile = app.vault.getAbstractFileByPath(masterPath) as TFile | null;
         if (!masterFile) {
           masterFile = await app.vault.create(masterPath, `# ${masterDocName}\n`);
         }
         const masterLines = (await app.vault.read(masterFile)).split("\n");
-        masterLines.splice(afterFrontMatter(masterLines), 0, `[[${safeTitle}]]`);
+        masterLines.splice(afterFrontMatter(masterLines), 0, `[[${projFile.basename}]]`);
         await app.vault.modify(masterFile, masterLines.join("\n"));
       }
 
-      new Notice(`Added "${userText}" to ${safeTitle}.`);
+      new Notice(`Added "${userText}" to ${projFile.path}.`);
       return true;
     }
 
@@ -1350,8 +1349,7 @@ async function addNewItem(
       }
     }
     const targetLines = (await app.vault.read(targetFile)).split("\n");
-    let insertAt = afterFrontMatter(targetLines);
-    if (targetLines[insertAt]?.match(/^#\s/)) insertAt++;
+    const insertAt = afterLeadingHeading(targetLines, afterFrontMatter(targetLines));
     targetLines.splice(insertAt, 0, newLine, ...noteLines);
     await app.vault.modify(targetFile, targetLines.join("\n"));
 
@@ -1999,6 +1997,25 @@ function afterFrontMatter(lines: string[]): number {
   return 0;
 }
 
+// Turns raw card text into a usable note title/path: strips %%comments%%,
+// @annotations, and filename-illegal characters, but deliberately keeps "/"
+// so a typed "Folder/Note" targets an existing subfolder instead of being
+// flattened into "Folder Note".
+function sanitizeDocTitle(text: string): string {
+  return text
+    .replace(/\s*%%[\s\S]*?%%\s*/g, " ")
+    .replace(/@\S+/g, "")
+    .replace(/[\\:*?"<>|#\[\]]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// Bumps an insert index past a leading "# Heading" line, if present, so new
+// content lands under a note's title rather than above it.
+function afterLeadingHeading(lines: string[], insertAt: number): number {
+  return lines[insertAt]?.match(/^#\s/) ? insertAt + 1 : insertAt;
+}
+
 function showConfirmDialog(message: string): Promise<boolean> {
   return new Promise((resolve) => {
     const { dialog, close } = makeOverlay("kanban-confirm-dialog");
@@ -2021,7 +2038,76 @@ function showInfoDialog(message: string) {
 }
 
 
-function showInputDialog(title: string, defaultCreateDoc: boolean, onSubmit: (v: string, createDoc: boolean, notes: string) => void) {
+// Attaches Obsidian's native type-ahead popover (the same component behind its
+// own [[link]] autocomplete) to a plain <input>, filtering the vault's
+// markdown files as the user types.
+class DocSuggest extends AbstractInputSuggest<TFile> {
+  private matches = new Map<TFile, SearchResult>();
+
+  constructor(app: App, private inputEl: HTMLInputElement) {
+    super(app, inputEl);
+  }
+
+  getSuggestions(query: string): TFile[] {
+    this.matches.clear();
+    if (!query.trim()) return this.app.vault.getMarkdownFiles().slice(0, this.limit || 100);
+    const search = prepareFuzzySearch(query);
+    const scored: { file: TFile; score: number }[] = [];
+    for (const file of this.app.vault.getMarkdownFiles()) {
+      const result = search(file.path);
+      if (result) {
+        this.matches.set(file, result);
+        scored.push({ file, score: result.score });
+      }
+    }
+    scored.sort((a, b) => b.score - a.score);
+    return scored.map((s) => s.file);
+  }
+
+  renderSuggestion(file: TFile, el: HTMLElement): void {
+    el.createDiv({ text: file.basename });
+    const match = this.matches.get(file);
+    if (file.parent && !file.parent.isRoot()) {
+      const pathEl = el.createDiv();
+      pathEl.style.cssText = "font-size:.8em;color:var(--text-muted);";
+      if (match) renderResults(pathEl, file.path, match);
+      else pathEl.setText(file.parent.path);
+    }
+  }
+
+  selectSuggestion(file: TFile): void {
+    this.setValue(file.parent && !file.parent.isRoot() ? file.path.replace(/\.md$/, "") : file.basename);
+    this.close();
+    this.inputEl.dispatchEvent(new Event("input"));
+  }
+}
+
+// Shared by showInputDialog/showDateDialog's "Insert in document" section:
+// shows the doc-name field only while the checkbox is checked, keeps it
+// mirroring the card-text field's sanitized value until the user edits it (or
+// picks a suggestion, which counts as an edit) directly, and attaches the
+// native file-suggest popover.
+function wireDocNameField(app: App, dialog: HTMLElement, textInput: HTMLInputElement): () => string {
+  const docCheck = dialog.querySelector("#k-doc") as HTMLInputElement;
+  const docWrap = dialog.querySelector("#k-doc-wrap") as HTMLElement;
+  const docNameInput = dialog.querySelector("#k-doc-name") as HTMLInputElement;
+  new DocSuggest(app, docNameInput);
+
+  let autoSync = true;
+  docNameInput.value = sanitizeDocTitle(textInput.value);
+  docCheck.addEventListener("change", () => {
+    docWrap.style.display = docCheck.checked ? "block" : "none";
+    if (docCheck.checked) docNameInput.focus();
+  });
+  textInput.addEventListener("input", () => {
+    if (autoSync) docNameInput.value = sanitizeDocTitle(textInput.value);
+  });
+  docNameInput.addEventListener("input", () => { autoSync = false; });
+
+  return () => docNameInput.value.trim();
+}
+
+function showInputDialog(title: string, defaultCreateDoc: boolean, app: App, onSubmit: (v: string, createDoc: boolean, notes: string, docName: string) => void) {
   const { dialog, close } = makeOverlay("kanban-input-dialog");
   const chk = defaultCreateDoc ? "checked" : "";
   dialog.innerHTML = `<h3 style="margin:0 0 10px;font-size:1.1em;">${title}</h3>
@@ -2031,9 +2117,12 @@ function showInputDialog(title: string, defaultCreateDoc: boolean, onSubmit: (v:
       <textarea id="k-notes" placeholder="Subtasks..." style="${textareaStyle()}margin-top:10px;"></textarea>
       <div style="text-align:left;">${checklistButtonHtml("k-notes-checklist", "Insert checklist item")}</div>
     </details>
-    <label style="display:flex;align-items:center;gap:8px;margin-bottom:12px;cursor:pointer;font-size:.9em;">
-      <input id="k-doc" type="checkbox" ${chk}> Create new document
+    <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px;cursor:pointer;font-size:.9em;">
+      <input id="k-doc" type="checkbox" ${chk}> Insert in document
     </label>
+    <div id="k-doc-wrap" style="display:${defaultCreateDoc ? "block" : "none"};margin-bottom:12px;">
+      <input id="k-doc-name" type="text" placeholder="Document name..." style="${inputStyle()}margin-bottom:0;">
+    </div>
     <div id="k-actions" style="display:flex;gap:10px;justify-content:center;">${buttonHtml("Add", true)}${buttonHtml("Cancel", false)}</div>`;
 
   const [addBtn, cancelBtn] = dialog.querySelectorAll<HTMLButtonElement>("#k-actions button");
@@ -2041,12 +2130,14 @@ function showInputDialog(title: string, defaultCreateDoc: boolean, onSubmit: (v:
   const notesInput = dialog.querySelector("#k-notes") as HTMLTextAreaElement;
   const checklistBtn = dialog.querySelector("#k-notes-checklist") as HTMLButtonElement;
   const docCheck = dialog.querySelector("#k-doc") as HTMLInputElement;
+  const getDocName = wireDocNameField(app, dialog, input);
   const submit = () => {
     const v = input.value.trim();
     const createDoc = docCheck.checked;
     const notes = notesInput.value;
+    const docName = getDocName();
     close();
-    if (v) onSubmit(v, createDoc, notes);
+    if (v) onSubmit(v, createDoc, notes, docName);
   };
   addBtn.onclick = submit;
   cancelBtn.onclick = close;
@@ -2062,12 +2153,13 @@ function showInputDialog(title: string, defaultCreateDoc: boolean, onSubmit: (v:
 }
 
 // Shared date-picker dialog for #later cards. Pass opts.withText to also collect
-// item text + "create new document" (the "add card to Later" flow); omit it for a
+// item text + "insert in document" (the "add card to Later" flow); omit it for a
 // plain date-only picker (move-to-Later, change date, subtask date).
 function showDateDialog(
   title: string,
   defaultDate: string,
-  onSubmit: (dateStr: string | null, text?: string, createDoc?: boolean, notes?: string) => void,
+  app: App,
+  onSubmit: (dateStr: string | null, text?: string, createDoc?: boolean, notes?: string, docName?: string) => void,
   opts: { withText?: boolean; defaultCreateDoc?: boolean } = {}
 ) {
   const { withText, defaultCreateDoc } = opts;
@@ -2093,9 +2185,12 @@ function showDateDialog(
     </details>` : ""}
     <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:center;margin-bottom:8px;">${presetBtnsHtml}</div>
     <input id="k-date" type="date" value="${defaultDate}" style="${dateInputStyle()}" ${withText ? "" : "autofocus"}>
-    ${withText ? `<label style="display:flex;align-items:center;gap:8px;margin-bottom:12px;cursor:pointer;font-size:.9em;">
-      <input id="k-doc" type="checkbox" ${chk}> Create new document
-    </label>` : ""}
+    ${withText ? `<label style="display:flex;align-items:center;gap:8px;margin-bottom:8px;cursor:pointer;font-size:.9em;">
+      <input id="k-doc" type="checkbox" ${chk}> Insert in document
+    </label>
+    <div id="k-doc-wrap" style="display:${defaultCreateDoc ? "block" : "none"};margin-bottom:12px;">
+      <input id="k-doc-name" type="text" placeholder="Document name..." style="${inputStyle()}margin-bottom:0;">
+    </div>` : ""}
     <div id="k-date-actions" style="display:flex;gap:10px;justify-content:center;">${buttonHtml(withText ? "Add" : "Set", true)}${buttonHtml("No date", false)}${buttonHtml("Cancel", false)}</div>`;
 
   const [actionBtn, noDateBtn, cancelBtn] = dialog.querySelectorAll<HTMLButtonElement>("#k-date-actions button");
@@ -2104,6 +2199,7 @@ function showDateDialog(
   const checklistBtn = withText ? (dialog.querySelector("#k-notes-checklist") as HTMLButtonElement) : null;
   const dateInput = dialog.querySelector("#k-date") as HTMLInputElement;
   const docCheck = withText ? (dialog.querySelector("#k-doc") as HTMLInputElement) : null;
+  const getDocName = withText && textInput ? wireDocNameField(app, dialog, textInput) : null;
 
   if (checklistBtn && notesInput) {
     checklistBtn.onclick = () => insertChecklistPrefix(notesInput);
@@ -2124,8 +2220,9 @@ function showDateDialog(
     if (withText && !t) return;
     const d = useDate ? dateInput.value : "";
     const notes = notesInput?.value ?? "";
+    const docName = getDocName?.();
     close();
-    onSubmit(d ? "@" + d : null, withText ? t : undefined, docCheck?.checked, withText ? notes : undefined);
+    onSubmit(d ? "@" + d : null, withText ? t : undefined, docCheck?.checked, withText ? notes : undefined, docName);
   };
   actionBtn.onclick = () => submit(true);
   noDateBtn.onclick = () => submit(false);
@@ -3563,6 +3660,7 @@ export function attachListeners(
       showDateDialog(
         `Set date for ${colTitle}`,
         defDate,
+        app,
         async (dateStr) => {
           await moveToColumn(
             app,
@@ -3655,7 +3753,7 @@ export function attachListeners(
     showSubtaskDialog(async (text) => {
       if (isLater) {
         const defDate = getDefaultDate().toISOString().split("T")[0];
-        showDateDialog("Set date for subtask", defDate, async (dateStr) => {
+        showDateDialog("Set date for subtask", defDate, app, async (dateStr) => {
           await doAdd(dateStr ? appendToFirstLine(text, dateStr) : text);
         });
       } else if (isRecurrent) {
@@ -3723,7 +3821,7 @@ export function attachListeners(
     const currentDateStr = span.dataset.date || "";
     const existing = currentDateStr ? new Date(currentDateStr + "T00:00:00") : null;
     const defDate = (existing && !isNaN(existing.getTime()) ? existing : getDefaultDate()).toISOString().split("T")[0];
-    showDateDialog("Change date", defDate, async (dateStr) => {
+    showDateDialog("Change date", defDate, app, async (dateStr) => {
       await updateCardDate(app, card.dataset.file!, parseInt(card.dataset.line!, 10), dateStr);
       requestAnimationFrame(() => setTimeout(refresh, 50));
     });
@@ -4417,24 +4515,24 @@ export function attachListeners(
 
     if (norm === config.normLater) {
       const defDate = getDefaultDate().toISOString().split("T")[0];
-      showDateDialog(title, defDate, async (dateStr, text, createDoc, notes) => {
-        if (text && await addNewItem(app, config.newTaskInsert, tag, text, dateStr, config, !!createDoc, notes))
+      showDateDialog(title, defDate, app, async (dateStr, text, createDoc, notes, docName) => {
+        if (text && await addNewItem(app, config.newTaskInsert, tag, text, dateStr, config, !!createDoc, notes, docName))
           requestAnimationFrame(() => setTimeout(refresh, 50));
       }, { withText: true, defaultCreateDoc: isProject });
     } else if (config.normRecurrent && norm === config.normRecurrent) {
-      showInputDialog(title, isProject, (text: string, createDoc: boolean, notes: string) => {
+      showInputDialog(title, isProject, app, (text: string, createDoc: boolean, notes: string, docName: string) => {
         showRecurrentTriggerDialog(async (triggerStr) => {
           const n = new Date();
           const skipStr = `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;
           const triggerPart = triggerStr ? ` ${triggerStr}` : '';
           const annotated = `${text} @${config.normRecurrent}${triggerPart} %% @skip:${skipStr} %%`;
-          if (await addNewItem(app, config.newTaskInsert, tag, annotated, null, config, createDoc, notes))
+          if (await addNewItem(app, config.newTaskInsert, tag, annotated, null, config, createDoc, notes, docName))
             requestAnimationFrame(() => setTimeout(refresh, 50));
         });
       });
     } else {
-      showInputDialog(title, isProject, async (text: string, createDoc: boolean, notes: string) => {
-        if (await addNewItem(app, config.newTaskInsert, tag, text, null, config, createDoc, notes))
+      showInputDialog(title, isProject, app, async (text: string, createDoc: boolean, notes: string, docName: string) => {
+        if (await addNewItem(app, config.newTaskInsert, tag, text, null, config, createDoc, notes, docName))
           requestAnimationFrame(() => setTimeout(refresh, 50));
       });
     }
