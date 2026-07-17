@@ -7,6 +7,7 @@ export const VIEW_TYPE_KANBAN = "kanban-board-view";
 export class KanbanView extends ItemView {
   plugin: KanbanPlugin;
   private isRefreshing = false;
+  private refreshPending = false;
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
   private midnightTimer: ReturnType<typeof setTimeout> | null = null;
   private listenerCleanup: (() => void) | null = null;
@@ -94,7 +95,14 @@ export class KanbanView extends ItemView {
   }
 
   async renderBoard() {
-    if (this.isRefreshing) return;
+    // A render already in flight (buildBoard does several vault-wide passes,
+    // so this can take a while) must not silently swallow this request — queue
+    // one follow-up render for when it finishes, so an action's own post-write
+    // refresh (e.g. after a drag-and-drop move) is never lost.
+    if (this.isRefreshing) {
+      this.refreshPending = true;
+      return;
+    }
     this.isRefreshing = true;
 
     const container = this.contentEl;
@@ -140,6 +148,10 @@ export class KanbanView extends ItemView {
       this.renderError(container, e.message ?? String(e));
     } finally {
       this.isRefreshing = false;
+      if (this.refreshPending) {
+        this.refreshPending = false;
+        this.renderBoard();
+      }
     }
   }
 

@@ -1,6 +1,6 @@
 import { App, Platform, Plugin, PluginSettingTab, Setting, WorkspaceLeaf } from "obsidian";
 import { KanbanView, VIEW_TYPE_KANBAN } from "./KanbanView";
-import { buildConfig, addDueColumnExplanationCard, normalizeTag, hslToHex, clamp } from "./kanban";
+import { buildConfig, addDueColumnExplanationCard, normalizeTag, hslToHex, clamp, invalidateCachedFile, renameCachedFile } from "./kanban";
 
 export interface KanbanSettings {
   kanban: string[];
@@ -203,6 +203,20 @@ export default class KanbanPlugin extends Plugin {
     );
     // Run once in case a tab is already open when the plugin loads
     this.app.workspace.onLayoutReady(() => this.injectNewTabButton());
+
+    // Keep the board's per-file content cache (see kanban.ts) in sync with
+    // changes made outside the board itself — hand edits, sync from another
+    // device, etc. The board's own writes go through app.vault.modify too,
+    // so this alone covers every write path without needing to touch each one.
+    this.registerEvent(
+      this.app.vault.on("modify", (file) => invalidateCachedFile(file.path))
+    );
+    this.registerEvent(
+      this.app.vault.on("delete", (file) => invalidateCachedFile(file.path))
+    );
+    this.registerEvent(
+      this.app.vault.on("rename", (file, oldPath) => renameCachedFile(oldPath, file.path))
+    );
 
     this.addSettingTab(new KanbanSettingTab(this.app, this));
   }

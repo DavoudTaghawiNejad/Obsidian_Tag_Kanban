@@ -977,6 +977,54 @@ function renderCheckbox(
 
 // ─── FILE OPERATIONS ──────────────────────────────────────────────────────────
 
+// Per-file line cache, keyed by vault path. Board renders otherwise re-read
+// and re-parse every target file from disk on every call (buildBoard alone
+// does this up to 5x per render) — this makes an unrelated render, or one
+// triggered by a single known change (e.g. a card drag), reuse content that
+// hasn't actually changed on disk. Invalidated centrally by main.ts's
+// vault "modify"/"delete"/"rename" listeners, since every write in this
+// plugin ultimately goes through app.vault.modify, which fires "modify"
+// before its promise resolves. The mtime check below is a cheap, no-I/O
+// backstop for external changes (e.g. this vault syncing over iCloud) whose
+// event might be missed or delayed.
+const fileLineCache = new Map<string, { mtime: number; lines: string[] }>();
+// Parsed (but not yet kanban-tag-filtered) entries per file — see
+// parseFileEntries/getCachedFileEntries near collectItems. Kept config-
+// independent (no tag filtering baked in) so a settings change never needs
+// to invalidate it — only file content does, same as fileLineCache above.
+const fileEntryCache = new Map<string, { mtime: number; entries: any[] }>();
+
+async function getCachedFileLines(app: App, filePath: string): Promise<string[]> {
+  const tFile = app.vault.getAbstractFileByPath(filePath) as TFile | null;
+  if (!tFile) return [];
+  const cached = fileLineCache.get(filePath);
+  if (cached && cached.mtime === tFile.stat.mtime) return cached.lines;
+  let raw: string;
+  try {
+    raw = await app.vault.read(tFile);
+  } catch {
+    return [];
+  }
+  if (!raw || typeof raw !== "string") return [];
+  const lines = raw.split("\n");
+  fileLineCache.set(filePath, { mtime: tFile.stat.mtime, lines });
+  return lines;
+}
+
+export function invalidateCachedFile(path: string): void {
+  fileLineCache.delete(path);
+  fileEntryCache.delete(path);
+}
+
+export function renameCachedFile(oldPath: string, newPath: string): void {
+  const lines = fileLineCache.get(oldPath);
+  const entries = fileEntryCache.get(oldPath);
+  fileLineCache.delete(oldPath);
+  fileEntryCache.delete(oldPath);
+  if (lines) fileLineCache.set(newPath, lines);
+  if (entries) fileEntryCache.set(newPath, entries);
+}
+
 async function readFileLines(
   app: App,
   filePath: string
@@ -1564,6 +1612,165 @@ export async function getTargetFilePaths(
   return [...new Set(allPaths)];
 }
 
+function setLevels(node: any, level = 0) {
+  node.hierarchy_level = level;
+  node.subs?.forEach((s: any) => setLevels(s, level + 1));
+}
+
+// One file's contribution to collectItems' result — everything collectItems
+// used to compute per-line inside its own loop, minus discoveryIndex (that's
+// inherently cross-file, assigned by collectItems once entries are merged).
+// Cached per file by getCachedFileEntries; only config.normKanban (the
+// configured column tag list) affects this function's output, so the cache
+// only needs invalidating when that list changes, not on every render.
+function parseFileEntries(lines: string[], filePath: string, config: KanbanConfig): any[] {
+  const fileItems: any[] = [];
+
+  const LIST_RE = /^(\s*)(?:[-*+]|\d+[\.\)]|-\s*\[\s*\])\s+/;
+  const CODE_RE = /^[\s]*```/;
+  const EMBED_RE = /^[\s]*!\[\[/;
+  const LINK_RE = /^[\s]*\[\[/;
+
+  let start = 0;
+  if (lines[0]?.trim() === "---") {
+    for (let i = 1; i < lines.length; i++) {
+      if (lines[i]?.trim() === "---") {
+        start = i + 1;
+        break;
+      }
+    }
+  }
+  const body = lines.slice(start);
+
+  let inCode = false;
+  const stack: any[] = [];
+
+  for (let i = 0; i < body.length; i++) {
+    const line = body[i];
+    if (typeof line !== "string") continue;
+    const trim = line.trim();
+    if (!trim || trim.toLowerCase().includes("#exclude")) continue;
+    if (CODE_RE.test(line)) {
+      inCode = !inCode;
+      continue;
+    }
+    if (inCode || EMBED_RE.test(line) || LINK_RE.test(line)) continue;
+
+    const indent = (line.match(/^(\s*)/) || [""])[0].length;
+
+    // Headings with kanban tags
+    const hMatch = line.match(/^\s*(#{1,6})\s+(.+)$/);
+    if (hMatch) {
+      const tags = extractTags(hMatch[2]);
+      if (tags.some((t: string) => matchesKanbanTag(t, config.normKanban))) {
+        const parsed = parseOrderComment(hMatch[2]);
+        while (
+          stack.length &&
+          stack[stack.length - 1].indent >= indent
+        ) {
+          const p = stack.pop();
+          if (
+            p.item.tags.some((t: string) =>
+              matchesKanbanTag(t, config.normKanban)
+            )
+          )
+            fileItems.push(p);
+        }
+        stack.push({
+          item: { text: hMatch[2].trim(), tags, line: i + 1 + start, subs: [] },
+          source: { path: filePath },
+          filePath,
+          state: parsed?.state ?? "collapsed",
+          digits: parsed?.digits ?? null,
+          len: parsed?.len ?? null,
+          isPromoted: indent > 0,
+          indent,
+          hierarchy_level: stack.length,
+        });
+      }
+      continue;
+    }
+
+    if (!LIST_RE.test(line)) continue;
+
+    const ownTags = extractTags(line);
+    const parsed = parseOrderComment(trim);
+
+    while (
+      stack.length &&
+      stack[stack.length - 1].indent >= indent
+    ) {
+      const p = stack.pop();
+      if (
+        p.item.tags.some((t: string) =>
+          matchesKanbanTag(t, config.normKanban)
+        )
+      )
+        fileItems.push(p);
+    }
+
+    const entry: any = {
+      item: { text: trim, tags: ownTags, line: i + 1 + start, subs: [] },
+      source: { path: filePath },
+      filePath,
+      state: parsed?.state ?? "collapsed",
+      digits: parsed?.digits ?? null,
+      len: parsed?.len ?? null,
+      isPromoted: stack.length > 0 && ownTags.some((t: string) =>
+        matchesKanbanTag(t, config.normKanban)
+      ),
+      indent,
+      hierarchy_level: stack.length,
+    };
+
+    if (stack.length && stack[stack.length - 1].indent < indent) {
+      stack[stack.length - 1].item.subs.push(entry.item);
+    }
+
+    stack.push(entry);
+  }
+
+  while (stack.length) {
+    const e = stack.pop();
+    if (
+      e.item.tags.some((t: string) => matchesKanbanTag(t, config.normKanban))
+    )
+      fileItems.push(e);
+  }
+
+  return fileItems.map((e) => {
+    setLevels(e.item);
+    return {
+      ...e,
+      multiTag:
+        e.item.tags
+          .map(normalizeTag)
+          .filter((t: string) => config.normKanban.includes(t)).length > 1,
+    };
+  });
+}
+
+// Whole-cache generation marker: parseFileEntries' output depends on
+// config.normKanban (see above), so a change to the configured column tag
+// list must invalidate every cached entry, not just one file's.
+let cachedKanbanSignature: string | null = null;
+
+async function getCachedFileEntries(app: App, filePath: string, config: KanbanConfig): Promise<any[]> {
+  const signature = config.normKanban.join(",");
+  if (signature !== cachedKanbanSignature) {
+    fileEntryCache.clear();
+    cachedKanbanSignature = signature;
+  }
+  const tFile = app.vault.getAbstractFileByPath(filePath) as TFile | null;
+  if (!tFile) return [];
+  const cached = fileEntryCache.get(filePath);
+  if (cached && cached.mtime === tFile.stat.mtime) return cached.entries;
+  const lines = await getCachedFileLines(app, filePath);
+  const entries = parseFileEntries(lines, filePath, config);
+  fileEntryCache.set(filePath, { mtime: tFile.stat.mtime, entries });
+  return entries;
+}
+
 export async function collectItems(
   app: App,
   targetFilePaths: string[],
@@ -1572,151 +1779,12 @@ export async function collectItems(
   const allItems: any[] = [];
   let discoveryIdx = 0;
 
-  const LIST_RE = /^(\s*)(?:[-*+]|\d+[\.\)]|-\s*\[\s*\])\s+/;
-  const CODE_RE = /^[\s]*```/;
-  const EMBED_RE = /^[\s]*!\[\[/;
-  const LINK_RE = /^[\s]*\[\[/;
-
   for (const filePath of targetFilePaths) {
-    const tFile = app.vault.getAbstractFileByPath(filePath) as TFile | null;
-    if (!tFile) continue;
-
-    let raw: string;
-    try {
-      raw = await app.vault.read(tFile);
-    } catch {
-      continue;
-    }
-    if (!raw || typeof raw !== "string") continue;
-
-    let lines = raw.split("\n");
-    let start = 0;
-    if (lines[0]?.trim() === "---") {
-      for (let i = 1; i < lines.length; i++) {
-        if (lines[i]?.trim() === "---") {
-          start = i + 1;
-          break;
-        }
-      }
-    }
-    lines = lines.slice(start);
-
-    let inCode = false;
-    const stack: any[] = [];
-
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      if (typeof line !== "string") continue;
-      const trim = line.trim();
-      if (!trim || trim.toLowerCase().includes("#exclude")) continue;
-      if (CODE_RE.test(line)) {
-        inCode = !inCode;
-        continue;
-      }
-      if (inCode || EMBED_RE.test(line) || LINK_RE.test(line)) continue;
-
-      const indent = (line.match(/^(\s*)/) || [""])[0].length;
-
-      // Headings with kanban tags
-      const hMatch = line.match(/^\s*(#{1,6})\s+(.+)$/);
-      if (hMatch) {
-        const tags = extractTags(hMatch[2]);
-        if (tags.some((t: string) => matchesKanbanTag(t, config.normKanban))) {
-          const parsed = parseOrderComment(hMatch[2]);
-          while (
-            stack.length &&
-            stack[stack.length - 1].indent >= indent
-          ) {
-            const p = stack.pop();
-            if (
-              p.item.tags.some((t: string) =>
-                matchesKanbanTag(t, config.normKanban)
-              )
-            )
-              allItems.push({ ...p, discoveryIndex: discoveryIdx++ });
-          }
-          stack.push({
-            item: { text: hMatch[2].trim(), tags, line: i + 1 + start, subs: [] },
-            source: { path: filePath },
-            filePath,
-            state: parsed?.state ?? "collapsed",
-            digits: parsed?.digits ?? null,
-            len: parsed?.len ?? null,
-            isPromoted: indent > 0,
-            indent,
-            hierarchy_level: stack.length,
-          });
-        }
-        continue;
-      }
-
-      if (!LIST_RE.test(line)) continue;
-
-      const ownTags = extractTags(line);
-      const parsed = parseOrderComment(trim);
-
-      while (
-        stack.length &&
-        stack[stack.length - 1].indent >= indent
-      ) {
-        const p = stack.pop();
-        if (
-          p.item.tags.some((t: string) =>
-            matchesKanbanTag(t, config.normKanban)
-          )
-        )
-          allItems.push({ ...p, discoveryIndex: discoveryIdx++ });
-      }
-
-      const entry: any = {
-        item: { text: trim, tags: ownTags, line: i + 1 + start, subs: [] },
-        source: { path: filePath },
-        filePath,
-        state: parsed?.state ?? "collapsed",
-        digits: parsed?.digits ?? null,
-        len: parsed?.len ?? null,
-        isPromoted: stack.length > 0 && ownTags.some((t: string) =>
-          matchesKanbanTag(t, config.normKanban)
-        ),
-        indent,
-        hierarchy_level: stack.length,
-      };
-
-      if (stack.length && stack[stack.length - 1].indent < indent) {
-        stack[stack.length - 1].item.subs.push(entry.item);
-      }
-
-      stack.push(entry);
-    }
-
-    while (stack.length) {
-      const e = stack.pop();
-      if (
-        e.item.tags.some((t: string) => matchesKanbanTag(t, config.normKanban))
-      )
-        allItems.push({ ...e, discoveryIndex: discoveryIdx++ });
-    }
+    const fileItems = await getCachedFileEntries(app, filePath, config);
+    for (const e of fileItems) allItems.push({ ...e, discoveryIndex: discoveryIdx++ });
   }
 
-  function setLevels(node: any, level = 0) {
-    node.hierarchy_level = level;
-    node.subs?.forEach((s: any) => setLevels(s, level + 1));
-  }
-
-  return allItems
-    .filter((e) =>
-      e.item.tags.some((t: string) => matchesKanbanTag(t, config.normKanban))
-    )
-    .map((e) => {
-      setLevels(e.item);
-      return {
-        ...e,
-        multiTag:
-          e.item.tags
-            .map(normalizeTag)
-            .filter((t: string) => config.normKanban.includes(t)).length > 1,
-      };
-    });
+  return allItems;
 }
 
 export function groupByColumns(items: any[], config: KanbanConfig) {
@@ -2761,9 +2829,7 @@ async function tagUntaggedRecurrentCards(app: App, paths: string[], config: Kanb
   for (const filePath of paths) {
     const tFile = app.vault.getAbstractFileByPath(filePath) as TFile | null;
     if (!tFile) continue;
-    let raw: string;
-    try { raw = await app.vault.read(tFile); } catch { continue; }
-    const lines = raw.split('\n');
+    const lines = (await getCachedFileLines(app, filePath)).slice();
     let changed = false;
     for (let i = 0; i < lines.length; i++) {
       if (!annotationRe.test(lines[i])) continue;
@@ -2809,9 +2875,7 @@ async function moveCheckedCardsToDone(app: App, paths: string[], config: KanbanC
   for (const filePath of paths) {
     const tFile = app.vault.getAbstractFileByPath(filePath) as TFile | null;
     if (!tFile) continue;
-    let raw: string;
-    try { raw = await app.vault.read(tFile); } catch { continue; }
-    const lines = raw.split("\n");
+    const lines = (await getCachedFileLines(app, filePath)).slice();
     let changed = false;
     for (let i = 0; i < lines.length; i++) {
       const parsed = parseTaskLine(lines[i]);

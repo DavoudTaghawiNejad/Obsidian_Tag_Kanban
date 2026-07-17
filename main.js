@@ -729,6 +729,41 @@ function renderCheckbox(text, opts = {}) {
            data-line="${subLine}" data-parent-tag="${parentTag}" data-parent-digits="${parentDigits}">&#9655</span>` : "";
   return `${cbHtml}${content}${promoteHtml}`;
 }
+var fileLineCache = /* @__PURE__ */ new Map();
+var fileEntryCache = /* @__PURE__ */ new Map();
+async function getCachedFileLines(app, filePath) {
+  const tFile = app.vault.getAbstractFileByPath(filePath);
+  if (!tFile)
+    return [];
+  const cached = fileLineCache.get(filePath);
+  if (cached && cached.mtime === tFile.stat.mtime)
+    return cached.lines;
+  let raw;
+  try {
+    raw = await app.vault.read(tFile);
+  } catch {
+    return [];
+  }
+  if (!raw || typeof raw !== "string")
+    return [];
+  const lines = raw.split("\n");
+  fileLineCache.set(filePath, { mtime: tFile.stat.mtime, lines });
+  return lines;
+}
+function invalidateCachedFile(path) {
+  fileLineCache.delete(path);
+  fileEntryCache.delete(path);
+}
+function renameCachedFile(oldPath, newPath) {
+  const lines = fileLineCache.get(oldPath);
+  const entries = fileEntryCache.get(oldPath);
+  fileLineCache.delete(oldPath);
+  fileEntryCache.delete(oldPath);
+  if (lines)
+    fileLineCache.set(newPath, lines);
+  if (entries)
+    fileEntryCache.set(newPath, entries);
+}
 async function readFileLines(app, filePath) {
   const tFile = app.vault.getAbstractFileByPath(filePath);
   if (!tFile)
@@ -1171,126 +1206,137 @@ async function getTargetFilePaths(app, config) {
   }
   return [...new Set(allPaths)];
 }
-async function collectItems(app, targetFilePaths, config) {
-  const allItems = [];
-  let discoveryIdx = 0;
+function setLevels(node, level = 0) {
+  node.hierarchy_level = level;
+  node.subs?.forEach((s) => setLevels(s, level + 1));
+}
+function parseFileEntries(lines, filePath, config) {
+  const fileItems = [];
   const LIST_RE = /^(\s*)(?:[-*+]|\d+[\.\)]|-\s*\[\s*\])\s+/;
   const CODE_RE = /^[\s]*```/;
   const EMBED_RE = /^[\s]*!\[\[/;
   const LINK_RE = /^[\s]*\[\[/;
-  for (const filePath of targetFilePaths) {
-    const tFile = app.vault.getAbstractFileByPath(filePath);
-    if (!tFile)
-      continue;
-    let raw;
-    try {
-      raw = await app.vault.read(tFile);
-    } catch {
-      continue;
-    }
-    if (!raw || typeof raw !== "string")
-      continue;
-    let lines = raw.split("\n");
-    let start = 0;
-    if (lines[0]?.trim() === "---") {
-      for (let i = 1; i < lines.length; i++) {
-        if (lines[i]?.trim() === "---") {
-          start = i + 1;
-          break;
-        }
+  let start = 0;
+  if (lines[0]?.trim() === "---") {
+    for (let i = 1; i < lines.length; i++) {
+      if (lines[i]?.trim() === "---") {
+        start = i + 1;
+        break;
       }
-    }
-    lines = lines.slice(start);
-    let inCode = false;
-    const stack = [];
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      if (typeof line !== "string")
-        continue;
-      const trim = line.trim();
-      if (!trim || trim.toLowerCase().includes("#exclude"))
-        continue;
-      if (CODE_RE.test(line)) {
-        inCode = !inCode;
-        continue;
-      }
-      if (inCode || EMBED_RE.test(line) || LINK_RE.test(line))
-        continue;
-      const indent = (line.match(/^(\s*)/) || [""])[0].length;
-      const hMatch = line.match(/^\s*(#{1,6})\s+(.+)$/);
-      if (hMatch) {
-        const tags = extractTags(hMatch[2]);
-        if (tags.some((t) => matchesKanbanTag(t, config.normKanban))) {
-          const parsed2 = parseOrderComment(hMatch[2]);
-          while (stack.length && stack[stack.length - 1].indent >= indent) {
-            const p = stack.pop();
-            if (p.item.tags.some(
-              (t) => matchesKanbanTag(t, config.normKanban)
-            ))
-              allItems.push({ ...p, discoveryIndex: discoveryIdx++ });
-          }
-          stack.push({
-            item: { text: hMatch[2].trim(), tags, line: i + 1 + start, subs: [] },
-            source: { path: filePath },
-            filePath,
-            state: parsed2?.state ?? "collapsed",
-            digits: parsed2?.digits ?? null,
-            len: parsed2?.len ?? null,
-            isPromoted: indent > 0,
-            indent,
-            hierarchy_level: stack.length
-          });
-        }
-        continue;
-      }
-      if (!LIST_RE.test(line))
-        continue;
-      const ownTags = extractTags(line);
-      const parsed = parseOrderComment(trim);
-      while (stack.length && stack[stack.length - 1].indent >= indent) {
-        const p = stack.pop();
-        if (p.item.tags.some(
-          (t) => matchesKanbanTag(t, config.normKanban)
-        ))
-          allItems.push({ ...p, discoveryIndex: discoveryIdx++ });
-      }
-      const entry = {
-        item: { text: trim, tags: ownTags, line: i + 1 + start, subs: [] },
-        source: { path: filePath },
-        filePath,
-        state: parsed?.state ?? "collapsed",
-        digits: parsed?.digits ?? null,
-        len: parsed?.len ?? null,
-        isPromoted: stack.length > 0 && ownTags.some(
-          (t) => matchesKanbanTag(t, config.normKanban)
-        ),
-        indent,
-        hierarchy_level: stack.length
-      };
-      if (stack.length && stack[stack.length - 1].indent < indent) {
-        stack[stack.length - 1].item.subs.push(entry.item);
-      }
-      stack.push(entry);
-    }
-    while (stack.length) {
-      const e = stack.pop();
-      if (e.item.tags.some((t) => matchesKanbanTag(t, config.normKanban)))
-        allItems.push({ ...e, discoveryIndex: discoveryIdx++ });
     }
   }
-  function setLevels(node, level = 0) {
-    node.hierarchy_level = level;
-    node.subs?.forEach((s) => setLevels(s, level + 1));
+  const body = lines.slice(start);
+  let inCode = false;
+  const stack = [];
+  for (let i = 0; i < body.length; i++) {
+    const line = body[i];
+    if (typeof line !== "string")
+      continue;
+    const trim = line.trim();
+    if (!trim || trim.toLowerCase().includes("#exclude"))
+      continue;
+    if (CODE_RE.test(line)) {
+      inCode = !inCode;
+      continue;
+    }
+    if (inCode || EMBED_RE.test(line) || LINK_RE.test(line))
+      continue;
+    const indent = (line.match(/^(\s*)/) || [""])[0].length;
+    const hMatch = line.match(/^\s*(#{1,6})\s+(.+)$/);
+    if (hMatch) {
+      const tags = extractTags(hMatch[2]);
+      if (tags.some((t) => matchesKanbanTag(t, config.normKanban))) {
+        const parsed2 = parseOrderComment(hMatch[2]);
+        while (stack.length && stack[stack.length - 1].indent >= indent) {
+          const p = stack.pop();
+          if (p.item.tags.some(
+            (t) => matchesKanbanTag(t, config.normKanban)
+          ))
+            fileItems.push(p);
+        }
+        stack.push({
+          item: { text: hMatch[2].trim(), tags, line: i + 1 + start, subs: [] },
+          source: { path: filePath },
+          filePath,
+          state: parsed2?.state ?? "collapsed",
+          digits: parsed2?.digits ?? null,
+          len: parsed2?.len ?? null,
+          isPromoted: indent > 0,
+          indent,
+          hierarchy_level: stack.length
+        });
+      }
+      continue;
+    }
+    if (!LIST_RE.test(line))
+      continue;
+    const ownTags = extractTags(line);
+    const parsed = parseOrderComment(trim);
+    while (stack.length && stack[stack.length - 1].indent >= indent) {
+      const p = stack.pop();
+      if (p.item.tags.some(
+        (t) => matchesKanbanTag(t, config.normKanban)
+      ))
+        fileItems.push(p);
+    }
+    const entry = {
+      item: { text: trim, tags: ownTags, line: i + 1 + start, subs: [] },
+      source: { path: filePath },
+      filePath,
+      state: parsed?.state ?? "collapsed",
+      digits: parsed?.digits ?? null,
+      len: parsed?.len ?? null,
+      isPromoted: stack.length > 0 && ownTags.some(
+        (t) => matchesKanbanTag(t, config.normKanban)
+      ),
+      indent,
+      hierarchy_level: stack.length
+    };
+    if (stack.length && stack[stack.length - 1].indent < indent) {
+      stack[stack.length - 1].item.subs.push(entry.item);
+    }
+    stack.push(entry);
   }
-  return allItems.filter(
-    (e) => e.item.tags.some((t) => matchesKanbanTag(t, config.normKanban))
-  ).map((e) => {
+  while (stack.length) {
+    const e = stack.pop();
+    if (e.item.tags.some((t) => matchesKanbanTag(t, config.normKanban)))
+      fileItems.push(e);
+  }
+  return fileItems.map((e) => {
     setLevels(e.item);
     return {
       ...e,
       multiTag: e.item.tags.map(normalizeTag).filter((t) => config.normKanban.includes(t)).length > 1
     };
   });
+}
+var cachedKanbanSignature = null;
+async function getCachedFileEntries(app, filePath, config) {
+  const signature = config.normKanban.join(",");
+  if (signature !== cachedKanbanSignature) {
+    fileEntryCache.clear();
+    cachedKanbanSignature = signature;
+  }
+  const tFile = app.vault.getAbstractFileByPath(filePath);
+  if (!tFile)
+    return [];
+  const cached = fileEntryCache.get(filePath);
+  if (cached && cached.mtime === tFile.stat.mtime)
+    return cached.entries;
+  const lines = await getCachedFileLines(app, filePath);
+  const entries = parseFileEntries(lines, filePath, config);
+  fileEntryCache.set(filePath, { mtime: tFile.stat.mtime, entries });
+  return entries;
+}
+async function collectItems(app, targetFilePaths, config) {
+  const allItems = [];
+  let discoveryIdx = 0;
+  for (const filePath of targetFilePaths) {
+    const fileItems = await getCachedFileEntries(app, filePath, config);
+    for (const e of fileItems)
+      allItems.push({ ...e, discoveryIndex: discoveryIdx++ });
+  }
+  return allItems;
 }
 function groupByColumns(items, config) {
   const columns = Object.fromEntries(
@@ -2143,13 +2189,7 @@ async function tagUntaggedRecurrentCards(app, paths, config) {
     const tFile = app.vault.getAbstractFileByPath(filePath);
     if (!tFile)
       continue;
-    let raw;
-    try {
-      raw = await app.vault.read(tFile);
-    } catch {
-      continue;
-    }
-    const lines = raw.split("\n");
+    const lines = (await getCachedFileLines(app, filePath)).slice();
     let changed = false;
     for (let i = 0; i < lines.length; i++) {
       if (!annotationRe.test(lines[i]))
@@ -2196,13 +2236,7 @@ async function moveCheckedCardsToDone(app, paths, config) {
     const tFile = app.vault.getAbstractFileByPath(filePath);
     if (!tFile)
       continue;
-    let raw;
-    try {
-      raw = await app.vault.read(tFile);
-    } catch {
-      continue;
-    }
-    const lines = raw.split("\n");
+    const lines = (await getCachedFileLines(app, filePath)).slice();
     let changed = false;
     for (let i = 0; i < lines.length; i++) {
       const parsed = parseTaskLine(lines[i]);
@@ -3610,6 +3644,7 @@ var KanbanView = class extends import_obsidian2.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.isRefreshing = false;
+    this.refreshPending = false;
     this.debounceTimer = null;
     this.midnightTimer = null;
     this.listenerCleanup = null;
@@ -3686,8 +3721,10 @@ var KanbanView = class extends import_obsidian2.ItemView {
     }, 150);
   }
   async renderBoard() {
-    if (this.isRefreshing)
+    if (this.isRefreshing) {
+      this.refreshPending = true;
       return;
+    }
     this.isRefreshing = true;
     const container = this.contentEl;
     const oldScroll = container.querySelector("#kanban-scroll");
@@ -3721,6 +3758,10 @@ var KanbanView = class extends import_obsidian2.ItemView {
       this.renderError(container, e.message ?? String(e));
     } finally {
       this.isRefreshing = false;
+      if (this.refreshPending) {
+        this.refreshPending = false;
+        this.renderBoard();
+      }
     }
   }
   renderError(container, message) {
@@ -3835,6 +3876,15 @@ var KanbanPlugin = class extends import_obsidian3.Plugin {
       this.app.workspace.on("layout-change", () => this.injectNewTabButton())
     );
     this.app.workspace.onLayoutReady(() => this.injectNewTabButton());
+    this.registerEvent(
+      this.app.vault.on("modify", (file) => invalidateCachedFile(file.path))
+    );
+    this.registerEvent(
+      this.app.vault.on("delete", (file) => invalidateCachedFile(file.path))
+    );
+    this.registerEvent(
+      this.app.vault.on("rename", (file, oldPath) => renameCachedFile(oldPath, file.path))
+    );
     this.addSettingTab(new KanbanSettingTab(this.app, this));
   }
   injectNewTabButton() {
