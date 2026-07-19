@@ -1226,6 +1226,37 @@ async function moveToColumn(
   }
 }
 
+// Uncheck any completed subtasks (recursively) so a recurring card that's manually
+// dragged back to the recurrent column starts its next occurrence fresh.
+async function uncheckSubtasks(app: App, filePath: string, subs: any[]): Promise<boolean> {
+  if (!subs || !subs.length) return false;
+  try {
+    const { tFile, lines } = await readFileLines(app, filePath);
+    let changed = false;
+    const recurse = (list: any[]) => {
+      for (const sub of list) {
+        const idx = sub.line - 1;
+        if (idx >= 0 && idx < lines.length) {
+          const parsed = parseTaskLine(lines[idx]);
+          if (parsed.checked === true) {
+            parsed.checked = false;
+            parsed.doneDate = null;
+            lines[idx] = serializeTaskLine(parsed);
+            changed = true;
+          }
+        }
+        if (sub.subs?.length) recurse(sub.subs);
+      }
+    };
+    recurse(subs);
+    if (changed) await writeFileLines(app, tFile, lines);
+    return changed;
+  } catch (e: any) {
+    console.error("uncheckSubtasks failed:", e);
+    return false;
+  }
+}
+
 // The monthly/column doc a card lands in when the "Insert into document"
 // field is left untouched: {baseName}/{baseName}-YYYY-MM.md for ordinary
 // columns, {baseName}/Later.md and {baseName}/Recurrent.md for those columns.
@@ -1439,8 +1470,16 @@ async function archiveToSection(
         const n = new Date();
         const skipStr = `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;
         lines[idx] = setSkipDate(lines[idx], skipStr);
+      } else if (tickBox && parsed.checked !== null) {
+        parsed.checked = true;
+        lines[idx] = serializeTaskLine(parsed);
+      } else if (!tickBox && hasRecurrentInBlock && parsed.checked === true) {
+        // A completed plain subtask (no @recurrent annotation of its own) resets to
+        // open when the recurring parent cycles back, so the next occurrence starts fresh.
+        parsed.checked = false;
+        parsed.doneDate = null;
+        lines[idx] = serializeTaskLine(parsed);
       } else {
-        if (tickBox && parsed.checked !== null) parsed.checked = true;
         lines[idx] = serializeTaskLine(parsed);
       }
     }
@@ -3758,11 +3797,13 @@ export function attachListeners(
       if (!hasValidTriggers(lineTxt, config.normRecurrent)) {
         showRecurrentTriggerDialog(async (trigger) => {
           await moveToColumn(app, card.filePath, card.lineNum, card.originalTags, targetTag, false, config, null, newCalc.digits, newState, trigger, wasLater);
+          await uncheckSubtasks(app, card.filePath, card.subs);
           requestAnimationFrame(() => setTimeout(refresh, 50));
         }, [], extractRepeatSpec(lineTxt));
         return;
       }
       const ok = await moveToColumn(app, card.filePath, card.lineNum, card.originalTags, targetTag, false, config, null, newCalc.digits, newState, null, wasLater);
+      if (ok) await uncheckSubtasks(app, card.filePath, card.subs);
       if (ok) requestAnimationFrame(() => setTimeout(refresh, 50));
     } else if (targetNorm === config.normLater) {
       const { lines } = await readFileLines(app, card.filePath);
