@@ -1212,7 +1212,15 @@ async function moveToColumn(
     lines[idx] = serializeTaskLine(parsed);
     const n = new Date();
     const skipStr = `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;
-    if (config.normRecurrent && normalizeTag(targetTag) === config.normRecurrent) {
+    // Stamp today's skip date when a recurring card fires into Due — this is what
+    // stops it re-firing again the same day once it later cycles back to Recurrent
+    // (the stamp isn't cleared on return, see archiveToSection). Returning to Recurrent
+    // itself must NOT set the skip date; that would suppress a legitimate same-day fire.
+    if (
+      config.normRecurrent &&
+      normalizeTag(targetTag) === config.normDue &&
+      hasRecurrentAnnotation(parsed.text, config.normRecurrent)
+    ) {
       lines[idx] = setSkipDate(lines[idx], skipStr);
     }
     if (normalizeTag(targetTag) === config.normLater && !parsed.date) {
@@ -1466,10 +1474,11 @@ async function archiveToSection(
         parsed.doneDate = null;
         parsed.tags.push(config.recurrentColumn);
         parsed.date = repeatSpec ? formatDateAnnotation(addRepeatInterval(completedOn, repeatSpec)) : null;
+        // Skip date is intentionally left untouched here: it was already stamped with
+        // today when the card fired into Due, and that stamp is what stops same-day
+        // re-firing once it returns to Recurrent (see moveToColumn). Restamping it to
+        // the archiving date would be wrong if archiving happens on a later day.
         lines[idx] = serializeTaskLine(parsed);
-        const n = new Date();
-        const skipStr = `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;
-        lines[idx] = setSkipDate(lines[idx], skipStr);
       } else if (tickBox && parsed.checked !== null) {
         parsed.checked = true;
         lines[idx] = serializeTaskLine(parsed);

@@ -913,7 +913,7 @@ async function moveToColumn(app, filePath, lineNum, originalTags, targetTag, isD
     lines[idx] = serializeTaskLine(parsed);
     const n = new Date();
     const skipStr = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
-    if (config.normRecurrent && normalizeTag(targetTag) === config.normRecurrent) {
+    if (config.normRecurrent && normalizeTag(targetTag) === config.normDue && hasRecurrentAnnotation(parsed.text, config.normRecurrent)) {
       lines[idx] = setSkipDate(lines[idx], skipStr);
     }
     if (normalizeTag(targetTag) === config.normLater && !parsed.date) {
@@ -1105,9 +1105,6 @@ async function archiveToSection(app, filePath, mainLineNum, subLines, config, _i
         parsed.tags.push(config.recurrentColumn);
         parsed.date = repeatSpec ? formatDateAnnotation(addRepeatInterval(completedOn, repeatSpec)) : null;
         lines[idx] = serializeTaskLine(parsed);
-        const n = new Date();
-        const skipStr = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
-        lines[idx] = setSkipDate(lines[idx], skipStr);
       } else if (tickBox && parsed.checked !== null) {
         parsed.checked = true;
         lines[idx] = serializeTaskLine(parsed);
