@@ -130,6 +130,7 @@ export class KanbanView extends ItemView {
 
       const config = buildConfig(this.plugin.settings);
       await buildBoard(this.app, container, config, savedActiveCol);
+      this.ensureDoneWeekLink(container);
 
       const boardEl = container.querySelector<HTMLElement>("#kanban-wrapper");
       if (boardEl) {
@@ -151,6 +152,22 @@ export class KanbanView extends ItemView {
         this.renderBoard();
       }
     }
+  }
+
+  // Small, idempotent link to the companion "Done This Week" view — inserted
+  // once as the container's first child; later re-renders find it already
+  // there and leave it alone (buildBoard only reconciles #kanban-wrapper).
+  private ensureDoneWeekLink(container: HTMLElement) {
+    if (container.querySelector("#kb-done-week-link")) return;
+    const bar = container.createEl("div", { attr: { id: "kb-done-week-link" } });
+    bar.style.cssText = "text-align:right;padding:2px 6px 0;";
+    const link = bar.createEl("a", { text: "📅 Done this week" });
+    link.style.cssText = "font-size:.85em;color:var(--kb-link, var(--text-muted));text-decoration:underline dotted;cursor:pointer;";
+    link.addEventListener("click", (e) => {
+      e.preventDefault();
+      this.plugin.activateDoneWeekView();
+    });
+    container.insertBefore(bar, container.firstChild);
   }
 
   private renderError(container: HTMLElement, message: string) {

@@ -1,5 +1,6 @@
 import { App, Platform, Plugin, PluginSettingTab, Setting, TextComponent, WorkspaceLeaf } from "obsidian";
 import { KanbanView, VIEW_TYPE_KANBAN } from "./KanbanView";
+import { DoneWeekView, VIEW_TYPE_DONE_WEEK } from "./DoneThisWeekView";
 import { buildConfig, addDueColumnExplanationCard, normalizeTag, hslToHex, clamp, invalidateCachedFile, renameCachedFile } from "./kanban";
 
 export interface KanbanSettings {
@@ -166,9 +167,13 @@ export default class KanbanPlugin extends Plugin {
     await this.loadSettings();
 
     this.registerView(VIEW_TYPE_KANBAN, (leaf) => new KanbanView(leaf, this));
+    this.registerView(VIEW_TYPE_DONE_WEEK, (leaf) => new DoneWeekView(leaf, this));
 
     this.addRibbonIcon("layout-kanban", "Open Kanban Board", () =>
       this.activateView()
+    );
+    this.addRibbonIcon("list-checks", "Open Done This Week", () =>
+      this.activateDoneWeekView()
     );
 
     this.addCommand({
@@ -183,12 +188,21 @@ export default class KanbanPlugin extends Plugin {
       callback: () => this.activateViewInWindow(),
     });
 
+    this.addCommand({
+      id: "open-done-this-week",
+      name: "Open Done This Week",
+      callback: () => this.activateDoneWeekView(),
+    });
+
     // Protocol handler: obsidian://open-kanban opens the board from text links
     this.registerObsidianProtocolHandler("open-kanban", () =>
       this.activateView()
     );
     this.registerObsidianProtocolHandler("open-kanban-window", () =>
       this.activateViewInWindow()
+    );
+    this.registerObsidianProtocolHandler("open-done-this-week", () =>
+      this.activateDoneWeekView()
     );
 
     // Inject "Open Kanban Board" button into new-tab empty views
@@ -219,17 +233,27 @@ export default class KanbanPlugin extends Plugin {
     this.app.workspace.iterateAllLeaves((leaf) => {
       if (leaf.getViewState().type !== "empty") return;
       const container = leaf.view.containerEl.querySelector(".empty-state-container");
-      if (!container || container.querySelector(".kanban-new-tab-btn")) return;
-      const btn = container.createEl("button", {
-        text: "Open Kanban Board",
-        cls: "empty-state-action kanban-new-tab-btn",
-      });
-      btn.addEventListener("click", () => this.activateView());
+      if (!container) return;
+      if (!container.querySelector(".kanban-new-tab-btn")) {
+        const btn = container.createEl("button", {
+          text: "Open Kanban Board",
+          cls: "empty-state-action kanban-new-tab-btn",
+        });
+        btn.addEventListener("click", () => this.activateView());
+      }
+      if (!container.querySelector(".kanban-done-week-new-tab-btn")) {
+        const btn = container.createEl("button", {
+          text: "Open Done This Week",
+          cls: "empty-state-action kanban-done-week-new-tab-btn",
+        });
+        btn.addEventListener("click", () => this.activateDoneWeekView());
+      }
     });
   }
 
   onunload() {
     this.app.workspace.detachLeavesOfType(VIEW_TYPE_KANBAN);
+    this.app.workspace.detachLeavesOfType(VIEW_TYPE_DONE_WEEK);
   }
 
   async activateViewInWindow() {
@@ -266,6 +290,18 @@ export default class KanbanPlugin extends Plugin {
     workspace.revealLeaf(leaf);
   }
 
+  async activateDoneWeekView() {
+    const { workspace } = this.app;
+    const leaves = workspace.getLeavesOfType(VIEW_TYPE_DONE_WEEK);
+    if (leaves.length > 0) {
+      workspace.revealLeaf(leaves[0]);
+      return;
+    }
+    const leaf = workspace.getLeaf(true);
+    await leaf.setViewState({ type: VIEW_TYPE_DONE_WEEK, active: true });
+    workspace.revealLeaf(leaf);
+  }
+
   async loadSettings() {
     let data = await this.loadData();
     this.usingDesktopFallback = false;
@@ -287,6 +323,9 @@ export default class KanbanPlugin extends Plugin {
   refreshOpenBoards() {
     this.app.workspace.getLeavesOfType(VIEW_TYPE_KANBAN).forEach((leaf) => {
       (leaf.view as KanbanView).refresh();
+    });
+    this.app.workspace.getLeavesOfType(VIEW_TYPE_DONE_WEEK).forEach((leaf) => {
+      (leaf.view as DoneWeekView).refresh();
     });
   }
 }
@@ -1115,6 +1154,11 @@ class KanbanSettingTab extends PluginSettingTab {
       .addButton((btn) =>
         btn.setButtonText("Open Kanban Board").onClick(() => {
           this.plugin.activateView();
+        })
+      )
+      .addButton((btn) =>
+        btn.setButtonText("Open Done This Week").onClick(() => {
+          this.plugin.activateDoneWeekView();
         })
       );
     } catch (err) {

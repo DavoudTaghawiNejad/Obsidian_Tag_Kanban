@@ -24,7 +24,7 @@ __export(main_exports, {
   default: () => KanbanPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian3 = require("obsidian");
+var import_obsidian4 = require("obsidian");
 
 // src/KanbanView.ts
 var import_obsidian2 = require("obsidian");
@@ -924,7 +924,7 @@ async function moveToColumn(app, filePath, lineNum, originalTags, targetTag, isD
     if (isDone) {
       const n2 = new Date();
       parsed.doneDate = `${n2.getFullYear()}-${String(n2.getMonth() + 1).padStart(2, "0")}-${String(n2.getDate()).padStart(2, "0")}`;
-    } else {
+    } else if (!(config.normRecurrent && normalizeTag(targetTag) === config.normRecurrent)) {
       parsed.doneDate = null;
     }
     if (newDigits !== null) {
@@ -1122,7 +1122,6 @@ async function archiveToSection(app, filePath, mainLineNum, subLines, config, _i
         const completedOn = parsed.doneDate ? new Date(parsed.doneDate + "T00:00:00") : new Date();
         if (parsed.checked !== null)
           parsed.checked = false;
-        parsed.doneDate = null;
         parsed.tags.push(config.recurrentColumn);
         parsed.date = repeatSpec ? formatDateAnnotation(addRepeatInterval(completedOn, repeatSpec)) : null;
         lines[idx] = serializeTaskLine(parsed);
@@ -1299,15 +1298,15 @@ function parseFileEntries(lines, filePath, config) {
     const hMatch = line.match(/^\s*(#{1,6})\s+(.+)$/);
     if (hMatch) {
       const tags = extractTags(hMatch[2]);
+      while (stack.length && stack[stack.length - 1].indent >= indent) {
+        const p = stack.pop();
+        if (p.item.tags.some(
+          (t) => matchesKanbanTag(t, config.normKanban)
+        ))
+          fileItems.push(p);
+      }
       if (tags.some((t) => matchesKanbanTag(t, config.normKanban))) {
         const parsed2 = parseOrderComment(hMatch[2]);
-        while (stack.length && stack[stack.length - 1].indent >= indent) {
-          const p = stack.pop();
-          if (p.item.tags.some(
-            (t) => matchesKanbanTag(t, config.normKanban)
-          ))
-            fileItems.push(p);
-        }
         stack.push({
           item: { text: hMatch[2].trim(), tags, line: i + 1 + start, subs: [] },
           source: { path: filePath },
@@ -4154,6 +4153,7 @@ var KanbanView = class extends import_obsidian2.ItemView {
         container.empty();
       const config = buildConfig(this.plugin.settings);
       await buildBoard(this.app, container, config, savedActiveCol);
+      this.ensureDoneWeekLink(container);
       const boardEl = container.querySelector("#kanban-wrapper");
       if (boardEl) {
         this.listenerCleanup = attachListeners(
@@ -4175,6 +4175,22 @@ var KanbanView = class extends import_obsidian2.ItemView {
       }
     }
   }
+  // Small, idempotent link to the companion "Done This Week" view — inserted
+  // once as the container's first child; later re-renders find it already
+  // there and leave it alone (buildBoard only reconciles #kanban-wrapper).
+  ensureDoneWeekLink(container) {
+    if (container.querySelector("#kb-done-week-link"))
+      return;
+    const bar = container.createEl("div", { attr: { id: "kb-done-week-link" } });
+    bar.style.cssText = "text-align:right;padding:2px 6px 0;";
+    const link = bar.createEl("a", { text: "\u{1F4C5} Done this week" });
+    link.style.cssText = "font-size:.85em;color:var(--kb-link, var(--text-muted));text-decoration:underline dotted;cursor:pointer;";
+    link.addEventListener("click", (e) => {
+      e.preventDefault();
+      this.plugin.activateDoneWeekView();
+    });
+    container.insertBefore(bar, container.firstChild);
+  }
   renderError(container, message) {
     container.createEl("h3", { text: "Kanban Configuration Error" });
     container.createEl("p", { text: message });
@@ -4189,6 +4205,332 @@ var KanbanView = class extends import_obsidian2.ItemView {
   Later column:   #later
   New task insert: Tasks`
     });
+  }
+};
+
+// src/DoneThisWeekView.ts
+var import_obsidian3 = require("obsidian");
+var VIEW_TYPE_DONE_WEEK = "kanban-done-week-view";
+var WEEKDAYS_FULL = [
+  "Sunday",
+  "Monday",
+  "Tuesday",
+  "Wednesday",
+  "Thursday",
+  "Friday",
+  "Saturday"
+];
+function startOfToday() {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+function getLast7DaysStart() {
+  const d = startOfToday();
+  d.setDate(d.getDate() - 6);
+  return d;
+}
+function getSinceSaturdayStart() {
+  const d = startOfToday();
+  const daysSinceLastSaturday = (d.getDay() + 1) % 7;
+  d.setDate(d.getDate() - daysSinceLastSaturday - 7);
+  return d;
+}
+function cleanTaskText(raw) {
+  let text = raw.replace(/\s*%%[\s\S]*?%%\s*/g, " ").replace(/\s*✅\d{4}-\d{2}-\d{2}/, "").trim().replace(/^- \[[ xX]\] /, "").replace(/^[-*+]\s+/, "").trim();
+  text = text.replace(/(?<!\w)#\w+/g, "").replace(/(?<!\S)@\S+/g, "").replace(/\s{2,}/g, " ").trim();
+  return text;
+}
+var DoneWeekView = class extends import_obsidian3.ItemView {
+  constructor(leaf, plugin) {
+    super(leaf);
+    this.rangeMode = "last7";
+    this.isRefreshing = false;
+    this.refreshPending = false;
+    this.debounceTimer = null;
+    this.plugin = plugin;
+  }
+  getViewType() {
+    return VIEW_TYPE_DONE_WEEK;
+  }
+  getDisplayText() {
+    return "Done This Week";
+  }
+  getIcon() {
+    return "list-checks";
+  }
+  async onOpen() {
+    this.registerEvent(this.app.vault.on("modify", () => this.scheduleRefresh()));
+    this.registerEvent(this.app.vault.on("delete", () => this.scheduleRefresh()));
+    this.registerEvent(this.app.vault.on("rename", () => this.scheduleRefresh()));
+    this.registerEvent(
+      this.app.workspace.on("active-leaf-change", (leaf) => {
+        if (leaf === this.leaf)
+          this.scheduleRefresh(100);
+      })
+    );
+    await this.render();
+  }
+  async onClose() {
+    if (this.debounceTimer)
+      clearTimeout(this.debounceTimer);
+  }
+  async refresh() {
+    await this.render();
+  }
+  scheduleRefresh(delay = 400) {
+    if (this.debounceTimer)
+      clearTimeout(this.debounceTimer);
+    this.debounceTimer = setTimeout(() => this.render(), delay);
+  }
+  async render() {
+    if (this.isRefreshing) {
+      this.refreshPending = true;
+      return;
+    }
+    this.isRefreshing = true;
+    const container = this.contentEl;
+    const scrollTop = container.scrollTop;
+    try {
+      container.empty();
+      container.style.cssText = "padding:16px;overflow-y:auto;";
+      const config = buildConfig(this.plugin.settings);
+      const cv = (val, fb) => val && val.trim() ? val.trim() : fb;
+      container.style.setProperty("--kb-text", cv(config.colorText, "var(--text-normal)"));
+      container.style.setProperty("--kb-accent", cv(config.colorAccent, "var(--interactive-accent)"));
+      container.style.setProperty("--kb-link", cv(config.colorLink, "var(--text-accent)"));
+      container.style.setProperty("--kb-bold-color", cv(config.colorBold, "color-mix(in srgb, var(--kb-text) 75%, black)"));
+      container.style.setProperty("--kb-italic-star-color", cv(config.colorItalicStar, "color-mix(in srgb, var(--kb-text) 85%, white)"));
+      container.style.setProperty("--kb-italic-underscore-color", cv(config.colorItalicUnderscore, "color-mix(in srgb, var(--kb-text) 55%, teal)"));
+      container.style.color = "var(--kb-text)";
+      const error = validateConfig(this.plugin.settings);
+      if (error) {
+        container.createEl("h3", { text: "Kanban Configuration Error" });
+        container.createEl("p", { text: error });
+        container.createEl("p", { text: "Open Settings \u2192 Kanban Board to configure the plugin." });
+        return;
+      }
+      const doc = container.ownerDocument;
+      let colorCss = doc.getElementById("kanban-color-vars");
+      if (!colorCss) {
+        colorCss = doc.createElement("style");
+        colorCss.id = "kanban-color-vars";
+        doc.head.appendChild(colorCss);
+      }
+      colorCss.textContent = buildColorCSS(config);
+      const header = container.createDiv();
+      header.style.cssText = "display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:16px;";
+      header.createEl("h2", { text: "Done This Week", attr: { style: "margin:0;color:var(--kb-text);" } });
+      const toggleBar = header.createDiv();
+      toggleBar.style.cssText = "display:flex;gap:4px;border:1px solid var(--background-modifier-border);border-radius:6px;padding:2px;";
+      const modes = [
+        ["last7", "Last 7 days"],
+        ["sinceSaturday", "Since Saturday"]
+      ];
+      for (const [mode, label] of modes) {
+        const active = this.rangeMode === mode;
+        const btn = toggleBar.createEl("button", { text: label });
+        btn.style.cssText = `border:none;border-radius:4px;padding:5px 12px;cursor:pointer;font-size:.9em;${active ? "background:var(--interactive-accent);color:var(--text-on-accent);" : "background:transparent;color:var(--kb-text);"}`;
+        btn.addEventListener("click", () => {
+          if (this.rangeMode === mode)
+            return;
+          this.rangeMode = mode;
+          this.render();
+        });
+      }
+      const rangeStart = this.rangeMode === "last7" ? getLast7DaysStart() : getSinceSaturdayStart();
+      const rangeEnd = startOfToday();
+      const groups = await this.collectDoneGroups(config, rangeStart, rangeEnd);
+      if (!groups.length) {
+        container.createEl("p", {
+          text: "No completed tasks in this range.",
+          attr: { style: "color:var(--kb-text);opacity:.7;" }
+        });
+        return;
+      }
+      const tableWrap = container.createDiv();
+      tableWrap.style.cssText = "overflow-x:auto;";
+      const table = tableWrap.createEl("table");
+      table.style.cssText = "width:100%;border-collapse:collapse;color:var(--kb-text);";
+      const DAY_COLUMN_WIDTH = "100px";
+      const SUBTASKS_COLUMN_WIDTH = "90px";
+      const headRow = table.createEl("thead").createEl("tr");
+      for (const label of ["Day", "Task", "Subtasks", "File"]) {
+        const th = headRow.createEl("th", { text: label });
+        th.style.cssText = "text-align:left;padding:8px 10px;border-bottom:2px solid var(--background-modifier-border);white-space:nowrap;";
+        if (label === "Day")
+          th.style.cssText += `width:${DAY_COLUMN_WIDTH};min-width:${DAY_COLUMN_WIDTH};max-width:${DAY_COLUMN_WIDTH};`;
+        if (label === "Subtasks")
+          th.style.cssText += `width:${SUBTASKS_COLUMN_WIDTH};min-width:${SUBTASKS_COLUMN_WIDTH};max-width:${SUBTASKS_COLUMN_WIDTH};text-align:right;`;
+      }
+      const tbody = table.createEl("tbody");
+      const applyVisibility = (r, visible) => {
+        r.row.style.display = visible ? "" : "none";
+        const childrenVisible = visible && r.expanded;
+        for (const c of r.children)
+          applyVisibility(c, childrenVisible);
+      };
+      const renderNode = (node, isRoot) => {
+        const row = tbody.createEl("tr");
+        row.style.cssText = "border-bottom:1px solid var(--background-modifier-border);";
+        const dayCell = row.createEl("td", { text: node.matched && node.date ? WEEKDAYS_FULL[node.date.getDay()] : "\u2014" });
+        dayCell.style.cssText = `padding:8px 10px;white-space:nowrap;vertical-align:top;width:${DAY_COLUMN_WIDTH};min-width:${DAY_COLUMN_WIDTH};max-width:${DAY_COLUMN_WIDTH};`;
+        const taskCell = row.createEl("td");
+        taskCell.style.cssText = `padding:8px 10px 8px ${10 + node.depth * 18}px;`;
+        const checkboxEl = taskCell.createEl("input", { attr: { type: "checkbox" } });
+        checkboxEl.disabled = true;
+        checkboxEl.checked = node.matched;
+        checkboxEl.style.cssText = "margin-right:6px;vertical-align:middle;cursor:default;";
+        const hasChildren = node.children.length > 0;
+        const toggleSpan = taskCell.createSpan({ text: hasChildren ? "\u25B6" : "" });
+        toggleSpan.style.cssText = `display:inline-block;width:1.2em;color:var(--kb-accent);user-select:none;${hasChildren ? "cursor:pointer;" : "visibility:hidden;"}`;
+        const textSpan = taskCell.createSpan({ attr: { style: isRoot ? "font-weight:600;" : "" } });
+        textSpan.innerHTML = node.displayHtml;
+        const subtaskCell = row.createEl("td", { text: hasChildren ? String(node.children.length) : "" });
+        subtaskCell.style.cssText = `padding:8px 10px;white-space:nowrap;vertical-align:top;text-align:right;color:var(--kb-text);opacity:.7;width:${SUBTASKS_COLUMN_WIDTH};min-width:${SUBTASKS_COLUMN_WIDTH};max-width:${SUBTASKS_COLUMN_WIDTH};`;
+        const fileCell = row.createEl("td");
+        fileCell.style.cssText = "padding:8px 10px;white-space:nowrap;vertical-align:top;";
+        const basename = node.filePath.split("/").pop().replace(/\.md$/, "");
+        const link = fileCell.createEl("a", { text: basename });
+        link.style.cssText = "color:var(--kb-link);text-decoration:underline dotted;cursor:pointer;";
+        link.addEventListener("click", (e) => {
+          e.preventDefault();
+          void this.openSource(node.filePath, node.line);
+        });
+        const rendered = { row, children: [], expanded: false };
+        for (const child of node.children) {
+          rendered.children.push(renderNode(child, false));
+        }
+        if (hasChildren) {
+          toggleSpan.addEventListener("click", () => {
+            rendered.expanded = !rendered.expanded;
+            toggleSpan.textContent = rendered.expanded ? "\u25BC" : "\u25B6";
+            applyVisibility(rendered, true);
+          });
+        }
+        return rendered;
+      };
+      for (const group of groups) {
+        const rendered = renderNode(group.root, true);
+        applyVisibility(rendered, true);
+      }
+      let totalCards = 0;
+      let totalSubtasks = 0;
+      const tallyMatched = (node, isRoot) => {
+        if (node.matched) {
+          if (isRoot)
+            totalCards++;
+          else
+            totalSubtasks++;
+        }
+        for (const c of node.children)
+          tallyMatched(c, false);
+      };
+      for (const g of groups)
+        tallyMatched(g.root, true);
+      const totalCompleted = totalCards + totalSubtasks;
+      const tfoot = table.createEl("tfoot");
+      const totalRow = tfoot.createEl("tr");
+      totalRow.style.cssText = "border-top:2px solid var(--background-modifier-border);font-weight:600;";
+      totalRow.createEl("td");
+      const totalLabelCell = totalRow.createEl("td", {
+        text: `Total: ${totalCompleted} completed (${totalCards} card${totalCards === 1 ? "" : "s"}, ${totalSubtasks} subtask${totalSubtasks === 1 ? "" : "s"})`
+      });
+      totalLabelCell.style.cssText = "padding:10px;";
+      const totalSubtaskCell = totalRow.createEl("td", { text: String(totalSubtasks) });
+      totalSubtaskCell.style.cssText = "padding:10px;text-align:right;";
+      totalRow.createEl("td");
+    } catch (e) {
+      console.error("Done This Week render error:", e);
+      container.empty();
+      container.createEl("h3", { text: "Done This Week \u2014 Error" });
+      container.createEl("p", { text: e?.message ?? String(e) });
+    } finally {
+      container.scrollTop = scrollTop;
+      this.isRefreshing = false;
+      if (this.refreshPending) {
+        this.refreshPending = false;
+        void this.render();
+      }
+    }
+  }
+  async openSource(filePath, line) {
+    const file = this.app.vault.getAbstractFileByPath(filePath);
+    if (!(file instanceof import_obsidian3.TFile))
+      return;
+    const leaf = this.app.workspace.getLeaf(false);
+    await leaf.openFile(file, { eState: { line: line - 1 } });
+  }
+  // A card/subtask counts as done here via its own ✅ completion stamp only.
+  // A recurring card's stamp survives its cycle back to the Recurrent column
+  // (see archiveToSection/moveToColumn in kanban.ts) and is only cleared once
+  // it fires again into Due, so this still reflects the last real completion.
+  matchDate(node, inRange) {
+    if (node.tags.some((t) => normalizeTag(t) === "deleted"))
+      return null;
+    const doneMatch = node.text.match(/✅(\d{4}-\d{2}-\d{2})/);
+    if (!doneMatch)
+      return null;
+    const date = new Date(doneMatch[1] + "T00:00:00");
+    if (isNaN(date.getTime()) || !inRange(date))
+      return null;
+    return date;
+  }
+  async collectDoneGroups(config, rangeStart, rangeEnd) {
+    const vaultName = this.app.vault.getName();
+    const paths = await getTargetFilePaths(this.app, config);
+    const items = await collectItems(this.app, paths, config);
+    const inRange = (d) => d.getTime() >= rangeStart.getTime() && d.getTime() <= rangeEnd.getTime();
+    const childKeys = /* @__PURE__ */ new Set();
+    const collectChildKeys = (filePath, subs) => {
+      for (const sub of subs || []) {
+        childKeys.add(`${filePath}::${sub.line}`);
+        if (sub.subs?.length)
+          collectChildKeys(filePath, sub.subs);
+      }
+    };
+    for (const card of items)
+      collectChildKeys(card.filePath, card.item.subs);
+    const buildNode = (filePath, node) => {
+      if ((node.tags ?? []).some((t) => normalizeTag(t) === "deleted"))
+        return null;
+      const date = this.matchDate(node, inRange);
+      const children = [];
+      for (const sub of node.subs || []) {
+        const child = buildNode(filePath, sub);
+        if (child)
+          children.push(child);
+      }
+      if (!date && !children.length)
+        return null;
+      return {
+        filePath,
+        line: node.line,
+        depth: node.hierarchy_level ?? 0,
+        matched: !!date,
+        date,
+        displayHtml: formatInlineEmphasis(linksToHtml(cleanTaskText(node.text), vaultName)),
+        children
+      };
+    };
+    const maxDateOf = (node) => {
+      let max = node.date ? node.date.getTime() : -Infinity;
+      for (const c of node.children)
+        max = Math.max(max, maxDateOf(c));
+      return max;
+    };
+    const groups = [];
+    for (const card of items) {
+      const key = `${card.filePath}::${card.item.line}`;
+      if (childKeys.has(key))
+        continue;
+      const root = buildNode(card.filePath, card.item);
+      if (!root)
+        continue;
+      groups.push({ root, maxDate: maxDateOf(root) });
+    }
+    groups.sort((a, b) => b.maxDate - a.maxDate);
+    return groups;
   }
 };
 
@@ -4250,7 +4592,7 @@ var DEFAULT_SETTINGS = {
   fontSizeSubtask: "",
   fontSizeSubtaskMobile: ""
 };
-var KanbanPlugin = class extends import_obsidian3.Plugin {
+var KanbanPlugin = class extends import_obsidian4.Plugin {
   constructor() {
     super(...arguments);
     this.usingDesktopFallback = false;
@@ -4258,10 +4600,16 @@ var KanbanPlugin = class extends import_obsidian3.Plugin {
   async onload() {
     await this.loadSettings();
     this.registerView(VIEW_TYPE_KANBAN, (leaf) => new KanbanView(leaf, this));
+    this.registerView(VIEW_TYPE_DONE_WEEK, (leaf) => new DoneWeekView(leaf, this));
     this.addRibbonIcon(
       "layout-kanban",
       "Open Kanban Board",
       () => this.activateView()
+    );
+    this.addRibbonIcon(
+      "list-checks",
+      "Open Done This Week",
+      () => this.activateDoneWeekView()
     );
     this.addCommand({
       id: "open-kanban-board",
@@ -4273,6 +4621,11 @@ var KanbanPlugin = class extends import_obsidian3.Plugin {
       name: "Open Kanban Board in new window",
       callback: () => this.activateViewInWindow()
     });
+    this.addCommand({
+      id: "open-done-this-week",
+      name: "Open Done This Week",
+      callback: () => this.activateDoneWeekView()
+    });
     this.registerObsidianProtocolHandler(
       "open-kanban",
       () => this.activateView()
@@ -4280,6 +4633,10 @@ var KanbanPlugin = class extends import_obsidian3.Plugin {
     this.registerObsidianProtocolHandler(
       "open-kanban-window",
       () => this.activateViewInWindow()
+    );
+    this.registerObsidianProtocolHandler(
+      "open-done-this-week",
+      () => this.activateDoneWeekView()
     );
     this.registerEvent(
       this.app.workspace.on("layout-change", () => this.injectNewTabButton())
@@ -4301,17 +4658,27 @@ var KanbanPlugin = class extends import_obsidian3.Plugin {
       if (leaf.getViewState().type !== "empty")
         return;
       const container = leaf.view.containerEl.querySelector(".empty-state-container");
-      if (!container || container.querySelector(".kanban-new-tab-btn"))
+      if (!container)
         return;
-      const btn = container.createEl("button", {
-        text: "Open Kanban Board",
-        cls: "empty-state-action kanban-new-tab-btn"
-      });
-      btn.addEventListener("click", () => this.activateView());
+      if (!container.querySelector(".kanban-new-tab-btn")) {
+        const btn = container.createEl("button", {
+          text: "Open Kanban Board",
+          cls: "empty-state-action kanban-new-tab-btn"
+        });
+        btn.addEventListener("click", () => this.activateView());
+      }
+      if (!container.querySelector(".kanban-done-week-new-tab-btn")) {
+        const btn = container.createEl("button", {
+          text: "Open Done This Week",
+          cls: "empty-state-action kanban-done-week-new-tab-btn"
+        });
+        btn.addEventListener("click", () => this.activateDoneWeekView());
+      }
     });
   }
   onunload() {
     this.app.workspace.detachLeavesOfType(VIEW_TYPE_KANBAN);
+    this.app.workspace.detachLeavesOfType(VIEW_TYPE_DONE_WEEK);
   }
   async activateViewInWindow() {
     const { workspace } = this.app;
@@ -4322,7 +4689,7 @@ var KanbanPlugin = class extends import_obsidian3.Plugin {
       workspace.revealLeaf(popoutLeaf);
       return;
     }
-    const leaf = import_obsidian3.Platform.isMobile ? workspace.getLeaf(true) : workspace.openPopoutLeaf();
+    const leaf = import_obsidian4.Platform.isMobile ? workspace.getLeaf(true) : workspace.openPopoutLeaf();
     await leaf.setViewState({ type: VIEW_TYPE_KANBAN, active: true });
     workspace.revealLeaf(leaf);
   }
@@ -4337,10 +4704,21 @@ var KanbanPlugin = class extends import_obsidian3.Plugin {
     await leaf.setViewState({ type: VIEW_TYPE_KANBAN, active: true });
     workspace.revealLeaf(leaf);
   }
+  async activateDoneWeekView() {
+    const { workspace } = this.app;
+    const leaves = workspace.getLeavesOfType(VIEW_TYPE_DONE_WEEK);
+    if (leaves.length > 0) {
+      workspace.revealLeaf(leaves[0]);
+      return;
+    }
+    const leaf = workspace.getLeaf(true);
+    await leaf.setViewState({ type: VIEW_TYPE_DONE_WEEK, active: true });
+    workspace.revealLeaf(leaf);
+  }
   async loadSettings() {
     let data = await this.loadData();
     this.usingDesktopFallback = false;
-    if (!data && import_obsidian3.Platform.isMobile) {
+    if (!data && import_obsidian4.Platform.isMobile) {
       try {
         const raw = await this.app.vault.adapter.read(".obsidian/plugins/kanban-board/data.json");
         data = JSON.parse(raw);
@@ -4356,6 +4734,9 @@ var KanbanPlugin = class extends import_obsidian3.Plugin {
   }
   refreshOpenBoards() {
     this.app.workspace.getLeavesOfType(VIEW_TYPE_KANBAN).forEach((leaf) => {
+      leaf.view.refresh();
+    });
+    this.app.workspace.getLeavesOfType(VIEW_TYPE_DONE_WEEK).forEach((leaf) => {
       leaf.view.refresh();
     });
   }
@@ -4400,7 +4781,7 @@ function ensureHueSliderStyles(doc) {
   `;
   doc.head.appendChild(style);
 }
-var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
+var KanbanSettingTab = class extends import_obsidian4.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.ignoreWarning = false;
@@ -4449,7 +4830,7 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
       const s = this.plugin.settings;
       const hueSetting = (container, name, desc, get, set, lightness, opts, saturation = s.colorSaturation) => {
         const current = get();
-        const setting = new import_obsidian3.Setting(container).setName(name).setDesc((desc + (opts.nullable && current === null ? opts.nullSuffix ?? " (using theme default)" : "")).trim());
+        const setting = new import_obsidian4.Setting(container).setName(name).setDesc((desc + (opts.nullable && current === null ? opts.nullSuffix ?? " (using theme default)" : "")).trim());
         setting.settingEl.style.flexWrap = "wrap";
         setting.infoEl.style.flex = "1 1 38%";
         setting.infoEl.style.minWidth = "0";
@@ -4484,7 +4865,7 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
         }
       };
       const plainSlider = (container, name, desc, get, set, cssClass, range = [0, 100]) => {
-        const setting = new import_obsidian3.Setting(container).setName(name).setDesc(desc);
+        const setting = new import_obsidian4.Setting(container).setName(name).setDesc(desc);
         setting.settingEl.style.flexWrap = "wrap";
         setting.infoEl.style.flex = "1 1 38%";
         setting.infoEl.style.minWidth = "0";
@@ -4507,7 +4888,7 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
         build(settingItems);
         return settingItems;
       };
-      if (import_obsidian3.Platform.isMobile) {
+      if (import_obsidian4.Platform.isMobile) {
         const mobilePath = ".obsidian-mobile/plugins/kanban-board/data.json";
         const hasMobileSettings = await this.app.vault.adapter.exists(mobilePath);
         if (!hasMobileSettings && !this.ignoreWarning) {
@@ -4518,7 +4899,7 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
             containerEl.createEl("p", { text: "No settings found on this device. The desktop settings have not synced yet. The Kanban board will not work until they arrive." });
             containerEl.createEl("p", { text: "Wait for iCloud to sync, then restart the app. Alternatively, press Ignore to configure settings manually on this device." });
           }
-          new import_obsidian3.Setting(containerEl).addButton((btn) => {
+          new import_obsidian4.Setting(containerEl).addButton((btn) => {
             btn.setButtonText("Ignore");
             btn.buttonEl.addClass("mod-warning");
             btn.onClick(async () => {
@@ -4530,7 +4911,7 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
           return;
         }
         if (hasMobileSettings) {
-          new import_obsidian3.Setting(containerEl).setName("Mobile settings").setDesc(
+          new import_obsidian4.Setting(containerEl).setName("Mobile settings").setDesc(
             "This device has its own settings that may differ from the desktop. Deleting them will cause this app to use the desktop settings instead, keeping everything in sync. Restart the app after deleting."
           ).addButton((btn) => {
             btn.setButtonText("Delete mobile settings");
@@ -4542,7 +4923,7 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
           });
         }
       }
-      new import_obsidian3.Setting(containerEl).setName("Kanban columns").setDesc("Comma-separated column tags, in display order (e.g. #todo, #inprogress, #later, #done)").addText((text) => {
+      new import_obsidian4.Setting(containerEl).setName("Kanban columns").setDesc("Comma-separated column tags, in display order (e.g. #todo, #inprogress, #later, #done)").addText((text) => {
         const applyKanban = (value) => {
           this.plugin.settings.kanban = value.split(",").map((t) => t.trim()).filter(Boolean);
         };
@@ -4553,7 +4934,7 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
         this.bindDefaultOnEmpty(text, DEFAULT_SETTINGS.kanban.join(", "), applyKanban);
       });
       typeGroup((box) => {
-        new import_obsidian3.Setting(box).setName("Done column").setDesc("Tag for the done column \u2014 tasks moved here get their checkbox checked").addText((text) => {
+        new import_obsidian4.Setting(box).setName("Done column").setDesc("Tag for the done column \u2014 tasks moved here get their checkbox checked").addText((text) => {
           const applyDoneColumn = (value) => {
             this.plugin.settings.doneColumn = value.trim();
           };
@@ -4568,7 +4949,7 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
         }, s.colorLightness, { nullable: true });
       });
       typeGroup((box) => {
-        new import_obsidian3.Setting(box).setName("Start column in single row view").setDesc("Tag for the column shown by default when the board is displayed as a single column (narrow/mobile view)").addText((text) => {
+        new import_obsidian4.Setting(box).setName("Start column in single row view").setDesc("Tag for the column shown by default when the board is displayed as a single column (narrow/mobile view)").addText((text) => {
           const applyStartColumn = (value) => {
             this.plugin.settings.startColumn = value.trim();
           };
@@ -4583,7 +4964,7 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
         }, s.colorLightness, { nullable: true });
       });
       typeGroup((box) => {
-        new import_obsidian3.Setting(box).setName("Target column for due later and recurrent tasks").setDesc(
+        new import_obsidian4.Setting(box).setName("Target column for due later and recurrent tasks").setDesc(
           "Tag for the column where past-due/undated #later tasks and triggered #recurrent tasks are moved to (e.g. #due). This column is hidden whenever it has no cards, and reappears automatically once the board moves a card into it."
         ).addText((text) => {
           const applyDueColumn = (value) => {
@@ -4606,7 +4987,7 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
         });
       });
       typeGroup((box) => {
-        new import_obsidian3.Setting(box).setName("Later column").setDesc("Tag for the scheduled / later column \u2014 shows a date picker on drop").addText((text) => {
+        new import_obsidian4.Setting(box).setName("Later column").setDesc("Tag for the scheduled / later column \u2014 shows a date picker on drop").addText((text) => {
           const applyLaterColumn = (value) => {
             this.plugin.settings.laterColumn = value.trim();
           };
@@ -4621,7 +5002,7 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
         }, s.colorLightness, { nullable: true });
       });
       typeGroup((box) => {
-        new import_obsidian3.Setting(box).setName("Recurrent column").setDesc("Tag for the recurrent column. Cards with a matching @annotation and no other kanban tag are automatically placed here. Must be included in 'Kanban columns'.").addText((text) => {
+        new import_obsidian4.Setting(box).setName("Recurrent column").setDesc("Tag for the recurrent column. Cards with a matching @annotation and no other kanban tag are automatically placed here. Must be included in 'Kanban columns'.").addText((text) => {
           const applyRecurrentColumn = (value) => {
             this.plugin.settings.recurrentColumn = value.trim();
           };
@@ -4636,7 +5017,7 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
         }, s.colorLightness, { nullable: true });
       });
       typeGroup((box) => {
-        new import_obsidian3.Setting(box).setName("Project columns").setDesc(
+        new import_obsidian4.Setting(box).setName("Project columns").setDesc(
           "Comma-separated tags for columns where adding a new card automatically offers to create a linked Obsidian note. When a card is added in one of these columns, the 'Create new document' checkbox in the add dialog is pre-checked. The new note is created in the vault root and the card text becomes a wiki link [[Note Title]] pointing to it."
         ).addText(
           (text) => text.setPlaceholder("#todo, #inprogress").setValue((this.plugin.settings.projectColumns || []).join(", ")).onChange(async (value) => {
@@ -4649,7 +5030,7 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
         }, s.colorLightness, { nullable: true });
       });
       typeGroup((box) => {
-        new import_obsidian3.Setting(box).setName("Active columns").setDesc(
+        new import_obsidian4.Setting(box).setName("Active columns").setDesc(
           "Comma-separated tags for columns considered 'active' work. A project card is highlighted as unmanaged work only when none of its sub-tasks are in one of these columns, and not all of its sub-tasks are in the Later or Recurrent columns."
         ).addText((text) => {
           const applyActiveColumns = (value) => {
@@ -4661,7 +5042,7 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
           });
           this.bindDefaultOnEmpty(text, DEFAULT_SETTINGS.activeColumns.join(", "), applyActiveColumns);
         });
-        new import_obsidian3.Setting(box).setName("Active / Non-active columns").setDesc(
+        new import_obsidian4.Setting(box).setName("Active / Non-active columns").setDesc(
           "Any column not covered by a more specific type above uses Column background's Hue \u2014 Active columns get it at the general Lightness unmodified; Non-active columns shift by the offset below."
         );
         plainSlider(
@@ -4676,7 +5057,7 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
           [-15, 15]
         );
       });
-      new import_obsidian3.Setting(containerEl).setName("Project master document").setDesc(
+      new import_obsidian4.Setting(containerEl).setName("Project master document").setDesc(
         "Note where [[Project name]] links are collected when adding a card with 'Create new document' checked. Each new project link is prepended here (newest on top). Leave blank to disable."
       ).addText(
         (text) => text.setPlaceholder("Projects").setValue(this.plugin.settings.projectsDocument).onChange(async (value) => {
@@ -4684,7 +5065,7 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
           await this.plugin.saveSettings();
         })
       );
-      new import_obsidian3.Setting(containerEl).setName("New task insert document").setDesc(
+      new import_obsidian4.Setting(containerEl).setName("New task insert document").setDesc(
         'Note (and optional heading) where the + button inserts new tasks, e.g. "Tasks" or "Tasks#Inbox"'
       ).addText((text) => {
         const applyNewTaskInsert = (value) => {
@@ -4696,7 +5077,7 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
         });
         this.bindDefaultOnEmpty(text, DEFAULT_SETTINGS.newTaskInsert, applyNewTaskInsert);
       });
-      new import_obsidian3.Setting(containerEl).setName("Scan all vault notes").setDesc(
+      new import_obsidian4.Setting(containerEl).setName("Scan all vault notes").setDesc(
         "When enabled, every note in the vault is scanned for kanban-tagged tasks. When disabled, only notes linked from Parent pages are scanned."
       ).addToggle(
         (toggle) => toggle.setValue(this.plugin.settings.allVaultNotes).onChange(async (value) => {
@@ -4706,7 +5087,7 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
         })
       );
       if (!this.plugin.settings.allVaultNotes) {
-        new import_obsidian3.Setting(containerEl).setName("Parent pages").setDesc(
+        new import_obsidian4.Setting(containerEl).setName("Parent pages").setDesc(
           "Comma-separated note names. Tasks are collected from these notes and all notes they link to."
         ).addText(
           (text) => text.setPlaceholder("Dashboard, Projects").setValue(this.plugin.settings.parentPages.join(", ")).onChange(async (value) => {
@@ -4720,7 +5101,7 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
         text: "Each color picks its own Hue independently \u2014 Saturation and Lightness are fixed per field. Theme-override fields show a \u21BA button to revert to the Obsidian theme default.",
         attr: { style: "color:var(--text-muted);font-size:.85em;margin-top:-6px;" }
       });
-      new import_obsidian3.Setting(containerEl).setName("Reset colors").setDesc("Reset every color's Hue (including per-column-type colors) back to the plugin defaults. Other settings are unaffected.").addButton((btn) => {
+      new import_obsidian4.Setting(containerEl).setName("Reset colors").setDesc("Reset every color's Hue (including per-column-type colors) back to the plugin defaults. Other settings are unaffected.").addButton((btn) => {
         btn.setButtonText("Reset all colors to default");
         btn.buttonEl.addClass("mod-warning");
         btn.onClick(async () => {
@@ -4906,7 +5287,7 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
       hueSetting(containerEl, "Date color", "Color for date annotations on cards (e.g. 'Jun 24', 'next Mon').", () => s.hueDate, (v) => {
         s.hueDate = v;
       }, s.textLightness, { nullable: true }, s.textSaturation);
-      new import_obsidian3.Setting(containerEl).setName("Date font").setDesc("Font family for date annotations. Default: monospace.").addText(
+      new import_obsidian4.Setting(containerEl).setName("Date font").setDesc("Font family for date annotations. Default: monospace.").addText(
         (t) => t.setPlaceholder("monospace").setValue(this.plugin.settings.fontDate || "").onChange(async (v) => {
           this.plugin.settings.fontDate = v;
           await this.plugin.saveSettings();
@@ -4918,7 +5299,7 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
         attr: { style: "color:var(--text-muted);font-size:.85em;margin-top:-6px;" }
       });
       const fontSizeSetting = (name, desc, get, set) => {
-        new import_obsidian3.Setting(containerEl).setName(name).setDesc(desc).addText(
+        new import_obsidian4.Setting(containerEl).setName(name).setDesc(desc).addText(
           (text) => text.setPlaceholder("theme default").setValue(get()).onChange(async (value) => {
             set(value.trim());
             await this.plugin.saveSettings();
@@ -4997,7 +5378,7 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
         const currentMax = (this.plugin.settings.columnMaxCards || [])[i] || 0;
         const isDueColumn = normalizeTag(tag) === normalizeTag(this.plugin.settings.dueColumn);
         let numberInputEl;
-        new import_obsidian3.Setting(containerEl).setName("Max cards \u2014 " + tag.replace(/^#/, "").toUpperCase()).addToggle(
+        new import_obsidian4.Setting(containerEl).setName("Max cards \u2014 " + tag.replace(/^#/, "").toUpperCase()).addToggle(
           (toggle) => toggle.setTooltip("No limit").setValue(currentMax === 0).onChange(async (noLimit) => {
             numberInputEl.disabled = noLimit;
             numberInputEl.style.opacity = noLimit ? "0.4" : "1";
@@ -5033,9 +5414,13 @@ var KanbanSettingTab = class extends import_obsidian3.PluginSettingTab {
           });
         });
       });
-      new import_obsidian3.Setting(containerEl).setName("Open board").addButton(
+      new import_obsidian4.Setting(containerEl).setName("Open board").addButton(
         (btn) => btn.setButtonText("Open Kanban Board").onClick(() => {
           this.plugin.activateView();
+        })
+      ).addButton(
+        (btn) => btn.setButtonText("Open Done This Week").onClick(() => {
+          this.plugin.activateDoneWeekView();
         })
       );
     } catch (err) {

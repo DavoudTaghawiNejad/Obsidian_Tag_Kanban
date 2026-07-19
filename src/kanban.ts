@@ -869,7 +869,7 @@ function formatCardDateAnnotation(text: string, inline = false): string {
 // so matched content is required to exclude "<" — this stops a match from ever
 // spanning across an HTML tag boundary (e.g. two separate <a> hrefs that each
 // contain a single stray marker character).
-function formatInlineEmphasis(text: string, baseWeight = 400): string {
+export function formatInlineEmphasis(text: string, baseWeight = 400): string {
   const boldWeight = Math.min(baseWeight * 2, 1000);
   // Most UI fonts only ship a Regular and a Bold face, so any numeric weight
   // above ~600 renders identically to the surrounding title (already semibold).
@@ -885,7 +885,7 @@ function formatInlineEmphasis(text: string, baseWeight = 400): string {
 
 // ─── LINK CONVERSION ─────────────────────────────────────────────────────────
 
-function linksToHtml(text: string, vaultName: string): string {
+export function linksToHtml(text: string, vaultName: string): string {
   // 1. Wiki links  [[Note]]  [[Note#Section]]  [[Note|Alias]]
   text = text.replace(
     /\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g,
@@ -1227,7 +1227,12 @@ async function moveToColumn(
     if (isDone) {
       const n = new Date();
       parsed.doneDate = `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,"0")}-${String(n.getDate()).padStart(2,"0")}`;
-    } else {
+    } else if (!(config.normRecurrent && normalizeTag(targetTag) === config.normRecurrent)) {
+      // A recurring card cycling back into its own Recurrent column keeps the
+      // done date from the occurrence that just completed (dragged straight
+      // there from Done, bypassing archiveToSection) — it's only cleared once
+      // the card actually fires again into Due (targetTag there isn't Recurrent,
+      // so it falls through to this null below).
       parsed.doneDate = null;
     }
 
@@ -1505,9 +1510,12 @@ async function archiveToSection(
         // happens to get archived).
         const repeatSpec = extractRepeatSpec(lines[idx]);
         const completedOn = parsed.doneDate ? new Date(parsed.doneDate + "T00:00:00") : new Date();
-        // Reset recurrent card: uncheck, clear done-date, restore #recurrent tag
+        // Reset recurrent card: uncheck, restore #recurrent tag. The done-date
+        // from the occurrence that just finished is deliberately kept (not
+        // cleared) — it records when the card was last completed while it
+        // sits in Recurrent, and is only cleared once the card fires again
+        // into Due (see moveToColumn).
         if (parsed.checked !== null) parsed.checked = false;
-        parsed.doneDate = null;
         parsed.tags.push(config.recurrentColumn);
         parsed.date = repeatSpec ? formatDateAnnotation(addRepeatInterval(completedOn, repeatSpec)) : null;
         // Skip date is intentionally left untouched here: it was already stamped with
@@ -1761,20 +1769,25 @@ function parseFileEntries(lines: string[], filePath: string, config: KanbanConfi
     const hMatch = line.match(/^\s*(#{1,6})\s+(.+)$/);
     if (hMatch) {
       const tags = extractTags(hMatch[2]);
+      // Every heading — tagged or not — closes any list nesting still open
+      // from before it. Without this, an untagged heading (e.g. a plain
+      // "## Notes" section break) leaves a stale card's subtree "open" on
+      // the stack, so unrelated indented content further down the file can
+      // get silently attributed as that card's subtask.
+      while (
+        stack.length &&
+        stack[stack.length - 1].indent >= indent
+      ) {
+        const p = stack.pop();
+        if (
+          p.item.tags.some((t: string) =>
+            matchesKanbanTag(t, config.normKanban)
+          )
+        )
+          fileItems.push(p);
+      }
       if (tags.some((t: string) => matchesKanbanTag(t, config.normKanban))) {
         const parsed = parseOrderComment(hMatch[2]);
-        while (
-          stack.length &&
-          stack[stack.length - 1].indent >= indent
-        ) {
-          const p = stack.pop();
-          if (
-            p.item.tags.some((t: string) =>
-              matchesKanbanTag(t, config.normKanban)
-            )
-          )
-            fileItems.push(p);
-        }
         stack.push({
           item: { text: hMatch[2].trim(), tags, line: i + 1 + start, subs: [] },
           source: { path: filePath },
@@ -3169,7 +3182,7 @@ export function hexToHsl(hex: string): { h: number; s: number; l: number } {
   return { h, s: s * 100, l: l * 100 };
 }
 
-function buildColorCSS(config: KanbanConfig): string {
+export function buildColorCSS(config: KanbanConfig): string {
   const cv = (val: string, fb: string) => (val && val.trim()) ? val.trim() : fb;
   const configuredDarkText = (config.colorText && config.colorText.trim()) ? config.colorText.trim() : "#1a1a1a";
   const overLimit = cv(config.colorColumnOverLimit, "#5c1a1a");
