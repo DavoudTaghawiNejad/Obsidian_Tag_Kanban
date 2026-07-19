@@ -4492,17 +4492,8 @@ var DoneWeekView = class extends import_obsidian3.ItemView {
     for (const card of items)
       collectChildKeys(card.filePath, card.item.subs);
     const buildNode = (filePath, node) => {
-      if ((node.tags ?? []).some((t) => normalizeTag(t) === "deleted"))
-        return null;
       const date = this.matchDate(node, inRange);
-      const children = [];
-      for (const sub of node.subs || []) {
-        const child = buildNode(filePath, sub);
-        if (child)
-          children.push(child);
-      }
-      if (!date && !children.length)
-        return null;
+      const children = (node.subs || []).filter((sub) => !(sub.tags ?? []).some((t) => normalizeTag(t) === "deleted")).map((sub) => buildNode(filePath, sub));
       return {
         filePath,
         line: node.line,
@@ -4519,13 +4510,16 @@ var DoneWeekView = class extends import_obsidian3.ItemView {
         max = Math.max(max, maxDateOf(c));
       return max;
     };
+    const containsMatch = (node) => node.matched || node.children.some(containsMatch);
     const groups = [];
     for (const card of items) {
       const key = `${card.filePath}::${card.item.line}`;
       if (childKeys.has(key))
         continue;
+      if ((card.item.tags ?? []).some((t) => normalizeTag(t) === "deleted"))
+        continue;
       const root = buildNode(card.filePath, card.item);
-      if (!root)
+      if (!containsMatch(root))
         continue;
       groups.push({ root, maxDate: maxDateOf(root) });
     }
