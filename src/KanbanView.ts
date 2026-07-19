@@ -154,20 +154,25 @@ export class KanbanView extends ItemView {
     }
   }
 
-  // Small, idempotent link to the companion "Done This Week" view — inserted
-  // once as the container's first child; later re-renders find it already
-  // there and leave it alone (buildBoard only reconciles #kanban-wrapper).
+  // Small, idempotent links to the companion "Done This Week" / "Kanban
+  // Statistics" views — appended once after the board; later re-renders find
+  // it already there and leave it alone (buildBoard only reconciles
+  // #kanban-wrapper, so appending here keeps it below the board).
   private ensureDoneWeekLink(container: HTMLElement) {
-    if (container.querySelector("#kb-done-week-link")) return;
-    const bar = container.createEl("div", { attr: { id: "kb-done-week-link" } });
-    bar.style.cssText = "text-align:right;padding:2px 6px 0;";
-    const link = bar.createEl("a", { text: "📅 Done this week" });
-    link.style.cssText = "font-size:.85em;color:var(--kb-link, var(--text-muted));text-decoration:underline dotted;cursor:pointer;";
-    link.addEventListener("click", (e) => {
-      e.preventDefault();
-      this.plugin.activateDoneWeekView();
-    });
-    container.insertBefore(bar, container.firstChild);
+    if (container.querySelector("#kb-nav-links")) return;
+    const bar = container.createEl("div", { attr: { id: "kb-nav-links" } });
+    bar.style.cssText = "text-align:right;padding:6px 6px 2px;";
+    const navLink = (text: string, onClick: () => void) => {
+      const link = bar.createEl("a", { text });
+      link.style.cssText = "font-size:.85em;color:var(--kb-link, var(--text-muted));text-decoration:underline dotted;cursor:pointer;margin-left:14px;";
+      link.addEventListener("click", (e) => {
+        e.preventDefault();
+        onClick();
+      });
+    };
+    navLink("📅 Done this week", () => this.plugin.activateDoneWeekView());
+    navLink("📊 Statistics", () => this.plugin.activateStatsView());
+    container.appendChild(bar);
   }
 
   private renderError(container: HTMLElement, message: string) {

@@ -1,6 +1,7 @@
 import { App, Platform, Plugin, PluginSettingTab, Setting, TextComponent, WorkspaceLeaf } from "obsidian";
 import { KanbanView, VIEW_TYPE_KANBAN } from "./KanbanView";
 import { DoneWeekView, VIEW_TYPE_DONE_WEEK } from "./DoneThisWeekView";
+import { KanbanStatisticsView, VIEW_TYPE_KANBAN_STATS } from "./KanbanStatisticsView";
 import { buildConfig, addDueColumnExplanationCard, normalizeTag, hslToHex, clamp, invalidateCachedFile, renameCachedFile } from "./kanban";
 
 export interface KanbanSettings {
@@ -168,12 +169,16 @@ export default class KanbanPlugin extends Plugin {
 
     this.registerView(VIEW_TYPE_KANBAN, (leaf) => new KanbanView(leaf, this));
     this.registerView(VIEW_TYPE_DONE_WEEK, (leaf) => new DoneWeekView(leaf, this));
+    this.registerView(VIEW_TYPE_KANBAN_STATS, (leaf) => new KanbanStatisticsView(leaf, this));
 
     this.addRibbonIcon("layout-kanban", "Open Kanban Board", () =>
       this.activateView()
     );
     this.addRibbonIcon("list-checks", "Open Done This Week", () =>
       this.activateDoneWeekView()
+    );
+    this.addRibbonIcon("bar-chart-3", "Open Kanban Statistics", () =>
+      this.activateStatsView()
     );
 
     this.addCommand({
@@ -194,6 +199,12 @@ export default class KanbanPlugin extends Plugin {
       callback: () => this.activateDoneWeekView(),
     });
 
+    this.addCommand({
+      id: "open-kanban-statistics",
+      name: "Open Kanban Statistics",
+      callback: () => this.activateStatsView(),
+    });
+
     // Protocol handler: obsidian://open-kanban opens the board from text links
     this.registerObsidianProtocolHandler("open-kanban", () =>
       this.activateView()
@@ -203,6 +214,9 @@ export default class KanbanPlugin extends Plugin {
     );
     this.registerObsidianProtocolHandler("open-done-this-week", () =>
       this.activateDoneWeekView()
+    );
+    this.registerObsidianProtocolHandler("open-kanban-statistics", () =>
+      this.activateStatsView()
     );
 
     // Inject "Open Kanban Board" button into new-tab empty views
@@ -248,12 +262,20 @@ export default class KanbanPlugin extends Plugin {
         });
         btn.addEventListener("click", () => this.activateDoneWeekView());
       }
+      if (!container.querySelector(".kanban-stats-new-tab-btn")) {
+        const btn = container.createEl("button", {
+          text: "Open Kanban Statistics",
+          cls: "empty-state-action kanban-stats-new-tab-btn",
+        });
+        btn.addEventListener("click", () => this.activateStatsView());
+      }
     });
   }
 
   onunload() {
     this.app.workspace.detachLeavesOfType(VIEW_TYPE_KANBAN);
     this.app.workspace.detachLeavesOfType(VIEW_TYPE_DONE_WEEK);
+    this.app.workspace.detachLeavesOfType(VIEW_TYPE_KANBAN_STATS);
   }
 
   async activateViewInWindow() {
@@ -302,6 +324,18 @@ export default class KanbanPlugin extends Plugin {
     workspace.revealLeaf(leaf);
   }
 
+  async activateStatsView() {
+    const { workspace } = this.app;
+    const leaves = workspace.getLeavesOfType(VIEW_TYPE_KANBAN_STATS);
+    if (leaves.length > 0) {
+      workspace.revealLeaf(leaves[0]);
+      return;
+    }
+    const leaf = workspace.getLeaf(true);
+    await leaf.setViewState({ type: VIEW_TYPE_KANBAN_STATS, active: true });
+    workspace.revealLeaf(leaf);
+  }
+
   async loadSettings() {
     let data = await this.loadData();
     this.usingDesktopFallback = false;
@@ -326,6 +360,9 @@ export default class KanbanPlugin extends Plugin {
     });
     this.app.workspace.getLeavesOfType(VIEW_TYPE_DONE_WEEK).forEach((leaf) => {
       (leaf.view as DoneWeekView).refresh();
+    });
+    this.app.workspace.getLeavesOfType(VIEW_TYPE_KANBAN_STATS).forEach((leaf) => {
+      (leaf.view as KanbanStatisticsView).refresh();
     });
   }
 }
@@ -1159,6 +1196,11 @@ class KanbanSettingTab extends PluginSettingTab {
       .addButton((btn) =>
         btn.setButtonText("Open Done This Week").onClick(() => {
           this.plugin.activateDoneWeekView();
+        })
+      )
+      .addButton((btn) =>
+        btn.setButtonText("Open Kanban Statistics").onClick(() => {
+          this.plugin.activateStatsView();
         })
       );
     } catch (err) {

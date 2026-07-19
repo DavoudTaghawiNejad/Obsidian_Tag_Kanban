@@ -292,6 +292,8 @@ interface TaskLine {
   tags: string[];                              // all #tags in original order
   date: string | null;                         // "@YYYY-MM-DD" or null
   doneDate: string | null;                     // "%% YYYY-MM-DD %%" comment
+  createdDate: string | null;                  // "%% @created:YYYY-MM-DD %%" comment
+  deletedDate: string | null;                  // "%% @deleted:YYYY-MM-DD %%" comment
   orderDigits: string | null;
   orderState: "expanded" | "collapsed" | null;
   skipDate: string | null;                     // "%% @skip:YYYY-MM-DD %%" comment
@@ -318,6 +320,13 @@ function parseTaskLine(raw: string): TaskLine {
   let color: string | null = null;
   const clm = rest.match(/%% @color:(#[0-9a-fA-F]{6}) %%/);
   if (clm) color = clm[1];
+  // Created/deleted date stamps — preserve across parse/serialize round-trips
+  let createdDate: string | null = null;
+  const crm = rest.match(/%% @created:(\d{4}-\d{2}-\d{2}) %%/);
+  if (crm) createdDate = crm[1];
+  let deletedDate: string | null = null;
+  const dlm = rest.match(/%% @deleted:(\d{4}-\d{2}-\d{2}) %%/);
+  if (dlm) deletedDate = dlm[1];
   rest = rest.replace(/\s*%%[\s\S]*?%%\s*/g, " ").trim();
 
   // Date annotation (@YYYY-MM-DD)
@@ -351,7 +360,7 @@ function parseTaskLine(raw: string): TaskLine {
   const tags = (rest.match(/(?<!\w)#\w+/g) || []);
   const text = rest.replace(/\s*(?<!\w)#\w+/g, "").trim();
 
-  return { indent, bullet, checked, text, tags, date, doneDate, orderDigits, orderState, skipDate, color };
+  return { indent, bullet, checked, text, tags, date, doneDate, createdDate, deletedDate, orderDigits, orderState, skipDate, color };
 }
 
 function serializeTaskLine(t: TaskLine): string {
@@ -364,6 +373,8 @@ function serializeTaskLine(t: TaskLine): string {
   parts.push(...t.tags);
   if (t.date) parts.push(t.date);
   if (t.doneDate) parts.push(`✅${t.doneDate}`);
+  if (t.createdDate) parts.push(`%% @created:${t.createdDate} %%`);
+  if (t.deletedDate) parts.push(`%% @deleted:${t.deletedDate} %%`);
   if (t.orderDigits && t.orderState !== null) {
     parts.push(`%% @${t.orderDigits}${t.orderState === "expanded" ? "x" : "c"} %%`);
   }
@@ -1143,7 +1154,11 @@ async function markLineDeleted(
     if (lineNum < 1 || lineNum > lines.length) return false;
     const parsed = parseTaskLine(lines[lineNum - 1]);
     parsed.tags = parsed.tags.filter((t) => !config.normKanban.includes(normalizeTag(t)));
-    if (!parsed.tags.some(isDeletedTag)) parsed.tags.push(DELETED_TAG);
+    if (!parsed.tags.some(isDeletedTag)) {
+      parsed.tags.push(DELETED_TAG);
+      const n = new Date();
+      parsed.deletedDate = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
+    }
     if (parsed.checked !== null) parsed.checked = false;
     lines[lineNum - 1] = serializeTaskLine(parsed);
     await writeFileLines(app, tFile, lines);
@@ -1218,6 +1233,14 @@ async function moveToColumn(
           const tokRe = new RegExp(`@${tok.replace(/^@/, '')}\\b`, 'i');
           if (!tokRe.test(parsed.text)) parsed.text += ` ${tok}`;
         }
+      }
+      // Created-date resets to today whenever a card lands in Recurrent — its
+      // "creation" is treated as the start of the current cycle (same reasoning
+      // as the equivalent reset in archiveToSection's keepRecurring path, the
+      // other route back into this column).
+      {
+        const n = new Date();
+        parsed.createdDate = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
       }
     }
 
@@ -1522,6 +1545,14 @@ async function archiveToSection(
         // today when the card fired into Due, and that stamp is what stops same-day
         // re-firing once it returns to Recurrent (see moveToColumn). Restamping it to
         // the archiving date would be wrong if archiving happens on a later day.
+        // Created-date is reset to today: a recurring card's "creation" is
+        // treated as the start of its current cycle, not its original
+        // one-time creation, so the Statistics view's "newly opened" trend
+        // reflects each new occurrence rather than counting it once forever.
+        {
+          const n = new Date();
+          parsed.createdDate = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
+        }
         lines[idx] = serializeTaskLine(parsed);
       } else if (tickBox && parsed.checked !== null) {
         parsed.checked = true;
@@ -3301,6 +3332,52 @@ async function moveCheckedCardsToDone(app: App, paths: string[], config: KanbanC
   }
 }
 
+// Backfills "%% @created:YYYY-MM-DD %%" onto any card or subtask found without
+// one — walks the real card/subtask tree (via collectItems) rather than a flat
+// line scan, since only that tree-aware parse knows which checkbox lines are
+// actually inside a kanban card (a flat scan would either miss un-tagged
+// subtask lines, or, with "scan all vault notes" on, wrongly stamp unrelated
+// checklists elsewhere in the vault). Cards are stamped regardless of their
+// own syntax (heading or checkbox); subtasks are stamped only when they're a
+// real checkbox item (see isCheckboxItem) — plain note bullets inserted by
+// formatNoteLines are left alone. #deleted nodes are skipped: every date-based
+// stat downstream already excludes them, so stamping one would be a wasted write.
+export async function stampMissingCreatedDates(app: App, paths: string[], config: KanbanConfig): Promise<void> {
+  const items = await collectItems(app, paths, config);
+  const n = new Date();
+  const todayStr = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
+  const CREATED_RE = /%% @created:\d{4}-\d{2}-\d{2} %%/;
+  const isDeleted = (node: any) => (node.tags ?? []).some((t: string) => normalizeTag(t) === "deleted");
+
+  const byFile = new Map<string, number[]>();
+  const visit = (filePath: string, node: any, isSubtask: boolean) => {
+    if (isDeleted(node)) return;
+    if ((!isSubtask || isCheckboxItem(node)) && !CREATED_RE.test(node.text)) {
+      if (!byFile.has(filePath)) byFile.set(filePath, []);
+      byFile.get(filePath)!.push(node.line);
+    }
+    for (const sub of node.subs ?? []) visit(filePath, sub, true);
+  };
+  for (const card of items) visit(card.filePath, card.item, false);
+
+  for (const [filePath, lineNums] of byFile) {
+    const tFile = app.vault.getAbstractFileByPath(filePath) as TFile | null;
+    if (!tFile) continue;
+    const lines = (await getCachedFileLines(app, filePath)).slice();
+    let changed = false;
+    for (const lineNum of lineNums) {
+      const idx = lineNum - 1;
+      if (idx < 0 || idx >= lines.length) continue;
+      const parsed = parseTaskLine(lines[idx]);
+      if (parsed.createdDate) continue;
+      parsed.createdDate = todayStr;
+      lines[idx] = serializeTaskLine(parsed);
+      changed = true;
+    }
+    if (changed) await app.vault.modify(tFile, lines.join("\n"));
+  }
+}
+
 export const KANBAN_NARROW_BREAKPOINT = 700;
 
 export function isNarrowLayout(width: number): boolean {
@@ -3573,6 +3650,9 @@ export async function buildBoard(
 
   // Step A1: cards/sub-items checked off directly in the document → #done
   await moveCheckedCardsToDone(app, paths, config);
+
+  // Step A1b: backfill "%% @created %%" onto any card/subtask found without one
+  await stampMissingCreatedDates(app, paths, config);
 
   let items = await collectItems(app, paths, config);
 
