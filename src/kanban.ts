@@ -1565,6 +1565,47 @@ async function archiveToSection(
   }
 }
 
+// Shared by every card/subtask deletion trigger (clearing a title/subtask
+// text, and the highlight dialog's Delete button): a card with subtasks is
+// always just marked deleted (removing it outright would silently discard
+// every subtask beneath it), everything else asks the user to choose between
+// marking deleted and permanently removing the line(s).
+// Returns false if the user cancelled (nothing was written), true otherwise.
+async function deleteCardOrSubtask(
+  app: App,
+  filePath: string,
+  lineNum: number,
+  lastLine: number,
+  config: KanbanConfig,
+  isCard: boolean,
+  hasSubtasks: boolean,
+  subs: any[],
+  isPromoted: boolean
+): Promise<boolean> {
+  const markDeleted = async () => {
+    await markLineDeleted(app, filePath, lineNum, config);
+    if (isCard) {
+      await archiveToSection(app, filePath, lineNum, subs, config, !isPromoted, false, false);
+    }
+  };
+
+  if (isCard && hasSubtasks) {
+    await markDeleted();
+    return true;
+  }
+
+  const choice = await showDeleteChoiceDialog();
+  if (choice === "mark") {
+    await markDeleted();
+    return true;
+  }
+  if (choice === "remove") {
+    await deleteLineRange(app, filePath, lineNum, lastLine);
+    return true;
+  }
+  return false;
+}
+
 async function promoteSubToChild(
   app: App,
   filePath: string,
@@ -2068,8 +2109,8 @@ function insertChecklistPrefix(textarea: HTMLTextAreaElement) {
 }
 
 function buttonHtml(label: string, accent: boolean) {
-  const bg = accent ? "var(--interactive-accent)" : "var(--background-modifier-border)";
-  const color = accent ? "var(--text-on-accent)" : "var(--text-normal)";
+  const bg = accent ? "var(--kb-dialog-text, var(--text-normal))" : "var(--background-modifier-border)";
+  const color = accent ? "#fff" : "var(--text-normal)";
   return `<button style="padding:8px 16px;background:${bg};color:${color};border:none;border-radius:4px;cursor:pointer;">${label}</button>`;
 }
 
@@ -2110,6 +2151,23 @@ function showConfirmDialog(message: string): Promise<boolean> {
     const [yesBtn, noBtn] = dialog.querySelectorAll("button");
     yesBtn.onclick = () => { close(); resolve(true); };
     noBtn.onclick = () => { close(); resolve(false); };
+  });
+}
+
+// Offered whenever a card or subtask is deleted (see deleteCardOrSubtask) —
+// deleteCardOrSubtask skips this entirely for a card that has subtasks,
+// since permanently removing one would silently discard all of them.
+function showDeleteChoiceDialog(): Promise<"mark" | "remove" | null> {
+  return new Promise((resolve) => {
+    const { dialog, close } = makeOverlay("kanban-delete-choice-dialog");
+    dialog.innerHTML = `
+      <p style="margin:0 0 16px;font-size:.95em;">Delete this task?</p>
+      <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">${buttonHtml("Mark as deleted", true)}${buttonHtml("Delete permanently", false)}${buttonHtml("Cancel", false)}</div>`;
+    const [markBtn, removeBtn, cancelBtn] = dialog.querySelectorAll("button");
+    markBtn.onclick = () => { close(); resolve("mark"); };
+    removeBtn.onclick = () => { close(); resolve("remove"); };
+    cancelBtn.onclick = () => { close(); resolve(null); };
+    dialog.addEventListener("keydown", (e) => { if (e.key === "Escape") { close(); resolve(null); } });
   });
 }
 
@@ -2321,7 +2379,7 @@ function showDateDialog(
   const presetBtnStyle = (active: boolean) =>
     `padding:4px 10px;border:none;border-radius:12px;cursor:pointer;font-size:.75em;` +
     (active
-      ? `background:var(--interactive-accent);color:var(--text-on-accent);`
+      ? `background:var(--kb-dialog-text, var(--text-normal));color:#fff;`
       : `background:var(--background-modifier-border);color:var(--text-normal);`);
   let selectedPreset: string | null =
     DATE_PRESETS.find(([, , fn]) => fn().toISOString().split("T")[0] === defaultDate)?.[0] ?? null;
@@ -2419,7 +2477,7 @@ function showRecurrentTriggerDialog(
 
   const wdStyle = (active: boolean) =>
     `height:24px;padding:0 8px;border-radius:12px;border:1px solid var(--background-modifier-border);cursor:pointer;font-size:.75em;display:inline-flex;align-items:center;justify-content:center;` +
-    (active ? `background:var(--interactive-accent);color:var(--text-on-accent);` : `background:none;color:inherit;`);
+    (active ? `background:var(--kb-dialog-text, var(--text-normal));color:#fff;` : `background:none;color:inherit;`);
 
   const selectedChipStyle = wdStyle(true);
 
@@ -2663,7 +2721,8 @@ const CARD_COLOR_NONE_SWATCH_BG =
 
 function showCardColorDialog(
   existingColor: string | null,
-  onApply: (hex: string | null) => void
+  onApply: (hex: string | null) => void,
+  onDelete: () => void
 ) {
   const { dialog, close } = makeOverlay("kanban-card-color-dialog");
 
@@ -2691,15 +2750,19 @@ function showCardColorDialog(
     `<button type="button" class="kb-color-swatch" data-hue="-1" title="Gray" style="${swatchBtnStyle(-1, selectedHue === -1)}"></button>` +
     `<button type="button" class="kb-color-swatch" data-hue="-2" title="Default (no color)" style="${swatchBtnStyle(-2, selectedHue === -2)}"></button>`;
 
+  const deleteBtnStyle = "padding:8px 16px;background:var(--text-error, #e03e3e);border:none;border-radius:4px;cursor:pointer;color:#fff;";
+
   dialog.innerHTML = `
-    <h3 style="margin:0 0 12px;font-size:1.1em;">Highlight card</h3>
+    <h3 style="margin:0 0 12px;font-size:1.1em;">Card</h3>
     <div id="k-color-preview" style="width:100%;height:44px;border-radius:8px;margin-bottom:14px;background:var(--kb-card-bg,var(--background-secondary));"></div>
     <div id="k-color-swatches" style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-bottom:14px;">${swatchesHtml}</div>
-    <div id="k-color-actions" style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">${buttonHtml("Apply", true)}${buttonHtml("Cancel", false)}</div>`;
+    <div id="k-color-actions" style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">${buttonHtml("Apply", true)}${buttonHtml("Cancel", false)}</div>
+    <div style="margin-top:10px;"><button id="k-color-delete" type="button" style="${deleteBtnStyle}">Delete</button></div>`;
 
   const preview = dialog.querySelector("#k-color-preview") as HTMLElement;
   const swatchWrap = dialog.querySelector("#k-color-swatches") as HTMLElement;
   const [applyBtn, cancelBtn] = dialog.querySelectorAll<HTMLButtonElement>("#k-color-actions button");
+  const deleteBtn = dialog.querySelector("#k-color-delete") as HTMLButtonElement;
 
   const currentHex = (): string | null =>
     selectedHue === -2 ? null :
@@ -2730,6 +2793,7 @@ function showCardColorDialog(
 
   applyBtn.onclick = () => { close(); onApply(currentHex()); };
   cancelBtn.onclick = close;
+  deleteBtn.onclick = () => { close(); onDelete(); };
   dialog.addEventListener("keydown", (e) => { if (e.key === "Escape") close(); });
 }
 
@@ -3790,10 +3854,23 @@ export function attachListeners(
     const filePath = card.dataset.file!;
     const lineNum = parseInt(card.dataset.line!, 10);
     const existing = card.dataset.color || null;
-    showCardColorDialog(existing, async (hex) => {
-      await updateCardColor(app, filePath, lineNum, hex);
-      requestAnimationFrame(() => setTimeout(refresh, 50));
-    });
+    showCardColorDialog(
+      existing,
+      async (hex) => {
+        await updateCardColor(app, filePath, lineNum, hex);
+        requestAnimationFrame(() => setTimeout(refresh, 50));
+      },
+      async () => {
+        let subs: any[] = [];
+        try { subs = JSON.parse(card.dataset.subs || "[]"); } catch { /* ignore malformed subs */ }
+        const lastLine = parseInt(card.dataset.lastSubLine || `${lineNum}`, 10);
+        const changed = await deleteCardOrSubtask(
+          app, filePath, lineNum, lastLine, config,
+          true, subs.length > 0, subs, card.dataset.isPromoted === "true"
+        );
+        if (changed) requestAnimationFrame(() => setTimeout(refresh, 50));
+      }
+    );
   }
 
   function onCardClick(e: MouseEvent) {
@@ -4126,16 +4203,21 @@ export function attachListeners(
         };
       }
       if (save && !newText) {
-        // Clearing a card's title marks it #deleted rather than removing it,
-        // then archives it (and its subtasks) like a normal Archive click —
-        // except the checkbox is left unticked instead of completed, and a
-        // recurring card is archived outright instead of being re-armed for
-        // its next occurrence.
-        await markLineDeleted(app, filePath, lineNum, config);
+        // Clearing a card's title asks whether to mark it #deleted (then
+        // archive it, like a normal Archive click but leaving the checkbox
+        // unticked and never re-arming a recurring card) or remove it
+        // outright — unless it has subtasks, in which case removing it
+        // outright would silently discard all of them, so it's always just
+        // marked deleted.
         let subs: any[] = [];
         try { subs = JSON.parse(card.dataset.subs || "[]"); } catch { /* ignore malformed subs */ }
-        await archiveToSection(app, filePath, lineNum, subs, config, card.dataset.isPromoted !== "true", false, false);
-        requestAnimationFrame(() => setTimeout(refresh, 50));
+        const lastLine = parseInt(card.dataset.lastSubLine || `${lineNum}`, 10);
+        const changed = await deleteCardOrSubtask(
+          app, filePath, lineNum, lastLine, config,
+          true, subs.length > 0, subs, card.dataset.isPromoted === "true"
+        );
+        if (changed) requestAnimationFrame(() => setTimeout(refresh, 50));
+        else titleDiv.innerHTML = savedHTML;
       } else if (save && newText !== raw) {
         card.dataset.raw = newText;
         await editCardText(app, filePath, lineNum, newText);
@@ -4208,11 +4290,17 @@ export function attachListeners(
       finished = true;
       const newText = input.value.trim();
       if (save && !newText) {
-        // Clearing a subtask's text marks it #deleted rather than removing it —
-        // it stays out of the board's rendering and counts, and rides along
-        // normally whenever its parent card is next archived.
-        await markLineDeleted(app, filePath, lineNum, config);
-        requestAnimationFrame(() => setTimeout(refresh, 50));
+        // Clearing a subtask's text asks whether to mark it #deleted (it then
+        // stays out of the board's rendering and counts, riding along
+        // normally whenever its parent card is next archived) or remove it
+        // outright, along with anything nested under it.
+        const lastLine = parseInt(subRow.dataset.subLastLine || `${lineNum}`, 10);
+        const changed = await deleteCardOrSubtask(
+          app, filePath, lineNum, lastLine, config,
+          false, false, [], false
+        );
+        if (changed) requestAnimationFrame(() => setTimeout(refresh, 50));
+        else subRow.innerHTML = savedHTML;
       } else if (save && newText !== raw) {
         subRow.dataset.subRaw = newText;
         await editCardText(app, filePath, lineNum, newText);
@@ -4382,7 +4470,7 @@ export function attachListeners(
     const deleteBtn = doc.createElement("button");
     deleteBtn.textContent = "Delete";
     deleteBtn.style.cssText =
-      "flex:1;padding:14px;border-radius:10px;border:1px solid var(--background-modifier-border);background:var(--background-secondary);color:var(--text-error, #e03e3e);cursor:pointer;font-size:1em;font-weight:500;";
+      "flex:1;padding:14px;border-radius:10px;border:none;background:var(--text-error, #e03e3e);color:#fff;cursor:pointer;font-size:1em;font-weight:500;";
     deleteBtn.addEventListener("click", async () => {
       closeColPicker();
       clearSelection();

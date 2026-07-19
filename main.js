@@ -1169,6 +1169,28 @@ async function archiveToSection(app, filePath, mainLineNum, subLines, config, _i
     return false;
   }
 }
+async function deleteCardOrSubtask(app, filePath, lineNum, lastLine, config, isCard, hasSubtasks, subs, isPromoted) {
+  const markDeleted = async () => {
+    await markLineDeleted(app, filePath, lineNum, config);
+    if (isCard) {
+      await archiveToSection(app, filePath, lineNum, subs, config, !isPromoted, false, false);
+    }
+  };
+  if (isCard && hasSubtasks) {
+    await markDeleted();
+    return true;
+  }
+  const choice = await showDeleteChoiceDialog();
+  if (choice === "mark") {
+    await markDeleted();
+    return true;
+  }
+  if (choice === "remove") {
+    await deleteLineRange(app, filePath, lineNum, lastLine);
+    return true;
+  }
+  return false;
+}
 async function promoteSubToChild(app, filePath, subLineNum, parentTag, parentDigits, config, refresh) {
   try {
     const normParent = normalizeTag(parentTag);
@@ -1540,8 +1562,8 @@ function insertChecklistPrefix(textarea) {
   textarea.setSelectionRange(newPos, newPos);
 }
 function buttonHtml(label, accent) {
-  const bg = accent ? "var(--interactive-accent)" : "var(--background-modifier-border)";
-  const color = accent ? "var(--text-on-accent)" : "var(--text-normal)";
+  const bg = accent ? "var(--kb-dialog-text, var(--text-normal))" : "var(--background-modifier-border)";
+  const color = accent ? "#fff" : "var(--text-normal)";
   return `<button style="padding:8px 16px;background:${bg};color:${color};border:none;border-radius:4px;cursor:pointer;">${label}</button>`;
 }
 function afterFrontMatter(lines) {
@@ -1574,6 +1596,33 @@ function showConfirmDialog(message) {
       close();
       resolve(false);
     };
+  });
+}
+function showDeleteChoiceDialog() {
+  return new Promise((resolve) => {
+    const { dialog, close } = makeOverlay("kanban-delete-choice-dialog");
+    dialog.innerHTML = `
+      <p style="margin:0 0 16px;font-size:.95em;">Delete this task?</p>
+      <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">${buttonHtml("Mark as deleted", true)}${buttonHtml("Delete permanently", false)}${buttonHtml("Cancel", false)}</div>`;
+    const [markBtn, removeBtn, cancelBtn] = dialog.querySelectorAll("button");
+    markBtn.onclick = () => {
+      close();
+      resolve("mark");
+    };
+    removeBtn.onclick = () => {
+      close();
+      resolve("remove");
+    };
+    cancelBtn.onclick = () => {
+      close();
+      resolve(null);
+    };
+    dialog.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        close();
+        resolve(null);
+      }
+    });
   });
 }
 var DocSuggest = class extends import_obsidian.AbstractInputSuggest {
@@ -1740,7 +1789,7 @@ function showInputDialog(title, app, defaultDocName, onSubmit) {
 function showDateDialog(title, defaultDate, app, onSubmit, opts = {}) {
   const { withText, defaultDocName } = opts;
   const { dialog, close } = makeOverlay(withText ? "kanban-later-add-dialog" : "kanban-date-dialog");
-  const presetBtnStyle = (active) => `padding:4px 10px;border:none;border-radius:12px;cursor:pointer;font-size:.75em;` + (active ? `background:var(--interactive-accent);color:var(--text-on-accent);` : `background:var(--background-modifier-border);color:var(--text-normal);`);
+  const presetBtnStyle = (active) => `padding:4px 10px;border:none;border-radius:12px;cursor:pointer;font-size:.75em;` + (active ? `background:var(--kb-dialog-text, var(--text-normal));color:#fff;` : `background:var(--background-modifier-border);color:var(--text-normal);`);
   let selectedPreset = DATE_PRESETS.find(([, , fn]) => fn().toISOString().split("T")[0] === defaultDate)?.[0] ?? null;
   const presetBtnsHtml = DATE_PRESETS.map(
     ([key, label]) => `<button type="button" class="kb-date-preset" data-preset="${key}" style="${presetBtnStyle(key === selectedPreset)}">${label}</button>`
@@ -1816,7 +1865,7 @@ function showRecurrentTriggerDialog(onSubmit, existingTriggers = [], existingRep
   const YEAR_SENTINEL = "year1";
   let initRepeatUnit = existingRepeatSpec?.unit === "year" ? "month" : existingRepeatSpec?.unit ?? "week";
   let initRepeatCountVal = existingRepeatSpec === null ? "" : existingRepeatSpec.unit === "year" || existingRepeatSpec.unit === "month" && existingRepeatSpec.count === 12 ? YEAR_SENTINEL : String(existingRepeatSpec.count);
-  const wdStyle = (active) => `height:24px;padding:0 8px;border-radius:12px;border:1px solid var(--background-modifier-border);cursor:pointer;font-size:.75em;display:inline-flex;align-items:center;justify-content:center;` + (active ? `background:var(--interactive-accent);color:var(--text-on-accent);` : `background:none;color:inherit;`);
+  const wdStyle = (active) => `height:24px;padding:0 8px;border-radius:12px;border:1px solid var(--background-modifier-border);cursor:pointer;font-size:.75em;display:inline-flex;align-items:center;justify-content:center;` + (active ? `background:var(--kb-dialog-text, var(--text-normal));color:#fff;` : `background:none;color:inherit;`);
   const selectedChipStyle = wdStyle(true);
   const wdBtns = WD_KEYS.map(
     (d, i) => `<button type="button" class="kb-wd-btn" data-day="${d}" style="${wdStyle(activeWD.has(d))}">${WD_LABELS[i]}</button>`
@@ -2048,21 +2097,24 @@ var CARD_COLOR_GRAY = "#888888";
 var CARD_COLOR_SATURATION = 65;
 var CARD_COLOR_LIGHTNESS = 55;
 var CARD_COLOR_NONE_SWATCH_BG = "repeating-linear-gradient(45deg, var(--background-modifier-border), var(--background-modifier-border) 3px, transparent 3px, transparent 7px)";
-function showCardColorDialog(existingColor, onApply) {
+function showCardColorDialog(existingColor, onApply, onDelete) {
   const { dialog, close } = makeOverlay("kanban-card-color-dialog");
   const validExisting = existingColor && /^#[0-9a-fA-F]{6}$/.test(existingColor) ? existingColor : null;
   const existingHsl = validExisting ? hexToHsl(validExisting) : null;
   let selectedHue = !existingHsl ? -2 : existingHsl.l > 90 ? -2 : existingHsl.s < 10 ? -1 : CARD_COLOR_HUES.reduce((best, [, h]) => Math.abs(h - existingHsl.h) < Math.abs(best - existingHsl.h) ? h : best, CARD_COLOR_HUES[0][1]);
   const swatchBtnStyle = (h, active) => `width:32px;height:32px;border-radius:50%;cursor:pointer;border:2px solid ${active ? "var(--kb-accent)" : h === -2 ? "var(--background-modifier-border)" : "transparent"};background:${h === -2 ? CARD_COLOR_NONE_SWATCH_BG : h === -1 ? CARD_COLOR_GRAY : hslToHex(h, CARD_COLOR_SATURATION, CARD_COLOR_LIGHTNESS)};`;
   const swatchesHtml = CARD_COLOR_HUES.map(([name, h]) => `<button type="button" class="kb-color-swatch" data-hue="${h}" title="${name}" style="${swatchBtnStyle(h, h === selectedHue)}"></button>`).join("") + `<button type="button" class="kb-color-swatch" data-hue="-1" title="Gray" style="${swatchBtnStyle(-1, selectedHue === -1)}"></button><button type="button" class="kb-color-swatch" data-hue="-2" title="Default (no color)" style="${swatchBtnStyle(-2, selectedHue === -2)}"></button>`;
+  const deleteBtnStyle = "padding:8px 16px;background:var(--text-error, #e03e3e);border:none;border-radius:4px;cursor:pointer;color:#fff;";
   dialog.innerHTML = `
-    <h3 style="margin:0 0 12px;font-size:1.1em;">Highlight card</h3>
+    <h3 style="margin:0 0 12px;font-size:1.1em;">Card</h3>
     <div id="k-color-preview" style="width:100%;height:44px;border-radius:8px;margin-bottom:14px;background:var(--kb-card-bg,var(--background-secondary));"></div>
     <div id="k-color-swatches" style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-bottom:14px;">${swatchesHtml}</div>
-    <div id="k-color-actions" style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">${buttonHtml("Apply", true)}${buttonHtml("Cancel", false)}</div>`;
+    <div id="k-color-actions" style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">${buttonHtml("Apply", true)}${buttonHtml("Cancel", false)}</div>
+    <div style="margin-top:10px;"><button id="k-color-delete" type="button" style="${deleteBtnStyle}">Delete</button></div>`;
   const preview = dialog.querySelector("#k-color-preview");
   const swatchWrap = dialog.querySelector("#k-color-swatches");
   const [applyBtn, cancelBtn] = dialog.querySelectorAll("#k-color-actions button");
+  const deleteBtn = dialog.querySelector("#k-color-delete");
   const currentHex = () => selectedHue === -2 ? null : selectedHue === -1 ? CARD_COLOR_GRAY : hslToHex(selectedHue, CARD_COLOR_SATURATION, CARD_COLOR_LIGHTNESS);
   const updatePreview = () => {
     const hex = currentHex();
@@ -2091,6 +2143,10 @@ function showCardColorDialog(existingColor, onApply) {
     onApply(currentHex());
   };
   cancelBtn.onclick = close;
+  deleteBtn.onclick = () => {
+    close();
+    onDelete();
+  };
   dialog.addEventListener("keydown", (e) => {
     if (e.key === "Escape")
       close();
@@ -2905,10 +2961,34 @@ function attachListeners(boardEl, config, app, refresh) {
     const filePath = card.dataset.file;
     const lineNum = parseInt(card.dataset.line, 10);
     const existing = card.dataset.color || null;
-    showCardColorDialog(existing, async (hex) => {
-      await updateCardColor(app, filePath, lineNum, hex);
-      requestAnimationFrame(() => setTimeout(refresh, 50));
-    });
+    showCardColorDialog(
+      existing,
+      async (hex) => {
+        await updateCardColor(app, filePath, lineNum, hex);
+        requestAnimationFrame(() => setTimeout(refresh, 50));
+      },
+      async () => {
+        let subs = [];
+        try {
+          subs = JSON.parse(card.dataset.subs || "[]");
+        } catch {
+        }
+        const lastLine = parseInt(card.dataset.lastSubLine || `${lineNum}`, 10);
+        const changed = await deleteCardOrSubtask(
+          app,
+          filePath,
+          lineNum,
+          lastLine,
+          config,
+          true,
+          subs.length > 0,
+          subs,
+          card.dataset.isPromoted === "true"
+        );
+        if (changed)
+          requestAnimationFrame(() => setTimeout(refresh, 50));
+      }
+    );
   }
   function onCardClick(e) {
     const card = e.target.closest(".kanban-card");
@@ -3208,14 +3288,27 @@ function attachListeners(boardEl, config, app, refresh) {
         };
       }
       if (save && !newText) {
-        await markLineDeleted(app, filePath, lineNum, config);
         let subs = [];
         try {
           subs = JSON.parse(card.dataset.subs || "[]");
         } catch {
         }
-        await archiveToSection(app, filePath, lineNum, subs, config, card.dataset.isPromoted !== "true", false, false);
-        requestAnimationFrame(() => setTimeout(refresh, 50));
+        const lastLine = parseInt(card.dataset.lastSubLine || `${lineNum}`, 10);
+        const changed = await deleteCardOrSubtask(
+          app,
+          filePath,
+          lineNum,
+          lastLine,
+          config,
+          true,
+          subs.length > 0,
+          subs,
+          card.dataset.isPromoted === "true"
+        );
+        if (changed)
+          requestAnimationFrame(() => setTimeout(refresh, 50));
+        else
+          titleDiv.innerHTML = savedHTML;
       } else if (save && newText !== raw) {
         card.dataset.raw = newText;
         await editCardText(app, filePath, lineNum, newText);
@@ -3283,8 +3376,22 @@ function attachListeners(boardEl, config, app, refresh) {
       finished = true;
       const newText = input.value.trim();
       if (save && !newText) {
-        await markLineDeleted(app, filePath, lineNum, config);
-        requestAnimationFrame(() => setTimeout(refresh, 50));
+        const lastLine = parseInt(subRow.dataset.subLastLine || `${lineNum}`, 10);
+        const changed = await deleteCardOrSubtask(
+          app,
+          filePath,
+          lineNum,
+          lastLine,
+          config,
+          false,
+          false,
+          [],
+          false
+        );
+        if (changed)
+          requestAnimationFrame(() => setTimeout(refresh, 50));
+        else
+          subRow.innerHTML = savedHTML;
       } else if (save && newText !== raw) {
         subRow.dataset.subRaw = newText;
         await editCardText(app, filePath, lineNum, newText);
@@ -3426,7 +3533,7 @@ function attachListeners(boardEl, config, app, refresh) {
     bottomRow.appendChild(colorBtn);
     const deleteBtn = doc.createElement("button");
     deleteBtn.textContent = "Delete";
-    deleteBtn.style.cssText = "flex:1;padding:14px;border-radius:10px;border:1px solid var(--background-modifier-border);background:var(--background-secondary);color:var(--text-error, #e03e3e);cursor:pointer;font-size:1em;font-weight:500;";
+    deleteBtn.style.cssText = "flex:1;padding:14px;border-radius:10px;border:none;background:var(--text-error, #e03e3e);color:#fff;cursor:pointer;font-size:1em;font-weight:500;";
     deleteBtn.addEventListener("click", async () => {
       closeColPicker();
       clearSelection();
