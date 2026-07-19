@@ -1,4 +1,4 @@
-import { App, Platform, Plugin, PluginSettingTab, Setting, WorkspaceLeaf } from "obsidian";
+import { App, Platform, Plugin, PluginSettingTab, Setting, TextComponent, WorkspaceLeaf } from "obsidian";
 import { KanbanView, VIEW_TYPE_KANBAN } from "./KanbanView";
 import { buildConfig, addDueColumnExplanationCard, normalizeTag, hslToHex, clamp, invalidateCachedFile, renameCachedFile } from "./kanban";
 
@@ -337,6 +337,10 @@ function ensureHueSliderStyles(doc: Document) {
 class KanbanSettingTab extends PluginSettingTab {
   plugin: KanbanPlugin;
   private ignoreWarning = false;
+  // Fields wired up via bindDefaultOnEmpty(), so a field left blank can be
+  // snapped back to its default both on blur and when the settings tab closes
+  // (blur doesn't reliably fire when the whole modal is torn down).
+  private emptyFieldResetters: Array<() => Promise<void>> = [];
 
   constructor(app: App, plugin: KanbanPlugin) {
     super(app, plugin);
@@ -351,9 +355,36 @@ class KanbanSettingTab extends PluginSettingTab {
     this.plugin.refreshOpenBoards();
   }
 
+  // Registers a text field so an empty value snaps back to `defaultValue`
+  // rather than being saved blank. Runs on blur, and again as a fallback from
+  // hide() since closing the settings tab doesn't always blur the input first.
+  private bindDefaultOnEmpty(
+    text: TextComponent,
+    defaultValue: string,
+    applySync: (value: string) => void,
+    onSaved?: () => void | Promise<void>
+  ) {
+    const resetIfEmpty = async () => {
+      if (text.inputEl.value.trim() !== "") return;
+      text.setValue(defaultValue);
+      applySync(defaultValue);
+      await this.plugin.saveSettings();
+      await onSaved?.();
+    };
+    text.inputEl.addEventListener("blur", () => { void resetIfEmpty(); });
+    this.emptyFieldResetters.push(resetIfEmpty);
+  }
+
+  async hide() {
+    for (const resetIfEmpty of this.emptyFieldResetters) {
+      await resetIfEmpty();
+    }
+  }
+
   async display(): Promise<void> {
     const { containerEl } = this;
     containerEl.empty();
+    this.emptyFieldResetters = [];
     ensureHueSliderStyles(containerEl.ownerDocument);
     containerEl.createEl("h2", { text: "Kanban Board Settings" });
 
@@ -527,32 +558,38 @@ class KanbanSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Kanban columns")
       .setDesc("Comma-separated column tags, in display order (e.g. #todo, #inprogress, #later, #done)")
-      .addText((text) =>
+      .addText((text) => {
+        const applyKanban = (value: string) => {
+          this.plugin.settings.kanban = value
+            .split(",")
+            .map((t) => t.trim())
+            .filter(Boolean);
+        };
         text
           .setPlaceholder("#todo, #inprogress, #later, #done")
           .setValue(this.plugin.settings.kanban.join(", "))
           .onChange(async (value) => {
-            this.plugin.settings.kanban = value
-              .split(",")
-              .map((t) => t.trim())
-              .filter(Boolean);
+            applyKanban(value);
             await this.plugin.saveSettings();
-          })
-      );
+          });
+        this.bindDefaultOnEmpty(text, DEFAULT_SETTINGS.kanban.join(", "), applyKanban);
+      });
 
     typeGroup((box) => {
       new Setting(box)
         .setName("Done column")
         .setDesc("Tag for the done column — tasks moved here get their checkbox checked")
-        .addText((text) =>
+        .addText((text) => {
+          const applyDoneColumn = (value: string) => { this.plugin.settings.doneColumn = value.trim(); };
           text
             .setPlaceholder("#done")
             .setValue(this.plugin.settings.doneColumn)
             .onChange(async (value) => {
-              this.plugin.settings.doneColumn = value.trim();
+              applyDoneColumn(value);
               await this.plugin.saveSettings();
-            })
-        );
+            });
+          this.bindDefaultOnEmpty(text, DEFAULT_SETTINGS.doneColumn, applyDoneColumn);
+        });
       hueSetting(box, "Done column color", "Falls back to Active/Non-active when unset.", () => s.hueDoneColumn, (v) => { s.hueDoneColumn = v; }, s.colorLightness, { nullable: true });
     });
 
@@ -560,15 +597,17 @@ class KanbanSettingTab extends PluginSettingTab {
       new Setting(box)
         .setName("Start column in single row view")
         .setDesc("Tag for the column shown by default when the board is displayed as a single column (narrow/mobile view)")
-        .addText((text) =>
+        .addText((text) => {
+          const applyStartColumn = (value: string) => { this.plugin.settings.startColumn = value.trim(); };
           text
             .setPlaceholder("#today")
             .setValue(this.plugin.settings.startColumn)
             .onChange(async (value) => {
-              this.plugin.settings.startColumn = value.trim();
+              applyStartColumn(value);
               await this.plugin.saveSettings();
-            })
-        );
+            });
+          this.bindDefaultOnEmpty(text, DEFAULT_SETTINGS.startColumn, applyStartColumn);
+        });
       hueSetting(box, "Start column color", "Falls back to Active/Non-active when unset.", () => s.hueStartColumn, (v) => { s.hueStartColumn = v; }, s.colorLightness, { nullable: true });
     });
 
@@ -579,16 +618,18 @@ class KanbanSettingTab extends PluginSettingTab {
           "Tag for the column where past-due/undated #later tasks and triggered #recurrent tasks are moved to (e.g. #due). " +
           "This column is hidden whenever it has no cards, and reappears automatically once the board moves a card into it."
         )
-        .addText((text) =>
+        .addText((text) => {
+          const applyDueColumn = (value: string) => { this.plugin.settings.dueColumn = value.trim(); };
           text
             .setPlaceholder("#due")
             .setValue(this.plugin.settings.dueColumn)
             .onChange(async (value) => {
-              this.plugin.settings.dueColumn = value.trim();
+              applyDueColumn(value);
               await this.plugin.saveSettings();
               await this.touchDueColumn();
-            })
-        );
+            });
+          this.bindDefaultOnEmpty(text, DEFAULT_SETTINGS.dueColumn, applyDueColumn, () => this.touchDueColumn());
+        });
       hueSetting(box, "Due column color", "Falls back to Active/Non-active when unset.", () => s.hueDueColumn, (v) => { s.hueDueColumn = v; }, s.colorLightness, {
         nullable: true,
         onSaved: async () => { await this.touchDueColumn(); },
@@ -599,15 +640,17 @@ class KanbanSettingTab extends PluginSettingTab {
       new Setting(box)
         .setName("Later column")
         .setDesc("Tag for the scheduled / later column — shows a date picker on drop")
-        .addText((text) =>
+        .addText((text) => {
+          const applyLaterColumn = (value: string) => { this.plugin.settings.laterColumn = value.trim(); };
           text
             .setPlaceholder("#later")
             .setValue(this.plugin.settings.laterColumn)
             .onChange(async (value) => {
-              this.plugin.settings.laterColumn = value.trim();
+              applyLaterColumn(value);
               await this.plugin.saveSettings();
-            })
-        );
+            });
+          this.bindDefaultOnEmpty(text, DEFAULT_SETTINGS.laterColumn, applyLaterColumn);
+        });
       hueSetting(box, "Later column color", "Falls back to Active/Non-active when unset.", () => s.hueLaterColumn, (v) => { s.hueLaterColumn = v; }, s.colorLightness, { nullable: true });
     });
 
@@ -615,15 +658,17 @@ class KanbanSettingTab extends PluginSettingTab {
       new Setting(box)
         .setName("Recurrent column")
         .setDesc("Tag for the recurrent column. Cards with a matching @annotation and no other kanban tag are automatically placed here. Must be included in 'Kanban columns'.")
-        .addText((text) =>
+        .addText((text) => {
+          const applyRecurrentColumn = (value: string) => { this.plugin.settings.recurrentColumn = value.trim(); };
           text
             .setPlaceholder("#recurrent")
             .setValue(this.plugin.settings.recurrentColumn)
             .onChange(async (value) => {
-              this.plugin.settings.recurrentColumn = value.trim();
+              applyRecurrentColumn(value);
               await this.plugin.saveSettings();
-            })
-        );
+            });
+          this.bindDefaultOnEmpty(text, DEFAULT_SETTINGS.recurrentColumn, applyRecurrentColumn);
+        });
       hueSetting(box, "Recurrent column color", "Falls back to Active/Non-active when unset.", () => s.hueRecurrentColumn, (v) => { s.hueRecurrentColumn = v; }, s.colorLightness, { nullable: true });
     });
 
@@ -656,18 +701,22 @@ class KanbanSettingTab extends PluginSettingTab {
         .setDesc(
           "Comma-separated tags for columns considered 'active' work. A project card is highlighted as unmanaged work only when none of its sub-tasks are in one of these columns, and not all of its sub-tasks are in the Later or Recurrent columns."
         )
-        .addText((text) =>
+        .addText((text) => {
+          const applyActiveColumns = (value: string) => {
+            this.plugin.settings.activeColumns = value
+              .split(",")
+              .map((t) => t.trim())
+              .filter(Boolean);
+          };
           text
             .setPlaceholder("#next, #important, #today")
             .setValue((this.plugin.settings.activeColumns || []).join(", "))
             .onChange(async (value) => {
-              this.plugin.settings.activeColumns = value
-                .split(",")
-                .map((t) => t.trim())
-                .filter(Boolean);
+              applyActiveColumns(value);
               await this.plugin.saveSettings();
-            })
-        );
+            });
+          this.bindDefaultOnEmpty(text, DEFAULT_SETTINGS.activeColumns.join(", "), applyActiveColumns);
+        });
       new Setting(box)
         .setName("Active / Non-active columns")
         .setDesc(
@@ -706,15 +755,17 @@ class KanbanSettingTab extends PluginSettingTab {
       .setDesc(
         'Note (and optional heading) where the + button inserts new tasks, e.g. "Tasks" or "Tasks#Inbox"'
       )
-      .addText((text) =>
+      .addText((text) => {
+        const applyNewTaskInsert = (value: string) => { this.plugin.settings.newTaskInsert = value.trim(); };
         text
           .setPlaceholder("Tasks")
           .setValue(this.plugin.settings.newTaskInsert)
           .onChange(async (value) => {
-            this.plugin.settings.newTaskInsert = value.trim();
+            applyNewTaskInsert(value);
             await this.plugin.saveSettings();
-          })
-      );
+          });
+        this.bindDefaultOnEmpty(text, DEFAULT_SETTINGS.newTaskInsert, applyNewTaskInsert);
+      });
 
     new Setting(containerEl)
       .setName("Scan all vault notes")
