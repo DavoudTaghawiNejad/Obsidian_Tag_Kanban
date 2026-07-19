@@ -162,6 +162,8 @@ function extractTags(text) {
   const cleaned = text.replace(/`[^`]*`/g, "").replace(/["'""][^"'""]*["'""]/g, "");
   return cleaned.match(/(?<!\w)#\w+/g) || [];
 }
+var DELETED_TAG = "#deleted";
+var isDeletedTag = (t) => normalizeTag(t) === normalizeTag(DELETED_TAG);
 function parseOrderComment(text) {
   const m = text.match(/%% @(\d+)(\w) %%/);
   if (!m)
@@ -850,6 +852,25 @@ async function editCardText(app, filePath, lineNum, newText) {
     return false;
   }
 }
+async function markLineDeleted(app, filePath, lineNum, config) {
+  try {
+    const { tFile, lines } = await readFileLines(app, filePath);
+    if (lineNum < 1 || lineNum > lines.length)
+      return false;
+    const parsed = parseTaskLine(lines[lineNum - 1]);
+    parsed.tags = parsed.tags.filter((t) => !config.normKanban.includes(normalizeTag(t)));
+    if (!parsed.tags.some(isDeletedTag))
+      parsed.tags.push(DELETED_TAG);
+    if (parsed.checked !== null)
+      parsed.checked = false;
+    lines[lineNum - 1] = serializeTaskLine(parsed);
+    await writeFileLines(app, tFile, lines);
+    return true;
+  } catch (e) {
+    console.error("markLineDeleted failed:", e);
+    return false;
+  }
+}
 async function deleteLineRange(app, filePath, startLine, endLine) {
   try {
     const { tFile, lines } = await readFileLines(app, filePath);
@@ -1086,7 +1107,7 @@ async function moveCardToNewDoc(app, filePath, lineNum, plainTitle, targetTag, c
   new import_obsidian.Notice(isNew ? `Created "${safeTitle}.md" and moved task.` : `Moved task to existing "${safeTitle}.md".`);
 }
 var ARCHIVE_CALLOUT_HEADER = "> [!note]- Archived";
-async function archiveToSection(app, filePath, mainLineNum, subLines, config, _isTopLevel = true) {
+async function archiveToSection(app, filePath, mainLineNum, subLines, config, _isTopLevel = true, tickMain = true, keepRecurring = true) {
   try {
     let archiveLine = function(idx, tickBox) {
       if (idx < 0 || idx >= lines.length)
@@ -1095,7 +1116,7 @@ async function archiveToSection(app, filePath, mainLineNum, subLines, config, _i
       parsed.tags = parsed.tags.filter((t) => !config.normKanban.includes(normalizeTag(t)));
       parsed.orderDigits = null;
       parsed.orderState = null;
-      if (config.normRecurrent && hasRecurrentAnnotation(lines[idx], config.normRecurrent)) {
+      if (keepRecurring && config.normRecurrent && hasRecurrentAnnotation(lines[idx], config.normRecurrent)) {
         hasRecurrentInBlock = true;
         const repeatSpec = extractRepeatSpec(lines[idx]);
         const completedOn = parsed.doneDate ? new Date(parsed.doneDate + "T00:00:00") : new Date();
@@ -1120,7 +1141,7 @@ async function archiveToSection(app, filePath, mainLineNum, subLines, config, _i
     let hasRecurrentInBlock = false;
     const mainIdx = mainLineNum - 1;
     const endIdx = (maxSubLine(subLines) || mainLineNum) - 1;
-    archiveLine(mainIdx, true);
+    archiveLine(mainIdx, tickMain);
     const recurse = (subs) => {
       for (const sub of subs) {
         archiveLine(sub.line - 1, false);
@@ -2106,8 +2127,13 @@ function isCheckboxItem(s) {
 function isCheckedItem(s) {
   return /^[-*+]\s+\[[xX]\]/.test((s.text ?? "").trim());
 }
+function isDeletedItem(s) {
+  return (s.tags ?? []).some(isDeletedTag);
+}
 function hasUnchecked(subs) {
   for (const s of subs ?? []) {
+    if (isDeletedItem(s))
+      continue;
     if (isCheckboxItem(s) && !isCheckedItem(s))
       return true;
     if (s.subs?.length && hasUnchecked(s.subs))
@@ -2129,6 +2155,8 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
   const isExpanded = item.state === "expanded";
   function hasActiveKanban(subs) {
     for (const s of subs ?? []) {
+      if (isDeletedItem(s))
+        continue;
       if (isCheckboxItem(s) && !isCheckedItem(s)) {
         const tags = s.tags ?? [];
         if (tags.some((t) => config.normActive.includes(normalizeTag(t))))
@@ -2141,6 +2169,8 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
   }
   function allUncheckedInLaterOrRecurrent(subs, inheritedCovered = false) {
     for (const s of subs ?? []) {
+      if (isDeletedItem(s))
+        continue;
       const tags = s.tags ?? [];
       const selfCovered = tags.some((t) => {
         const norm = normalizeTag(t);
@@ -2182,7 +2212,7 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
     return `<div class="kb-sub-row" data-sub-line="${sub.line}" data-sub-last-line="${subLastLine}" data-sub-raw="${subEditRaw.replace(/"/g, "&quot;")}" style="${subStyle}">${indent}${rendered}</div>`;
   }
   function renderSubTree(subs, depth = 0) {
-    return (subs || []).map((sub) => renderSub(sub, depth) + renderSubTree(sub.subs, depth + 1)).join("");
+    return (subs || []).filter((sub) => !isDeletedItem(sub)).map((sub) => renderSub(sub, depth) + renderSubTree(sub.subs, depth + 1)).join("");
   }
   const addSubBtnStyle = `width:24px;height:24px;border-radius:50%;border:1px solid var(--background-modifier-border);background:none;cursor:pointer;font-size:1.1em;line-height:1;display:inline-flex;align-items:center;justify-content:center;color:inherit;`;
   const addSubBtn = `<button class="kb-add-sub" style="${addSubBtnStyle}">+</button>`;
@@ -3166,9 +3196,11 @@ function attachListeners(boardEl, config, app, refresh) {
     if (arrow)
       titleDiv.appendChild(arrow);
     titleDiv.onclick = null;
+    let finished = false;
     const finishEdit = async (save) => {
-      if (!titleDiv.contains(input))
+      if (finished || !titleDiv.contains(input))
         return;
+      finished = true;
       const newText = input.value.trim();
       if (card.querySelector("details")) {
         titleDiv.onclick = function() {
@@ -3176,8 +3208,13 @@ function attachListeners(boardEl, config, app, refresh) {
         };
       }
       if (save && !newText) {
-        const lastLine = parseInt(card.dataset.lastSubLine || `${lineNum}`, 10);
-        await deleteLineRange(app, filePath, lineNum, lastLine);
+        await markLineDeleted(app, filePath, lineNum, config);
+        let subs = [];
+        try {
+          subs = JSON.parse(card.dataset.subs || "[]");
+        } catch {
+        }
+        await archiveToSection(app, filePath, lineNum, subs, config, card.dataset.isPromoted !== "true", false, false);
         requestAnimationFrame(() => setTimeout(refresh, 50));
       } else if (save && newText !== raw) {
         card.dataset.raw = newText;
@@ -3239,13 +3276,14 @@ function attachListeners(boardEl, config, app, refresh) {
     };
     subRow.innerHTML = "";
     subRow.appendChild(input);
+    let finished = false;
     const finishEdit = async (save) => {
-      if (!subRow.contains(input))
+      if (finished || !subRow.contains(input))
         return;
+      finished = true;
       const newText = input.value.trim();
       if (save && !newText) {
-        const lastLine = parseInt(subRow.dataset.subLastLine || `${lineNum}`, 10);
-        await deleteLineRange(app, filePath, lineNum, lastLine);
+        await markLineDeleted(app, filePath, lineNum, config);
         requestAnimationFrame(() => setTimeout(refresh, 50));
       } else if (save && newText !== raw) {
         subRow.dataset.subRaw = newText;

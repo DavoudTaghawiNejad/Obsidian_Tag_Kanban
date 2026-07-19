@@ -257,6 +257,11 @@ function extractTags(text: string): string[] {
   return cleaned.match(/(?<!\w)#\w+/g) || [];
 }
 
+// Tag stamped on a task whose title/text was cleared out via inline editing,
+// in place of physically deleting the line — see markLineDeleted().
+const DELETED_TAG = "#deleted";
+const isDeletedTag = (t: string) => normalizeTag(t) === normalizeTag(DELETED_TAG);
+
 // ─── ORDER-COMMENT PARSING ────────────────────────────────────────────────────
 // Format: %% @<digits><c|x> %%   c = collapsed, x = expanded
 
@@ -1123,6 +1128,32 @@ async function editCardText(
   }
 }
 
+// Clearing a card's or subtask's title in the UI no longer removes the line —
+// it stamps it #deleted instead, leaving the original text alone. This keeps
+// line numbers stable for the surrounding tree and preserves what the task
+// said, in case it's ever found again in the archive.
+async function markLineDeleted(
+  app: App,
+  filePath: string,
+  lineNum: number,
+  config: KanbanConfig
+): Promise<boolean> {
+  try {
+    const { tFile, lines } = await readFileLines(app, filePath);
+    if (lineNum < 1 || lineNum > lines.length) return false;
+    const parsed = parseTaskLine(lines[lineNum - 1]);
+    parsed.tags = parsed.tags.filter((t) => !config.normKanban.includes(normalizeTag(t)));
+    if (!parsed.tags.some(isDeletedTag)) parsed.tags.push(DELETED_TAG);
+    if (parsed.checked !== null) parsed.checked = false;
+    lines[lineNum - 1] = serializeTaskLine(parsed);
+    await writeFileLines(app, tFile, lines);
+    return true;
+  } catch (e: any) {
+    console.error("markLineDeleted failed:", e);
+    return false;
+  }
+}
+
 async function deleteLineRange(
   app: App,
   filePath: string,
@@ -1447,13 +1478,18 @@ async function archiveToSection(
   mainLineNum: number,
   subLines: any[],
   config: KanbanConfig,
-  _isTopLevel = true
+  _isTopLevel = true,
+  tickMain = true,
+  keepRecurring = true
 ): Promise<boolean> {
   try {
     const { tFile, lines } = await readFileLines(app, filePath);
 
     // Recurring cards reset back to active below; if any line in this block
     // recurs, leave the whole block where it is instead of archiving it.
+    // Deleting a recurring card must skip this entirely (keepRecurring=false) —
+    // otherwise a card whose preserved title still says "@recurrent" would
+    // just get re-armed for its next occurrence instead of actually archiving.
     let hasRecurrentInBlock = false;
 
     function archiveLine(idx: number, tickBox: boolean) {
@@ -1462,7 +1498,7 @@ async function archiveToSection(
       parsed.tags = parsed.tags.filter((t) => !config.normKanban.includes(normalizeTag(t)));
       parsed.orderDigits = null;
       parsed.orderState = null;
-      if (config.normRecurrent && hasRecurrentAnnotation(lines[idx], config.normRecurrent)) {
+      if (keepRecurring && config.normRecurrent && hasRecurrentAnnotation(lines[idx], config.normRecurrent)) {
         hasRecurrentInBlock = true;
         // Interval-based recurrence: push the next-fire date out by the repeat interval,
         // counted from the day the card was actually completed (not from whenever it
@@ -1496,7 +1532,7 @@ async function archiveToSection(
     const mainIdx = mainLineNum - 1;
     const endIdx = (maxSubLine(subLines) || mainLineNum) - 1;
 
-    archiveLine(mainIdx, true);
+    archiveLine(mainIdx, tickMain);
     const recurse = (subs: any[]) => {
       for (const sub of subs) {
         archiveLine(sub.line - 1, false);
@@ -2730,9 +2766,16 @@ function isCheckboxItem(s: any): boolean {
 function isCheckedItem(s: any): boolean {
   return /^[-*+]\s+\[[xX]\]/.test((s.text ?? "").trim());
 }
+// A subtask marked #deleted (its text was cleared via inline editing — see
+// markLineDeleted) is invisible on the board and excluded from every count
+// below, along with everything nested beneath it.
+function isDeletedItem(s: any): boolean {
+  return (s.tags ?? []).some(isDeletedTag);
+}
 // Any unchecked checkbox descendant.
 function hasUnchecked(subs: any[]): boolean {
   for (const s of subs ?? []) {
+    if (isDeletedItem(s)) continue;
     if (isCheckboxItem(s) && !isCheckedItem(s)) return true;
     if (s.subs?.length && hasUnchecked(s.subs)) return true;
   }
@@ -2772,6 +2815,7 @@ function createCardHTML(
   // Any unchecked descendant that has a tag in the configured "active" column group.
   function hasActiveKanban(subs: any[]): boolean {
     for (const s of subs ?? []) {
+      if (isDeletedItem(s)) continue;
       if (isCheckboxItem(s) && !isCheckedItem(s)) {
         const tags: string[] = s.tags ?? [];
         if (tags.some((t: string) => config.normActive.includes(normalizeTag(t)))) return true;
@@ -2784,6 +2828,7 @@ function createCardHTML(
   // a descendant of a sub-task tagged Later/Recurrent (inheritedCovered).
   function allUncheckedInLaterOrRecurrent(subs: any[], inheritedCovered = false): boolean {
     for (const s of subs ?? []) {
+      if (isDeletedItem(s)) continue;
       const tags: string[] = s.tags ?? [];
       const selfCovered = tags.some((t: string) => {
         const norm = normalizeTag(t);
@@ -2844,6 +2889,7 @@ function createCardHTML(
 
   function renderSubTree(subs: any[], depth = 0): string {
     return (subs || [])
+      .filter((sub: any) => !isDeletedItem(sub))
       .map((sub: any) => renderSub(sub, depth) + renderSubTree(sub.subs, depth + 1))
       .join("");
   }
@@ -4060,8 +4106,17 @@ export function attachListeners(
     if (arrow) titleDiv.appendChild(arrow);
     titleDiv.onclick = null;
 
+    // Guards against finishEdit running twice for the same session: refresh()
+    // (scheduled below) rebuilds the board and detaches this still-focused
+    // input, which makes the browser fire another "blur" — re-entering here
+    // with a lineNum that may now point at a different line if the first
+    // pass archived/moved content. titleDiv.contains(input) alone doesn't
+    // catch this, since input stays a DOM child of titleDiv even once
+    // titleDiv itself has been detached from the document.
+    let finished = false;
     const finishEdit = async (save: boolean) => {
-      if (!titleDiv.contains(input)) return;
+      if (finished || !titleDiv.contains(input)) return;
+      finished = true;
       const newText = input.value.trim();
       if (card.querySelector("details")) {
         titleDiv.onclick = function () {
@@ -4071,8 +4126,15 @@ export function attachListeners(
         };
       }
       if (save && !newText) {
-        const lastLine = parseInt(card.dataset.lastSubLine || `${lineNum}`, 10);
-        await deleteLineRange(app, filePath, lineNum, lastLine);
+        // Clearing a card's title marks it #deleted rather than removing it,
+        // then archives it (and its subtasks) like a normal Archive click —
+        // except the checkbox is left unticked instead of completed, and a
+        // recurring card is archived outright instead of being re-armed for
+        // its next occurrence.
+        await markLineDeleted(app, filePath, lineNum, config);
+        let subs: any[] = [];
+        try { subs = JSON.parse(card.dataset.subs || "[]"); } catch { /* ignore malformed subs */ }
+        await archiveToSection(app, filePath, lineNum, subs, config, card.dataset.isPromoted !== "true", false, false);
         requestAnimationFrame(() => setTimeout(refresh, 50));
       } else if (save && newText !== raw) {
         card.dataset.raw = newText;
@@ -4137,12 +4199,19 @@ export function attachListeners(
     subRow.innerHTML = "";
     subRow.appendChild(input);
 
+    // See the matching guard in startTitleEdit's finishEdit: refresh() detaches
+    // this still-focused input, which fires another "blur" and would otherwise
+    // re-enter here a second time.
+    let finished = false;
     const finishEdit = async (save: boolean) => {
-      if (!subRow.contains(input)) return;
+      if (finished || !subRow.contains(input)) return;
+      finished = true;
       const newText = input.value.trim();
       if (save && !newText) {
-        const lastLine = parseInt(subRow.dataset.subLastLine || `${lineNum}`, 10);
-        await deleteLineRange(app, filePath, lineNum, lastLine);
+        // Clearing a subtask's text marks it #deleted rather than removing it —
+        // it stays out of the board's rendering and counts, and rides along
+        // normally whenever its parent card is next archived.
+        await markLineDeleted(app, filePath, lineNum, config);
         requestAnimationFrame(() => setTimeout(refresh, 50));
       } else if (save && newText !== raw) {
         subRow.dataset.subRaw = newText;
