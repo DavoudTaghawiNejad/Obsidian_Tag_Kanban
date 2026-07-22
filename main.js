@@ -24,7 +24,7 @@ __export(main_exports, {
   default: () => KanbanPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian5 = require("obsidian");
+var import_obsidian4 = require("obsidian");
 
 // src/KanbanView.ts
 var import_obsidian2 = require("obsidian");
@@ -77,6 +77,9 @@ function buildConfig(settings) {
   const generalHex = (hue) => hueHex(hue, baseL);
   const textHueHex = (hue, light) => hue === null || hue === void 0 ? "" : hslToHex((hue % 360 + 360) % 360, textSatC, light);
   const textHex = (hue) => textHueHex(hue, textL);
+  const chartSatC = clamp(settings.chartSaturation ?? 70, 0, 100);
+  const chartL = clamp(settings.chartLightness ?? 48, 0, 100);
+  const chartHex = (hue, themeFallback) => hue === null || hue === void 0 ? themeFallback : hslToHex((hue % 360 + 360) % 360, chartSatC, chartL);
   const colorColumnTitleDark = textHex(settings.hueColumnTitle ?? settings.hueText ?? 225);
   const colorTextContrastThreshold = clamp(settings.textContrastThreshold ?? 45, 0, 108);
   const boldL = clamp(textL + (settings.boldLightnessDelta ?? 0), 0, 100);
@@ -127,6 +130,10 @@ function buildConfig(settings) {
     colorBold: textHueHex(settings.hueBold, boldL),
     colorItalicStar: textHueHex(settings.hueItalicStar, italicStarL),
     colorItalicUnderscore: textHueHex(settings.hueItalicUnderscore, italicUnderscoreL),
+    colorChartOpened: chartHex(settings.hueChartOpened, "var(--color-blue)"),
+    colorChartDone: chartHex(settings.hueChartDone, "var(--color-green)"),
+    colorChartDeleted: chartHex(settings.hueChartDeleted, "var(--color-red)"),
+    colorChartZeroAxis: chartHex(settings.hueChartZeroAxis, "var(--color-orange)"),
     fontSizeColumnTitle: (import_obsidian.Platform.isMobile ? settings.fontSizeColumnTitleMobile : settings.fontSizeColumnTitle) || "",
     fontSizeCardTitle: (import_obsidian.Platform.isMobile ? settings.fontSizeCardTitleMobile : settings.fontSizeCardTitle) || "",
     fontSizeSubtask: (import_obsidian.Platform.isMobile ? settings.fontSizeSubtaskMobile : settings.fontSizeSubtask) || ""
@@ -4218,7 +4225,7 @@ var KanbanView = class extends import_obsidian2.ItemView {
         container.empty();
       const config = buildConfig(this.plugin.settings);
       await buildBoard(this.app, container, config, savedActiveCol);
-      this.ensureDoneWeekLink(container);
+      this.ensureStatsLink(container);
       const boardEl = container.querySelector("#kanban-wrapper");
       if (boardEl) {
         this.listenerCleanup = attachListeners(
@@ -4240,11 +4247,11 @@ var KanbanView = class extends import_obsidian2.ItemView {
       }
     }
   }
-  // Small, idempotent links to the companion "Done This Week" / "Kanban
-  // Statistics" views — appended once after the board; later re-renders find
-  // it already there and leave it alone (buildBoard only reconciles
-  // #kanban-wrapper, so appending here keeps it below the board).
-  ensureDoneWeekLink(container) {
+  // Small, idempotent link to the companion "Kanban Statistics" view —
+  // appended once after the board; later re-renders find it already there
+  // and leave it alone (buildBoard only reconciles #kanban-wrapper, so
+  // appending here keeps it below the board).
+  ensureStatsLink(container) {
     if (container.querySelector("#kb-nav-links"))
       return;
     const bar = container.createEl("div", { attr: { id: "kb-nav-links" } });
@@ -4257,7 +4264,6 @@ var KanbanView = class extends import_obsidian2.ItemView {
         onClick();
       });
     };
-    navLink("\u{1F4C5} Done this week", () => this.plugin.activateDoneWeekView());
     navLink("\u{1F4CA} Statistics", () => this.plugin.activateStatsView());
     container.appendChild(bar);
   }
@@ -4278,18 +4284,10 @@ var KanbanView = class extends import_obsidian2.ItemView {
   }
 };
 
-// src/DoneThisWeekView.ts
+// src/KanbanStatisticsView.ts
 var import_obsidian3 = require("obsidian");
-var VIEW_TYPE_DONE_WEEK = "kanban-done-week-view";
-var WEEKDAYS_FULL = [
-  "Sunday",
-  "Monday",
-  "Tuesday",
-  "Wednesday",
-  "Thursday",
-  "Friday",
-  "Saturday"
-];
+var VIEW_TYPE_KANBAN_STATS = "kanban-statistics-view";
+var WEEKDAYS_ABBR = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 function startOfToday() {
   const d = new Date();
   d.setHours(0, 0, 0, 0);
@@ -4306,355 +4304,61 @@ function getSinceSaturdayStart() {
   d.setDate(d.getDate() - daysSinceLastSaturday - 7);
   return d;
 }
-function cleanTaskText(raw) {
-  let text = raw.replace(/\s*%%[\s\S]*?%%\s*/g, " ").replace(/\s*✅\d{4}-\d{2}-\d{2}/, "").trim().replace(/^- \[[ xX]\] /, "").replace(/^[-*+]\s+/, "").trim();
-  text = text.replace(/(?<!\w)#\w+/g, "").replace(/(?<!\S)@\S+/g, "").replace(/\s{2,}/g, " ").trim();
-  return text;
-}
-var DoneWeekView = class extends import_obsidian3.ItemView {
-  constructor(leaf, plugin) {
-    super(leaf);
-    this.rangeMode = "last7";
-    this.isRefreshing = false;
-    this.refreshPending = false;
-    this.debounceTimer = null;
-    this.plugin = plugin;
-  }
-  getViewType() {
-    return VIEW_TYPE_DONE_WEEK;
-  }
-  getDisplayText() {
-    return "Done This Week";
-  }
-  getIcon() {
-    return "list-checks";
-  }
-  async onOpen() {
-    this.registerEvent(this.app.vault.on("modify", () => this.scheduleRefresh()));
-    this.registerEvent(this.app.vault.on("delete", () => this.scheduleRefresh()));
-    this.registerEvent(this.app.vault.on("rename", () => this.scheduleRefresh()));
-    this.registerEvent(
-      this.app.workspace.on("active-leaf-change", (leaf) => {
-        if (leaf === this.leaf)
-          this.scheduleRefresh(100);
-      })
-    );
-    await this.render();
-  }
-  async onClose() {
-    if (this.debounceTimer)
-      clearTimeout(this.debounceTimer);
-  }
-  async refresh() {
-    await this.render();
-  }
-  scheduleRefresh(delay = 400) {
-    if (this.debounceTimer)
-      clearTimeout(this.debounceTimer);
-    this.debounceTimer = setTimeout(() => this.render(), delay);
-  }
-  async render() {
-    if (this.isRefreshing) {
-      this.refreshPending = true;
-      return;
-    }
-    this.isRefreshing = true;
-    const container = this.contentEl;
-    const scrollTop = container.scrollTop;
-    try {
-      container.empty();
-      container.style.cssText = "padding:16px;overflow-y:auto;";
-      const config = buildConfig(this.plugin.settings);
-      const cv = (val, fb) => val && val.trim() ? val.trim() : fb;
-      container.style.setProperty("--kb-text", cv(config.colorText, "var(--text-normal)"));
-      container.style.setProperty("--kb-accent", cv(config.colorAccent, "var(--interactive-accent)"));
-      container.style.setProperty("--kb-link", cv(config.colorLink, "var(--text-accent)"));
-      container.style.setProperty("--kb-bold-color", cv(config.colorBold, "color-mix(in srgb, var(--kb-text) 75%, black)"));
-      container.style.setProperty("--kb-italic-star-color", cv(config.colorItalicStar, "color-mix(in srgb, var(--kb-text) 85%, white)"));
-      container.style.setProperty("--kb-italic-underscore-color", cv(config.colorItalicUnderscore, "color-mix(in srgb, var(--kb-text) 55%, teal)"));
-      container.style.color = "var(--kb-text)";
-      const error = validateConfig(this.plugin.settings);
-      if (error) {
-        container.createEl("h3", { text: "Kanban Configuration Error" });
-        container.createEl("p", { text: error });
-        container.createEl("p", { text: "Open Settings \u2192 Kanban Board to configure the plugin." });
-        return;
-      }
-      const doc = container.ownerDocument;
-      let colorCss = doc.getElementById("kanban-color-vars");
-      if (!colorCss) {
-        colorCss = doc.createElement("style");
-        colorCss.id = "kanban-color-vars";
-        doc.head.appendChild(colorCss);
-      }
-      colorCss.textContent = buildColorCSS(config);
-      const header = container.createDiv();
-      header.style.cssText = "display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:16px;";
-      header.createEl("h2", { text: "Done This Week", attr: { style: "margin:0;color:var(--kb-text);" } });
-      const toggleBar = header.createDiv();
-      toggleBar.style.cssText = "display:flex;gap:4px;border:1px solid var(--background-modifier-border);border-radius:6px;padding:2px;";
-      const modes = [
-        ["last7", "Last 7 days"],
-        ["sinceSaturday", "Since Saturday"]
-      ];
-      for (const [mode, label] of modes) {
-        const active = this.rangeMode === mode;
-        const btn = toggleBar.createEl("button", { text: label });
-        btn.style.cssText = `border:none;border-radius:4px;padding:5px 12px;cursor:pointer;font-size:.9em;${active ? "background:var(--interactive-accent);color:var(--text-on-accent);" : "background:transparent;color:var(--kb-text);"}`;
-        btn.addEventListener("click", () => {
-          if (this.rangeMode === mode)
-            return;
-          this.rangeMode = mode;
-          this.render();
-        });
-      }
-      const nav = container.createDiv();
-      nav.style.cssText = "margin-bottom:16px;font-size:.85em;";
-      const navLink = (text, onClick) => {
-        const a = nav.createEl("a", { text });
-        a.style.cssText = "color:var(--kb-link, var(--text-muted));text-decoration:underline dotted;cursor:pointer;margin-right:14px;";
-        a.addEventListener("click", (e) => {
-          e.preventDefault();
-          onClick();
-        });
-      };
-      navLink("\u{1F4CB} Kanban board", () => this.plugin.activateView());
-      navLink("\u{1F4CA} Statistics", () => this.plugin.activateStatsView());
-      const rangeStart = this.rangeMode === "last7" ? getLast7DaysStart() : getSinceSaturdayStart();
-      const rangeEnd = startOfToday();
-      const groups = await this.collectDoneGroups(config, rangeStart, rangeEnd);
-      if (!groups.length) {
-        container.createEl("p", {
-          text: "No completed tasks in this range.",
-          attr: { style: "color:var(--kb-text);opacity:.7;" }
-        });
-        return;
-      }
-      const tableWrap = container.createDiv();
-      tableWrap.style.cssText = "overflow-x:auto;";
-      const table = tableWrap.createEl("table");
-      table.style.cssText = "width:100%;border-collapse:collapse;color:var(--kb-text);";
-      const DAY_COLUMN_WIDTH = "100px";
-      const SUBTASKS_COLUMN_WIDTH = "90px";
-      const headRow = table.createEl("thead").createEl("tr");
-      for (const label of ["Day", "Task", "Subtasks", "File"]) {
-        const th = headRow.createEl("th", { text: label });
-        th.style.cssText = "text-align:left;padding:8px 10px;border-bottom:2px solid var(--background-modifier-border);white-space:nowrap;";
-        if (label === "Day")
-          th.style.cssText += `width:${DAY_COLUMN_WIDTH};min-width:${DAY_COLUMN_WIDTH};max-width:${DAY_COLUMN_WIDTH};`;
-        if (label === "Subtasks")
-          th.style.cssText += `width:${SUBTASKS_COLUMN_WIDTH};min-width:${SUBTASKS_COLUMN_WIDTH};max-width:${SUBTASKS_COLUMN_WIDTH};text-align:right;`;
-      }
-      const tbody = table.createEl("tbody");
-      const applyVisibility = (r, visible) => {
-        r.row.style.display = visible ? "" : "none";
-        const childrenVisible = visible && r.expanded;
-        for (const c of r.children)
-          applyVisibility(c, childrenVisible);
-      };
-      const renderNode = (node, isRoot) => {
-        const row = tbody.createEl("tr");
-        row.style.cssText = "border-bottom:1px solid var(--background-modifier-border);";
-        const dayCell = row.createEl("td", { text: node.matched && node.date ? WEEKDAYS_FULL[node.date.getDay()] : "\u2014" });
-        dayCell.style.cssText = `padding:8px 10px;white-space:nowrap;vertical-align:top;width:${DAY_COLUMN_WIDTH};min-width:${DAY_COLUMN_WIDTH};max-width:${DAY_COLUMN_WIDTH};`;
-        const taskCell = row.createEl("td");
-        taskCell.style.cssText = `padding:8px 10px 8px ${10 + node.depth * 18}px;`;
-        const checkboxEl = taskCell.createEl("input", { attr: { type: "checkbox" } });
-        checkboxEl.disabled = true;
-        checkboxEl.checked = node.matched;
-        checkboxEl.style.cssText = "margin-right:6px;vertical-align:middle;cursor:default;";
-        const hasChildren = node.children.length > 0;
-        const toggleSpan = taskCell.createSpan({ text: hasChildren ? "\u25B6" : "" });
-        toggleSpan.style.cssText = `display:inline-block;width:1.2em;color:var(--kb-accent);user-select:none;${hasChildren ? "cursor:pointer;" : "visibility:hidden;"}`;
-        const textSpan = taskCell.createSpan({ attr: { style: isRoot ? "font-weight:600;" : "" } });
-        textSpan.innerHTML = node.displayHtml;
-        const subtaskCell = row.createEl("td", { text: hasChildren ? String(node.children.length) : "" });
-        subtaskCell.style.cssText = `padding:8px 10px;white-space:nowrap;vertical-align:top;text-align:right;color:var(--kb-text);opacity:.7;width:${SUBTASKS_COLUMN_WIDTH};min-width:${SUBTASKS_COLUMN_WIDTH};max-width:${SUBTASKS_COLUMN_WIDTH};`;
-        const fileCell = row.createEl("td");
-        fileCell.style.cssText = "padding:8px 10px;white-space:nowrap;vertical-align:top;";
-        const basename = node.filePath.split("/").pop().replace(/\.md$/, "");
-        const link = fileCell.createEl("a", { text: basename });
-        link.style.cssText = "color:var(--kb-link);text-decoration:underline dotted;cursor:pointer;";
-        link.addEventListener("click", (e) => {
-          e.preventDefault();
-          void this.openSource(node.filePath, node.line);
-        });
-        const rendered = { row, children: [], expanded: false };
-        for (const child of node.children) {
-          rendered.children.push(renderNode(child, false));
-        }
-        if (hasChildren) {
-          toggleSpan.addEventListener("click", () => {
-            rendered.expanded = !rendered.expanded;
-            toggleSpan.textContent = rendered.expanded ? "\u25BC" : "\u25B6";
-            applyVisibility(rendered, true);
-          });
-        }
-        return rendered;
-      };
-      for (const group of groups) {
-        const rendered = renderNode(group.root, true);
-        applyVisibility(rendered, true);
-      }
-      let totalCards = 0;
-      let totalSubtasks = 0;
-      const tallyMatched = (node, isRoot) => {
-        if (node.matched) {
-          if (isRoot)
-            totalCards++;
-          else
-            totalSubtasks++;
-        }
-        for (const c of node.children)
-          tallyMatched(c, false);
-      };
-      for (const g of groups)
-        tallyMatched(g.root, true);
-      const totalCompleted = totalCards + totalSubtasks;
-      const tfoot = table.createEl("tfoot");
-      const totalRow = tfoot.createEl("tr");
-      totalRow.style.cssText = "border-top:2px solid var(--background-modifier-border);font-weight:600;";
-      totalRow.createEl("td");
-      const totalLabelCell = totalRow.createEl("td", {
-        text: `Total: ${totalCompleted} completed (${totalCards} card${totalCards === 1 ? "" : "s"}, ${totalSubtasks} subtask${totalSubtasks === 1 ? "" : "s"})`
-      });
-      totalLabelCell.style.cssText = "padding:10px;";
-      const totalSubtaskCell = totalRow.createEl("td", { text: String(totalSubtasks) });
-      totalSubtaskCell.style.cssText = "padding:10px;text-align:right;";
-      totalRow.createEl("td");
-    } catch (e) {
-      console.error("Done This Week render error:", e);
-      container.empty();
-      container.createEl("h3", { text: "Done This Week \u2014 Error" });
-      container.createEl("p", { text: e?.message ?? String(e) });
-    } finally {
-      container.scrollTop = scrollTop;
-      this.isRefreshing = false;
-      if (this.refreshPending) {
-        this.refreshPending = false;
-        void this.render();
-      }
-    }
-  }
-  async openSource(filePath, line) {
-    const file = this.app.vault.getAbstractFileByPath(filePath);
-    if (!(file instanceof import_obsidian3.TFile))
-      return;
-    const leaf = this.app.workspace.getLeaf(false);
-    await leaf.openFile(file, { eState: { line: line - 1 } });
-  }
-  // A card/subtask counts as done here via its own ✅ completion stamp only.
-  // A recurring card's stamp survives its cycle back to the Recurrent column
-  // (see archiveToSection/moveToColumn in kanban.ts) and is only cleared once
-  // it fires again into Due, so this still reflects the last real completion.
-  matchDate(node, inRange) {
-    if (node.tags.some((t) => normalizeTag(t) === "deleted"))
-      return null;
-    const doneMatch = node.text.match(/✅(\d{4}-\d{2}-\d{2})/);
-    if (!doneMatch)
-      return null;
-    const date = new Date(doneMatch[1] + "T00:00:00");
-    if (isNaN(date.getTime()) || !inRange(date))
-      return null;
-    return date;
-  }
-  async collectDoneGroups(config, rangeStart, rangeEnd) {
-    const vaultName = this.app.vault.getName();
-    const paths = await getTargetFilePaths(this.app, config);
-    const items = await collectItems(this.app, paths, config);
-    const inRange = (d) => d.getTime() >= rangeStart.getTime() && d.getTime() <= rangeEnd.getTime();
-    const childKeys = /* @__PURE__ */ new Set();
-    const collectChildKeys = (filePath, subs) => {
-      for (const sub of subs || []) {
-        childKeys.add(`${filePath}::${sub.line}`);
-        if (sub.subs?.length)
-          collectChildKeys(filePath, sub.subs);
-      }
-    };
-    for (const card of items)
-      collectChildKeys(card.filePath, card.item.subs);
-    const buildNode = (filePath, node) => {
-      const date = this.matchDate(node, inRange);
-      const children = (node.subs || []).filter((sub) => !(sub.tags ?? []).some((t) => normalizeTag(t) === "deleted")).map((sub) => buildNode(filePath, sub));
-      return {
-        filePath,
-        line: node.line,
-        depth: node.hierarchy_level ?? 0,
-        matched: !!date,
-        date,
-        displayHtml: formatInlineEmphasis(linksToHtml(cleanTaskText(node.text), vaultName)),
-        children
-      };
-    };
-    const maxDateOf = (node) => {
-      let max = node.date ? node.date.getTime() : -Infinity;
-      for (const c of node.children)
-        max = Math.max(max, maxDateOf(c));
-      return max;
-    };
-    const containsMatch = (node) => node.matched || node.children.some(containsMatch);
-    const groups = [];
-    for (const card of items) {
-      const key = `${card.filePath}::${card.item.line}`;
-      if (childKeys.has(key))
-        continue;
-      if ((card.item.tags ?? []).some((t) => normalizeTag(t) === "deleted"))
-        continue;
-      const root = buildNode(card.filePath, card.item);
-      if (!containsMatch(root))
-        continue;
-      groups.push({ root, maxDate: maxDateOf(root) });
-    }
-    groups.sort((a, b) => b.maxDate - a.maxDate);
-    return groups;
-  }
-};
-
-// src/KanbanStatisticsView.ts
-var import_obsidian4 = require("obsidian");
-var VIEW_TYPE_KANBAN_STATS = "kanban-statistics-view";
-function startOfToday2() {
-  const d = new Date();
-  d.setHours(0, 0, 0, 0);
-  return d;
-}
-function getLast7DaysStart2() {
-  const d = startOfToday2();
-  d.setDate(d.getDate() - 6);
-  return d;
-}
-function getSinceSaturdayStart2() {
-  const d = startOfToday2();
-  const daysSinceLastSaturday = (d.getDay() + 1) % 7;
-  d.setDate(d.getDate() - daysSinceLastSaturday - 7);
-  return d;
-}
 function addDays(d, n) {
   const r = new Date(d);
   r.setDate(r.getDate() + n);
   return r;
 }
-function buildBuckets(mode) {
-  const today = startOfToday2();
+function dayLabel(d, today) {
+  const diffDays = Math.round((today.getTime() - d.getTime()) / 864e5);
+  if (diffDays === 0)
+    return "Today";
+  if (diffDays === 1)
+    return "Yesterday";
+  return WEEKDAYS_ABBR[d.getDay()];
+}
+function isLongRangeMode(mode) {
+  return mode === "last12weeks" || mode === "thisYear" || mode === "last12months";
+}
+function buildWeeklyBuckets(rangeStart, today) {
+  const daysSinceSat = (rangeStart.getDay() + 1) % 7;
+  const cap = addDays(today, 1);
   const buckets = [];
-  if (mode === "last12weeks") {
-    const daysSinceSat = (today.getDay() + 1) % 7;
-    const currentWeekStart = addDays(today, -daysSinceSat);
-    for (let i = 11; i >= 0; i--) {
-      const start = addDays(currentWeekStart, -7 * i);
-      const endExclusive = i === 0 ? addDays(today, 1) : addDays(start, 7);
-      buckets.push({ start, endExclusive, label: `${start.getMonth() + 1}/${start.getDate()}` });
+  for (let start = addDays(rangeStart, -daysSinceSat); start.getTime() <= today.getTime(); start = addDays(start, 7)) {
+    const naturalEnd = addDays(start, 7);
+    const endExclusive = naturalEnd.getTime() < cap.getTime() ? naturalEnd : cap;
+    buckets.push({ start, endExclusive, label: `${start.getMonth() + 1}/${start.getDate()}` });
+  }
+  return buckets;
+}
+function buildBuckets(mode) {
+  const today = startOfToday();
+  if (isLongRangeMode(mode)) {
+    let rangeStart2;
+    if (mode === "last12weeks") {
+      const daysSinceSat = (today.getDay() + 1) % 7;
+      rangeStart2 = addDays(today, -daysSinceSat - 7 * 11);
+    } else if (mode === "thisYear") {
+      rangeStart2 = new Date(today.getFullYear(), 0, 1);
+    } else {
+      rangeStart2 = new Date(today.getFullYear(), today.getMonth() - 12, today.getDate());
     }
-  } else {
-    const rangeStart = mode === "last7" ? getLast7DaysStart2() : mode === "sinceSaturday" ? getSinceSaturdayStart2() : addDays(today, -29);
-    for (let start = rangeStart; start.getTime() <= today.getTime(); start = addDays(start, 1)) {
-      buckets.push({ start, endExclusive: addDays(start, 1), label: `${start.getMonth() + 1}/${start.getDate()}` });
-    }
+    return buildWeeklyBuckets(rangeStart2, today);
+  }
+  const buckets = [];
+  const rangeStart = mode === "last7" ? getLast7DaysStart() : mode === "sinceSaturday" ? getSinceSaturdayStart() : addDays(today, -29);
+  const useWeekdayLabel = mode === "last7" || mode === "sinceSaturday";
+  for (let start = rangeStart; start.getTime() <= today.getTime(); start = addDays(start, 1)) {
+    const label = useWeekdayLabel ? dayLabel(start, today) : `${start.getMonth() + 1}/${start.getDate()}`;
+    buckets.push({ start, endExclusive: addDays(start, 1), label });
   }
   return buckets;
 }
 function countInBucket(dates, bucket) {
   return dates.filter((d) => d && d.getTime() >= bucket.start.getTime() && d.getTime() < bucket.endExclusive.getTime()).length;
+}
+function titlesInBucket(entries, bucket) {
+  return entries.filter((e) => e.date.getTime() >= bucket.start.getTime() && e.date.getTime() < bucket.endExclusive.getTime()).map((e) => e.title);
 }
 function extractCreatedDate(text) {
   const m = (text ?? "").match(/%% @created:(\d{4}-\d{2}-\d{2}) %%/);
@@ -4686,7 +4390,7 @@ function nodeColumnLabel(tags, config) {
   const norms = new Set(tags.map(normalizeTag));
   return config.kanban.filter((t) => norms.has(normalizeTag(t))).map(columnLabel).join(", ");
 }
-function cleanTaskText2(raw) {
+function cleanTaskText(raw) {
   let text = raw.replace(/\s*%%[\s\S]*?%%\s*/g, " ").replace(/\s*✅\d{4}-\d{2}-\d{2}/, "").trim().replace(/^- \[[ xX]\] /, "").replace(/^[-*+]\s+/, "").trim();
   text = text.replace(/(?<!\w)#\w+/g, "").replace(/(?<!\S)@\S+/g, "").replace(/\s{2,}/g, " ").trim();
   return text;
@@ -4696,7 +4400,11 @@ function collectOpenAndEvents(items, config, vaultName) {
   const visitForEvents = (node) => {
     if (isDeletedNode(node))
       return;
-    events.push({ createdDate: extractCreatedDate(node.text), doneDate: extractDoneDate(node.text) });
+    events.push({
+      createdDate: extractCreatedDate(node.text),
+      doneDate: extractDoneDate(node.text),
+      title: cleanTaskText(node.text)
+    });
     for (const sub of node.subs ?? [])
       visitForEvents(sub);
   };
@@ -4728,7 +4436,9 @@ function collectOpenAndEvents(items, config, vaultName) {
           line: s.line,
           checked: isCheckedItemText(s.text),
           column: nodeColumnLabel(s.tags ?? [], config),
-          displayHtml: formatInlineEmphasis(linksToHtml(cleanTaskText2(s.text), vaultName)),
+          createdDate: extractCreatedDate(s.text),
+          doneDate: extractDoneDate(s.text),
+          displayHtml: formatInlineEmphasis(linksToHtml(cleanTaskText(s.text), vaultName)),
           children: buildTaskChildren(filePath, s.subs)
         });
       } else {
@@ -4736,6 +4446,17 @@ function collectOpenAndEvents(items, config, vaultName) {
       }
     }
     return result;
+  };
+  const maxSubtaskDoneDate = (nodes) => {
+    let max = null;
+    for (const n of nodes) {
+      if (n.doneDate && (!max || n.doneDate.getTime() > max.getTime()))
+        max = n.doneDate;
+      const childMax = maxSubtaskDoneDate(n.children);
+      if (childMax && (!max || childMax.getTime() > max.getTime()))
+        max = childMax;
+    }
+    return max;
   };
   const childKeys = /* @__PURE__ */ new Set();
   const collectChildKeys = (filePath, subs) => {
@@ -4747,23 +4468,28 @@ function collectOpenAndEvents(items, config, vaultName) {
   };
   for (const card of items)
     collectChildKeys(card.filePath, card.item.subs);
+  const OPEN_EXCLUDED_TAGS = /* @__PURE__ */ new Set([config.normDone, config.normLater, config.normRecurrent, "maybesomeday"]);
   const openCards = [];
   for (const card of items) {
     if (!childKeys.has(`${card.filePath}::${card.item.line}`)) {
       visitForEvents(card.item);
     }
     const norms = card.item.tags.map(normalizeTag);
-    if (!norms.includes(config.normDone)) {
+    if (!norms.some((t) => OPEN_EXCLUDED_TAGS.has(t))) {
       const subCounts = countSubs(card.item.subs);
+      const createdDate = extractCreatedDate(card.item.text);
+      const children = buildTaskChildren(card.filePath, card.item.subs);
       openCards.push({
         filePath: card.filePath,
         line: card.item.line,
         checked: false,
         column: nodeColumnLabel(card.item.tags, config),
         tags: card.item.tags,
-        createdDate: extractCreatedDate(card.item.text),
-        displayHtml: formatInlineEmphasis(linksToHtml(cleanTaskText2(card.item.text), vaultName)),
-        children: buildTaskChildren(card.filePath, card.item.subs),
+        createdDate,
+        doneDate: extractDoneDate(card.item.text),
+        ageDate: maxSubtaskDoneDate(children) ?? createdDate,
+        displayHtml: formatInlineEmphasis(linksToHtml(cleanTaskText(card.item.text), vaultName)),
+        children,
         subCount: subCounts.total,
         openSubCount: subCounts.open
       });
@@ -4771,12 +4497,12 @@ function collectOpenAndEvents(items, config, vaultName) {
   }
   return { events, openCards };
 }
-async function collectDeletedDates(app, paths) {
-  const dates = [];
-  const RE = /%% @deleted:(\d{4}-\d{2}-\d{2}) %%/g;
+async function collectDeletedEvents(app, paths) {
+  const results = [];
+  const RE = /%% @deleted:(\d{4}-\d{2}-\d{2}) %%/;
   for (const filePath of paths) {
     const file = app.vault.getAbstractFileByPath(filePath);
-    if (!(file instanceof import_obsidian4.TFile))
+    if (!(file instanceof import_obsidian3.TFile))
       continue;
     let raw;
     try {
@@ -4784,15 +4510,74 @@ async function collectDeletedDates(app, paths) {
     } catch {
       continue;
     }
-    RE.lastIndex = 0;
-    let m;
-    while (m = RE.exec(raw)) {
+    for (const line of raw.split("\n")) {
+      const m = line.match(RE);
+      if (!m)
+        continue;
       const d = new Date(m[1] + "T00:00:00");
       if (!isNaN(d.getTime()))
-        dates.push(d);
+        results.push({ date: d, title: cleanTaskText(line) });
     }
   }
-  return dates;
+  return results;
+}
+function collectDoneGroups(items, vaultName, rangeStart, rangeEnd) {
+  const inRange = (d) => d.getTime() >= rangeStart.getTime() && d.getTime() <= rangeEnd.getTime();
+  const matchDate = (node) => {
+    if ((node.tags ?? []).some((t) => normalizeTag(t) === "deleted"))
+      return null;
+    const m = (node.text ?? "").match(/✅(\d{4}-\d{2}-\d{2})/);
+    if (!m)
+      return null;
+    const date = new Date(m[1] + "T00:00:00");
+    if (isNaN(date.getTime()) || !inRange(date))
+      return null;
+    return date;
+  };
+  const childKeys = /* @__PURE__ */ new Set();
+  const collectChildKeys = (filePath, subs) => {
+    for (const sub of subs || []) {
+      childKeys.add(`${filePath}::${sub.line}`);
+      if (sub.subs?.length)
+        collectChildKeys(filePath, sub.subs);
+    }
+  };
+  for (const card of items)
+    collectChildKeys(card.filePath, card.item.subs);
+  const buildNode = (filePath, node) => {
+    const date = matchDate(node);
+    const children = (node.subs || []).filter((sub) => !(sub.tags ?? []).some((t) => normalizeTag(t) === "deleted")).map((sub) => buildNode(filePath, sub));
+    return {
+      filePath,
+      line: node.line,
+      depth: node.hierarchy_level ?? 0,
+      matched: !!date,
+      date,
+      displayHtml: formatInlineEmphasis(linksToHtml(cleanTaskText(node.text), vaultName)),
+      children
+    };
+  };
+  const maxDateOf = (node) => {
+    let max = node.date ? node.date.getTime() : -Infinity;
+    for (const c of node.children)
+      max = Math.max(max, maxDateOf(c));
+    return max;
+  };
+  const containsMatch = (node) => node.matched || node.children.some(containsMatch);
+  const groups = [];
+  for (const card of items) {
+    const key = `${card.filePath}::${card.item.line}`;
+    if (childKeys.has(key))
+      continue;
+    if ((card.item.tags ?? []).some((t) => normalizeTag(t) === "deleted"))
+      continue;
+    const root = buildNode(card.filePath, card.item);
+    if (!containsMatch(root))
+      continue;
+    groups.push({ root, maxDate: maxDateOf(root) });
+  }
+  groups.sort((a, b) => b.maxDate - a.maxDate);
+  return groups;
 }
 function svgEl(doc, tag, attrs = {}) {
   const el = doc.createElementNS("http://www.w3.org/2000/svg", tag);
@@ -4800,7 +4585,23 @@ function svgEl(doc, tag, attrs = {}) {
     el.setAttribute(k, String(v));
   return el;
 }
-function renderLineChart(parent, doc, buckets, series) {
+function appendTooltipSeriesRow(tooltip, s, i) {
+  const row = tooltip.createDiv();
+  row.style.cssText = "display:flex;align-items:center;gap:6px;";
+  const key = row.createSpan();
+  key.style.cssText = `width:10px;height:10px;border-radius:2px;background:${s.color};display:inline-block;flex:none;`;
+  row.createSpan({ text: String(s.values[i]), attr: { style: "font-weight:600;" } });
+  row.createSpan({ text: s.name, attr: { style: "opacity:.75;" } });
+  const titles = s.labels?.[i];
+  if (titles && titles.length) {
+    const list = tooltip.createDiv();
+    list.style.cssText = "margin:2px 0 6px 16px;";
+    for (const title of titles) {
+      list.createDiv({ text: `\u2022 ${title || "(untitled)"}`, attr: { style: "opacity:.8;line-height:1.35;" } });
+    }
+  }
+}
+function renderLineChart(parent, doc, buckets, series, yMaxOverride, zeroLineColor) {
   const VB_W = 760;
   const VB_H = 200;
   const PAD = { top: 12, right: 14, bottom: 24, left: 34 };
@@ -4809,12 +4610,12 @@ function renderLineChart(parent, doc, buckets, series) {
   const n = buckets.length;
   const xAt = (i) => n > 1 ? PAD.left + plotW * i / (n - 1) : PAD.left + plotW / 2;
   let yMin = 0;
-  let yMax = 0;
+  let yMax = yMaxOverride ?? 0;
   for (const s of series)
     for (const v of s.values) {
       if (v < yMin)
         yMin = v;
-      if (v > yMax)
+      if (yMaxOverride === void 0 && v > yMax)
         yMax = v;
     }
   if (yMin === yMax)
@@ -4823,16 +4624,14 @@ function renderLineChart(parent, doc, buckets, series) {
   const yAt = (v) => PAD.top + plotH - (v - yMin) / yRange * plotH;
   const wrap = parent.createDiv();
   wrap.style.cssText = "position:relative;";
-  if (series.length > 1) {
-    const legend = wrap.createDiv();
-    legend.style.cssText = "display:flex;gap:16px;flex-wrap:wrap;margin-bottom:6px;font-size:.82em;";
-    for (const s of series) {
-      const row = legend.createDiv();
-      row.style.cssText = "display:flex;align-items:center;gap:6px;";
-      const dot = row.createSpan();
-      dot.style.cssText = `width:9px;height:9px;border-radius:50%;background:${s.color};display:inline-block;flex:none;`;
-      row.createSpan({ text: s.name, attr: { style: "color:var(--kb-text);opacity:.85;" } });
-    }
+  const legend = wrap.createDiv();
+  legend.style.cssText = `display:flex;gap:16px;flex-wrap:wrap;margin-bottom:6px;font-size:.82em;${series.length > 1 ? "" : "visibility:hidden;"}`;
+  for (const s of series) {
+    const row = legend.createDiv();
+    row.style.cssText = "display:flex;align-items:center;gap:6px;";
+    const dot = row.createSpan();
+    dot.style.cssText = `width:9px;height:9px;border-radius:50%;background:${s.color};display:inline-block;flex:none;`;
+    row.createSpan({ text: s.name, attr: { style: "color:var(--kb-text);opacity:.85;" } });
   }
   const svg = svgEl(doc, "svg", {
     viewBox: `0 0 ${VB_W} ${VB_H}`,
@@ -4854,6 +4653,12 @@ function renderLineChart(parent, doc, buckets, series) {
     label.style.opacity = "0.6";
     label.textContent = String(Math.round(v));
     svg.appendChild(label);
+  }
+  if (yMin < 0 && yMax > 0) {
+    const zeroLine = svgEl(doc, "line", { x1: PAD.left, x2: VB_W - PAD.right, y1: yAt(0), y2: yAt(0), "stroke-width": "1.5" });
+    zeroLine.style.setProperty("stroke", zeroLineColor ?? "var(--kb-text)");
+    zeroLine.style.opacity = zeroLineColor ? "0.7" : "0.45";
+    svg.appendChild(zeroLine);
   }
   const stride = Math.max(1, Math.ceil(n / 6));
   const labelIndices = /* @__PURE__ */ new Set();
@@ -4924,10 +4729,263 @@ function renderLineChart(parent, doc, buckets, series) {
     tooltip.style.display = "none";
   });
 }
-var KanbanStatisticsView = class extends import_obsidian4.ItemView {
+function renderBarChart(parent, doc, buckets, series, yMaxOverride, zeroLineColor) {
+  const VB_W = 760;
+  const VB_H = 200;
+  const PAD = { top: 12, right: 14, bottom: 24, left: 34 };
+  const plotW = VB_W - PAD.left - PAD.right;
+  const plotH = VB_H - PAD.top - PAD.bottom;
+  const n = buckets.length;
+  const slotW = n > 0 ? plotW / n : plotW;
+  const slotX = (i) => PAD.left + i * slotW;
+  let yMin = 0;
+  let yMax = yMaxOverride ?? 0;
+  for (const s of series)
+    for (const v of s.values) {
+      if (v < yMin)
+        yMin = v;
+      if (yMaxOverride === void 0 && v > yMax)
+        yMax = v;
+    }
+  if (yMin === yMax)
+    yMax = yMin + 1;
+  const yRange = yMax - yMin;
+  const yAt = (v) => PAD.top + plotH - (v - yMin) / yRange * plotH;
+  const zeroY = yAt(0);
+  const wrap = parent.createDiv();
+  wrap.style.cssText = "position:relative;";
+  const legend = wrap.createDiv();
+  legend.style.cssText = `display:flex;gap:16px;flex-wrap:wrap;margin-bottom:6px;font-size:.82em;${series.length > 1 ? "" : "visibility:hidden;"}`;
+  for (const s of series) {
+    const row = legend.createDiv();
+    row.style.cssText = "display:flex;align-items:center;gap:6px;";
+    const dot = row.createSpan();
+    dot.style.cssText = `width:9px;height:9px;border-radius:50%;background:${s.color};display:inline-block;flex:none;`;
+    row.createSpan({ text: s.name, attr: { style: "color:var(--kb-text);opacity:.85;" } });
+  }
+  const svg = svgEl(doc, "svg", {
+    viewBox: `0 0 ${VB_W} ${VB_H}`,
+    width: "100%",
+    height: VB_H,
+    preserveAspectRatio: "none"
+  });
+  svg.style.display = "block";
+  wrap.appendChild(svg);
+  const ticks = 3;
+  for (let t = 0; t <= ticks; t++) {
+    const v = yMin + yRange * t / ticks;
+    const y = yAt(v);
+    const line = svgEl(doc, "line", { x1: PAD.left, x2: VB_W - PAD.right, y1: y, y2: y, "stroke-width": "1" });
+    line.style.setProperty("stroke", "var(--background-modifier-border)");
+    svg.appendChild(line);
+    const label = svgEl(doc, "text", { x: PAD.left - 6, y: y + 3, "text-anchor": "end", "font-size": "9" });
+    label.style.setProperty("fill", "var(--kb-text)");
+    label.style.opacity = "0.6";
+    label.textContent = String(Math.round(v));
+    svg.appendChild(label);
+  }
+  const stride = n <= 16 ? 1 : Math.max(1, Math.ceil(n / 8));
+  const labelIndices = /* @__PURE__ */ new Set();
+  for (let i = 0; i < n; i += stride)
+    labelIndices.add(i);
+  labelIndices.add(n - 1);
+  for (const i of labelIndices) {
+    const label = svgEl(doc, "text", { x: slotX(i) + slotW / 2, y: VB_H - 4, "text-anchor": "middle", "font-size": "9" });
+    label.style.setProperty("fill", "var(--kb-text)");
+    label.style.opacity = "0.6";
+    label.textContent = buckets[i].label;
+    svg.appendChild(label);
+  }
+  const GAP = 2;
+  const inset = slotW * 0.12;
+  const rawGroupW = Math.max(1, slotW - inset * 2);
+  const rawBarW = (rawGroupW - GAP * (series.length - 1)) / series.length;
+  const barW = Math.max(2, Math.min(32, rawBarW));
+  const groupW = barW * series.length + GAP * (series.length - 1);
+  const slotBarEls = buckets.map(() => []);
+  for (let i = 0; i < n; i++) {
+    const groupX = slotX(i) + (slotW - groupW) / 2;
+    series.forEach((s, si) => {
+      const v = s.values[i];
+      const barX = groupX + si * (barW + GAP);
+      const y = yAt(v);
+      const top = Math.min(y, zeroY);
+      const h = Math.max(Math.abs(y - zeroY), 1);
+      const bar = svgEl(doc, "rect", { x: barX, y: top, width: barW, height: h, rx: 2, ry: 2 });
+      bar.style.setProperty("fill", s.color);
+      svg.appendChild(bar);
+      slotBarEls[i].push(bar);
+    });
+  }
+  const zeroLine = svgEl(doc, "line", { x1: PAD.left, x2: VB_W - PAD.right, y1: zeroY, y2: zeroY, "stroke-width": "1.5" });
+  zeroLine.style.setProperty("stroke", zeroLineColor ?? "var(--kb-text)");
+  zeroLine.style.opacity = zeroLineColor ? "0.7" : "0.45";
+  svg.appendChild(zeroLine);
+  const tooltip = wrap.createDiv();
+  tooltip.style.cssText = "position:absolute;pointer-events:none;max-width:260px;background:var(--background-primary);border:1px solid var(--background-modifier-border);border-radius:6px;padding:6px 9px;font-size:.8em;color:var(--kb-text);box-shadow:0 2px 6px rgba(0,0,0,.15);display:none;white-space:normal;z-index:5;";
+  for (let i = 0; i < n; i++) {
+    const hit = svgEl(doc, "rect", { x: slotX(i), y: 0, width: slotW, height: VB_H, fill: "transparent" });
+    svg.appendChild(hit);
+    hit.addEventListener("pointerenter", () => {
+      for (const bar of slotBarEls[i])
+        bar.style.opacity = "0.75";
+      const rect = svg.getBoundingClientRect();
+      const xPix = (slotX(i) + slotW / 2) / VB_W * rect.width;
+      tooltip.empty();
+      tooltip.createDiv({ text: buckets[i].label, attr: { style: "font-weight:600;margin-bottom:3px;" } });
+      for (const s of series)
+        appendTooltipSeriesRow(tooltip, s, i);
+      tooltip.style.display = "";
+      const tw = tooltip.offsetWidth;
+      let left = xPix + 10;
+      if (left + tw > rect.width)
+        left = xPix - tw - 10;
+      tooltip.style.left = `${Math.max(0, left)}px`;
+      tooltip.style.top = "4px";
+    });
+    hit.addEventListener("pointerleave", () => {
+      for (const bar of slotBarEls[i])
+        bar.style.opacity = "1";
+      tooltip.style.display = "none";
+    });
+  }
+}
+function roundedTopRectPath(x, y, w, h, r) {
+  const rr = Math.max(0, Math.min(r, h, w / 2));
+  return `M ${x},${y + h} L ${x},${y + rr} Q ${x},${y} ${x + rr},${y} L ${x + w - rr},${y} Q ${x + w},${y} ${x + w},${y + rr} L ${x + w},${y + h} Z`;
+}
+function renderStackedBarChart(parent, doc, buckets, series, yMaxOverride) {
+  const VB_W = 760;
+  const VB_H = 200;
+  const PAD = { top: 12, right: 14, bottom: 24, left: 34 };
+  const plotW = VB_W - PAD.left - PAD.right;
+  const plotH = VB_H - PAD.top - PAD.bottom;
+  const n = buckets.length;
+  const slotW = n > 0 ? plotW / n : plotW;
+  const slotX = (i) => PAD.left + i * slotW;
+  let yMax = yMaxOverride ?? Math.max(0, ...buckets.map((_, i) => series.reduce((sum, s) => sum + s.values[i], 0)));
+  if (yMax === 0)
+    yMax = 1;
+  const yAt = (v) => PAD.top + plotH - v / yMax * plotH;
+  const zeroY = yAt(0);
+  const wrap = parent.createDiv();
+  wrap.style.cssText = "position:relative;";
+  if (series.length > 1) {
+    const legend = wrap.createDiv();
+    legend.style.cssText = "display:flex;gap:16px;flex-wrap:wrap;margin-bottom:6px;font-size:.82em;";
+    for (const s of series) {
+      const row = legend.createDiv();
+      row.style.cssText = "display:flex;align-items:center;gap:6px;";
+      const dot = row.createSpan();
+      dot.style.cssText = `width:9px;height:9px;border-radius:50%;background:${s.color};display:inline-block;flex:none;`;
+      row.createSpan({ text: s.name, attr: { style: "color:var(--kb-text);opacity:.85;" } });
+    }
+  }
+  const svg = svgEl(doc, "svg", {
+    viewBox: `0 0 ${VB_W} ${VB_H}`,
+    width: "100%",
+    height: VB_H,
+    preserveAspectRatio: "none"
+  });
+  svg.style.display = "block";
+  wrap.appendChild(svg);
+  const ticks = 3;
+  for (let t = 0; t <= ticks; t++) {
+    const v = yMax * t / ticks;
+    const y = yAt(v);
+    const line = svgEl(doc, "line", { x1: PAD.left, x2: VB_W - PAD.right, y1: y, y2: y, "stroke-width": "1" });
+    line.style.setProperty("stroke", "var(--background-modifier-border)");
+    svg.appendChild(line);
+    const label = svgEl(doc, "text", { x: PAD.left - 6, y: y + 3, "text-anchor": "end", "font-size": "9" });
+    label.style.setProperty("fill", "var(--kb-text)");
+    label.style.opacity = "0.6";
+    label.textContent = String(Math.round(v));
+    svg.appendChild(label);
+  }
+  const stride = n <= 16 ? 1 : Math.max(1, Math.ceil(n / 8));
+  const labelIndices = /* @__PURE__ */ new Set();
+  for (let i = 0; i < n; i += stride)
+    labelIndices.add(i);
+  labelIndices.add(n - 1);
+  for (const i of labelIndices) {
+    const label = svgEl(doc, "text", { x: slotX(i) + slotW / 2, y: VB_H - 4, "text-anchor": "middle", "font-size": "9" });
+    label.style.setProperty("fill", "var(--kb-text)");
+    label.style.opacity = "0.6";
+    label.textContent = buckets[i].label;
+    svg.appendChild(label);
+  }
+  const GAP = 2;
+  const inset = slotW * 0.18;
+  const barW = Math.min(32, Math.max(4, slotW - inset * 2));
+  const barX = (i) => slotX(i) + (slotW - barW) / 2;
+  const slotSegEls = buckets.map(() => []);
+  for (let i = 0; i < n; i++) {
+    const x = barX(i);
+    let topSegIdx = -1;
+    for (let si = series.length - 1; si >= 0; si--) {
+      if (series[si].values[i] > 0) {
+        topSegIdx = si;
+        break;
+      }
+    }
+    let cumBottom = 0;
+    series.forEach((s, si) => {
+      const v = s.values[i];
+      if (v <= 0)
+        return;
+      const rawTop = yAt(cumBottom + v);
+      const rawBottom = yAt(cumBottom);
+      const isBottom = si === 0;
+      const isTop = si === topSegIdx;
+      const top = rawTop + (isTop ? 0 : GAP / 2);
+      const bottom = rawBottom - (isBottom ? 0 : GAP / 2);
+      const h = Math.max(bottom - top, 1);
+      cumBottom += v;
+      const d = isTop ? roundedTopRectPath(x, top, barW, h, 2) : `M ${x},${top} h ${barW} v ${h} h ${-barW} Z`;
+      const seg = svgEl(doc, "path", { d });
+      seg.style.setProperty("fill", s.color);
+      svg.appendChild(seg);
+      slotSegEls[i].push(seg);
+    });
+  }
+  const zeroLine = svgEl(doc, "line", { x1: PAD.left, x2: VB_W - PAD.right, y1: zeroY, y2: zeroY, "stroke-width": "1.5" });
+  zeroLine.style.setProperty("stroke", "var(--kb-text)");
+  zeroLine.style.opacity = "0.45";
+  svg.appendChild(zeroLine);
+  const tooltip = wrap.createDiv();
+  tooltip.style.cssText = "position:absolute;pointer-events:none;max-width:260px;background:var(--background-primary);border:1px solid var(--background-modifier-border);border-radius:6px;padding:6px 9px;font-size:.8em;color:var(--kb-text);box-shadow:0 2px 6px rgba(0,0,0,.15);display:none;white-space:normal;z-index:5;";
+  for (let i = 0; i < n; i++) {
+    const hit = svgEl(doc, "rect", { x: slotX(i), y: 0, width: slotW, height: VB_H, fill: "transparent" });
+    svg.appendChild(hit);
+    hit.addEventListener("pointerenter", () => {
+      for (const seg of slotSegEls[i])
+        seg.style.opacity = "0.75";
+      const rect = svg.getBoundingClientRect();
+      const xPix = (slotX(i) + slotW / 2) / VB_W * rect.width;
+      tooltip.empty();
+      tooltip.createDiv({ text: buckets[i].label, attr: { style: "font-weight:600;margin-bottom:3px;" } });
+      for (const s of series)
+        appendTooltipSeriesRow(tooltip, s, i);
+      tooltip.style.display = "";
+      const tw = tooltip.offsetWidth;
+      let left = xPix + 10;
+      if (left + tw > rect.width)
+        left = xPix - tw - 10;
+      tooltip.style.left = `${Math.max(0, left)}px`;
+      tooltip.style.top = "4px";
+    });
+    hit.addEventListener("pointerleave", () => {
+      for (const seg of slotSegEls[i])
+        seg.style.opacity = "1";
+      tooltip.style.display = "none";
+    });
+  }
+}
+var KanbanStatisticsView = class extends import_obsidian3.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
-    this.rangeMode = "last30";
+    this.rangeMode = "last7";
+    this.activeTab = "done";
     this.isRefreshing = false;
     this.refreshPending = false;
     this.debounceTimer = null;
@@ -5010,7 +5068,9 @@ var KanbanStatisticsView = class extends import_obsidian4.ItemView {
         ["last7", "Last 7 days"],
         ["sinceSaturday", "Since Saturday"],
         ["last30", "Last 30 days"],
-        ["last12weeks", "Last 12 weeks"]
+        ["last12weeks", "Last 12 weeks"],
+        ["thisYear", "This year"],
+        ["last12months", "Last 12 months"]
       ];
       for (const [mode, label] of modes) {
         const active = this.rangeMode === mode;
@@ -5034,15 +5094,14 @@ var KanbanStatisticsView = class extends import_obsidian4.ItemView {
         });
       };
       navLink("\u{1F4CB} Kanban board", () => this.plugin.activateView());
-      navLink("\u{1F4C5} Done this week", () => this.plugin.activateDoneWeekView());
       const vaultName = this.app.vault.getName();
       const paths = await getTargetFilePaths(this.app, config);
       await stampMissingCreatedDates(this.app, paths, config);
       const items = await collectItems(this.app, paths, config);
       const { events, openCards } = collectOpenAndEvents(items, config, vaultName);
-      const deletedDates = await collectDeletedDates(this.app, paths);
-      const today = startOfToday2();
-      const weekStart = getLast7DaysStart2();
+      const deletedEvents = await collectDeletedEvents(this.app, paths);
+      const today = startOfToday();
+      const weekStart = getLast7DaysStart();
       const inLast7 = (d) => d.getTime() >= weekStart.getTime() && d.getTime() <= today.getTime();
       const totalOpen = openCards.length;
       const newThisWeek = events.filter((e) => e.createdDate && inLast7(e.createdDate)).length;
@@ -5051,128 +5110,270 @@ var KanbanStatisticsView = class extends import_obsidian4.ItemView {
       const avgAgeDays = agedCards.length ? Math.round(agedCards.reduce((sum, c) => sum + (today.getTime() - c.createdDate.getTime()) / 864e5, 0) / agedCards.length) : 0;
       const tileRow = container.createDiv();
       tileRow.style.cssText = "display:flex;gap:12px;flex-wrap:wrap;margin-bottom:24px;";
-      const tile = (label, value) => {
+      const tile = (label, value, explain) => {
         const t = tileRow.createDiv();
-        t.style.cssText = "flex:1;min-width:130px;background:var(--background-secondary);border-radius:8px;padding:12px 14px;";
+        t.style.cssText = "position:relative;flex:1;min-width:130px;background:var(--background-secondary);border-radius:8px;padding:12px 14px;cursor:help;";
         t.createDiv({ text: label, attr: { style: "font-size:.78em;color:var(--kb-text);opacity:.65;margin-bottom:4px;" } });
         t.createDiv({ text: value, attr: { style: "font-size:1.6em;font-weight:600;color:var(--kb-accent);" } });
+        const tip = t.createDiv({ text: explain });
+        tip.style.cssText = "position:absolute;left:0;top:100%;margin-top:6px;z-index:6;display:none;width:220px;white-space:normal;line-height:1.35;pointer-events:none;background:var(--background-primary);border:1px solid var(--background-modifier-border);border-radius:6px;padding:8px 10px;font-size:.78em;color:var(--kb-text);opacity:1;box-shadow:0 2px 6px rgba(0,0,0,.15);";
+        t.addEventListener("pointerenter", () => {
+          tip.style.display = "";
+        });
+        t.addEventListener("pointerleave", () => {
+          tip.style.display = "none";
+        });
       };
-      tile("Open tasks", String(totalOpen));
-      tile("New this week", String(newThisWeek));
-      tile("Done this week", String(doneThisWeek));
-      tile("Avg. age of open (days)", String(avgAgeDays));
+      tile(
+        "Open tasks",
+        String(totalOpen),
+        "Cards not in Done, Later, Recurrent, or tagged #MaybeSomeday \u2014 including subtasks that have been spun out into their own kanban column, counted the same as any other card."
+      );
+      tile("New this week", String(newThisWeek), "Cards or subtasks whose creation stamp falls in the last 7 days (today and the 6 days before it).");
+      tile("Done this week", String(doneThisWeek), "Cards or subtasks whose \u2705 done-date stamp falls in the last 7 days (today and the 6 days before it).");
+      tile("Avg. age of open (days)", String(avgAgeDays), "Average of (today \u2212 creation date) across open cards (same definition as the Open tasks tile) with a recorded creation date. Cards with no recorded date aren't counted.");
       const buckets = buildBuckets(this.rangeMode);
       const createdDates = events.map((e) => e.createdDate);
       const doneDates = events.map((e) => e.doneDate);
+      const deletedDates = deletedEvents.map((e) => e.date);
       const openedCounts = buckets.map((b) => countInBucket(createdDates, b));
       const doneCounts = buckets.map((b) => countInBucket(doneDates, b));
       const deletedCounts = buckets.map((b) => countInBucket(deletedDates, b));
+      const createdEntries = events.filter((e) => e.createdDate !== null).map((e) => ({ date: e.createdDate, title: e.title }));
+      const doneEntries = events.filter((e) => e.doneDate !== null).map((e) => ({ date: e.doneDate, title: e.title }));
+      const openedTitles = buckets.map((b) => titlesInBucket(createdEntries, b));
+      const doneTitles = buckets.map((b) => titlesInBucket(doneEntries, b));
+      const deletedTitles = buckets.map((b) => titlesInBucket(deletedEvents, b));
       const netCumulative = [];
       buckets.forEach((_, i) => {
         const delta = openedCounts[i] - doneCounts[i] - deletedCounts[i];
         netCumulative.push((netCumulative[i - 1] ?? 0) + delta);
       });
-      const chart1Wrap = container.createDiv();
-      chart1Wrap.style.cssText = "margin-bottom:28px;";
-      chart1Wrap.createEl("h3", { text: "Newly opened / Done / Deleted", attr: { style: "margin:0 0 8px;color:var(--kb-text);font-size:1em;" } });
-      renderLineChart(chart1Wrap, doc, buckets, [
-        { name: "Newly opened", color: "#4C6EF5", values: openedCounts },
-        { name: "Done", color: "#2F9E44", values: doneCounts },
-        { name: "Deleted", color: "#E8590C", values: deletedCounts }
-      ]);
-      const chart2Wrap = container.createDiv();
-      chart2Wrap.style.cssText = "margin-bottom:28px;";
-      chart2Wrap.createEl("h3", { text: "Net change (cumulative)", attr: { style: "margin:0 0 8px;color:var(--kb-text);font-size:1em;" } });
-      renderLineChart(chart2Wrap, doc, buckets, [{ name: "Net change", color: "var(--kb-accent)", values: netCumulative }]);
-      const OLDEST_TABLE_EXCLUDED_TAGS = /* @__PURE__ */ new Set([config.normLater, config.normRecurrent, "maybesomeday"]);
-      const eligibleForOldestTable = openCards.filter(
-        (c) => !c.tags.some((t) => OLDEST_TABLE_EXCLUDED_TAGS.has(normalizeTag(t)))
-      );
-      const sortedOpen = [...eligibleForOldestTable].sort((a, b) => {
-        if (a.createdDate && b.createdDate)
-          return a.createdDate.getTime() - b.createdDate.getTime();
-        if (a.createdDate)
-          return -1;
-        if (b.createdDate)
-          return 1;
-        return a.filePath === b.filePath ? a.line - b.line : a.filePath.localeCompare(b.filePath);
-      });
-      const oldest = sortedOpen.slice(0, 15);
+      const isLongRange = isLongRangeMode(this.rangeMode);
+      const renderChart = isLongRange ? renderLineChart : renderBarChart;
+      const renderDoneDeletedChart = isLongRange ? renderLineChart : renderStackedBarChart;
+      const doneDeletedTotals = buckets.map((_, i) => doneCounts[i] + deletedCounts[i]);
+      const sharedMax = Math.max(0, ...openedCounts, ...doneDeletedTotals);
+      const chartRow = container.createDiv();
+      chartRow.style.cssText = "display:flex;gap:20px;flex-wrap:wrap;margin-bottom:28px;";
+      const chart1Wrap = chartRow.createDiv();
+      chart1Wrap.style.cssText = "flex:1;min-width:320px;";
+      chart1Wrap.createEl("h3", { text: "Newly opened", attr: { style: "margin:0 0 8px;color:var(--kb-text);font-size:1em;" } });
+      renderChart(chart1Wrap, doc, buckets, [{ name: "Newly opened", color: config.colorChartOpened, values: openedCounts, labels: openedTitles }], sharedMax);
+      const chart2Wrap = chartRow.createDiv();
+      chart2Wrap.style.cssText = "flex:1;min-width:320px;";
+      chart2Wrap.createEl("h3", { text: "Done / Deleted", attr: { style: "margin:0 0 8px;color:var(--kb-text);font-size:1em;" } });
+      renderDoneDeletedChart(chart2Wrap, doc, buckets, [
+        { name: "Done", color: config.colorChartDone, values: doneCounts, labels: doneTitles },
+        { name: "Deleted", color: config.colorChartDeleted, values: deletedCounts, labels: deletedTitles }
+      ], sharedMax);
+      const chart3Wrap = container.createDiv();
+      chart3Wrap.style.cssText = "margin-bottom:28px;";
+      chart3Wrap.createEl("h3", { text: "Net change (cumulative)", attr: { style: "margin:0 0 8px;color:var(--kb-text);font-size:1em;" } });
+      renderChart(chart3Wrap, doc, buckets, [{ name: "Net change", color: "var(--kb-accent)", values: netCumulative }], void 0, config.colorChartZeroAxis);
+      const tabBar = container.createDiv();
+      tabBar.style.cssText = "display:flex;gap:4px;border:1px solid var(--background-modifier-border);border-radius:6px;padding:2px;margin-bottom:12px;width:fit-content;";
+      const tabs = [
+        ["done", "Done this week"],
+        ["open", "Oldest open tasks"]
+      ];
+      for (const [tab, label] of tabs) {
+        const active = this.activeTab === tab;
+        const btn = tabBar.createEl("button", { text: label });
+        btn.style.cssText = `border:none;border-radius:4px;padding:5px 12px;cursor:pointer;font-size:.9em;${active ? "background:var(--interactive-accent);color:var(--text-on-accent);" : "background:transparent;color:var(--kb-text);"}`;
+        btn.addEventListener("click", () => {
+          if (this.activeTab === tab)
+            return;
+          this.activeTab = tab;
+          this.render();
+        });
+      }
       const tableWrap = container.createDiv();
       tableWrap.style.cssText = "overflow-x:auto;";
-      tableWrap.createEl("h3", { text: "Oldest open tasks", attr: { style: "margin:0 0 8px;color:var(--kb-text);font-size:1em;" } });
-      if (!oldest.length) {
-        tableWrap.createEl("p", { text: "No open tasks.", attr: { style: "color:var(--kb-text);opacity:.7;" } });
-      } else {
-        const table = tableWrap.createEl("table");
-        table.style.cssText = "width:100%;border-collapse:collapse;color:var(--kb-text);";
-        const AGE_COL_W = "90px";
-        const SUB_COL_W = "90px";
-        const COLUMN_COL_W = "110px";
-        const headRow = table.createEl("thead").createEl("tr");
-        for (const label of ["Age (days)", "Task", "Subtasks", "Column", "File"]) {
-          const th = headRow.createEl("th", { text: label });
-          th.style.cssText = "text-align:left;padding:8px 10px;border-bottom:2px solid var(--background-modifier-border);white-space:nowrap;";
-          if (label === "Age (days)")
-            th.style.cssText += `width:${AGE_COL_W};min-width:${AGE_COL_W};max-width:${AGE_COL_W};`;
-          if (label === "Subtasks")
-            th.style.cssText += `width:${SUB_COL_W};min-width:${SUB_COL_W};max-width:${SUB_COL_W};text-align:right;`;
-          if (label === "Column")
-            th.style.cssText += `width:${COLUMN_COL_W};min-width:${COLUMN_COL_W};max-width:${COLUMN_COL_W};`;
-        }
-        const tbody = table.createEl("tbody");
-        const applyVisibility = (r, visible) => {
-          r.row.style.display = visible ? "" : "none";
-          const childrenVisible = visible && r.expanded;
-          for (const c of r.children)
-            applyVisibility(c, childrenVisible);
-        };
-        const renderTaskNode = (node, depth, isRoot, ageDays) => {
-          const row = tbody.createEl("tr");
-          row.style.cssText = "border-bottom:1px solid var(--background-modifier-border);";
-          const ageCell = row.createEl("td", { text: isRoot ? ageDays === null ? "\u2014" : String(ageDays) : "" });
-          ageCell.style.cssText = `padding:8px 10px;white-space:nowrap;vertical-align:top;width:${AGE_COL_W};min-width:${AGE_COL_W};max-width:${AGE_COL_W};`;
-          const taskCell = row.createEl("td");
-          taskCell.style.cssText = `padding:8px 10px 8px ${10 + depth * 18}px;`;
-          const checkboxEl = taskCell.createEl("input", { attr: { type: "checkbox" } });
-          checkboxEl.disabled = true;
-          checkboxEl.checked = isRoot ? false : node.checked;
-          checkboxEl.style.cssText = "margin-right:6px;vertical-align:middle;cursor:default;";
-          const hasChildren = node.children.length > 0;
-          const toggleSpan = taskCell.createSpan({ text: hasChildren ? "\u25B6" : "" });
-          toggleSpan.style.cssText = `display:inline-block;width:1.2em;color:var(--kb-accent);user-select:none;${hasChildren ? "cursor:pointer;" : "visibility:hidden;"}`;
-          const textSpan = taskCell.createSpan({ attr: { style: isRoot ? "font-weight:600;" : "" } });
-          textSpan.innerHTML = node.displayHtml;
-          const subCell = row.createEl("td", { text: hasChildren ? String(node.children.length) : "" });
-          subCell.style.cssText = `padding:8px 10px;white-space:nowrap;vertical-align:top;text-align:right;color:var(--kb-text);opacity:.7;width:${SUB_COL_W};min-width:${SUB_COL_W};max-width:${SUB_COL_W};`;
-          const columnCell = row.createEl("td", { text: node.column || "\u2014" });
-          columnCell.style.cssText = `padding:8px 10px;white-space:nowrap;vertical-align:top;color:var(--kb-text);opacity:.7;width:${COLUMN_COL_W};min-width:${COLUMN_COL_W};max-width:${COLUMN_COL_W};`;
-          const fileCell = row.createEl("td");
-          fileCell.style.cssText = "padding:8px 10px;white-space:nowrap;vertical-align:top;";
-          const basename = node.filePath.split("/").pop().replace(/\.md$/, "");
-          const link = fileCell.createEl("a", { text: basename });
-          link.style.cssText = "color:var(--kb-link);text-decoration:underline dotted;cursor:pointer;";
-          link.addEventListener("click", (e) => {
-            e.preventDefault();
-            void this.openSource(node.filePath, node.line);
-          });
-          const rendered = { row, children: [], expanded: false };
-          for (const child of node.children) {
-            rendered.children.push(renderTaskNode(child, depth + 1, false, null));
+      const applyVisibility = (r, visible) => {
+        r.row.style.display = visible ? "" : "none";
+        const childrenVisible = visible && r.expanded;
+        for (const c of r.children)
+          applyVisibility(c, childrenVisible);
+      };
+      if (this.activeTab === "open") {
+        const sortedOpen = [...openCards].sort((a, b) => {
+          if (a.ageDate && b.ageDate)
+            return a.ageDate.getTime() - b.ageDate.getTime();
+          if (a.ageDate)
+            return -1;
+          if (b.ageDate)
+            return 1;
+          return a.filePath === b.filePath ? a.line - b.line : a.filePath.localeCompare(b.filePath);
+        });
+        const oldest = sortedOpen.slice(0, 15);
+        if (!oldest.length) {
+          tableWrap.createEl("p", { text: "No open tasks.", attr: { style: "color:var(--kb-text);opacity:.7;" } });
+        } else {
+          const table = tableWrap.createEl("table");
+          table.style.cssText = "width:100%;table-layout:fixed;border-collapse:collapse;color:var(--kb-text);";
+          const AGE_COL_W = "90px";
+          const TASK_COL_W = "40%";
+          const SUB_COL_W = "90px";
+          const COLUMN_COL_W = "110px";
+          const headRow = table.createEl("thead").createEl("tr");
+          for (const label of ["Age (days)", "Task", "Subtasks", "Column", "File"]) {
+            const th = headRow.createEl("th", { text: label });
+            th.style.cssText = "text-align:left;padding:8px 10px;border-bottom:2px solid var(--background-modifier-border);white-space:nowrap;";
+            if (label === "Age (days)") {
+              th.style.cssText += `width:${AGE_COL_W};min-width:${AGE_COL_W};max-width:${AGE_COL_W};cursor:help;`;
+              th.title = "Days since this card was created \u2014 or, if a subtask has been completed more recently, days since that completion instead. A card with subtasks still getting checked off isn't stale, however old the card itself is.";
+            }
+            if (label === "Task")
+              th.style.cssText += `width:${TASK_COL_W};`;
+            if (label === "Subtasks")
+              th.style.cssText += `width:${SUB_COL_W};min-width:${SUB_COL_W};max-width:${SUB_COL_W};`;
+            if (label === "Column")
+              th.style.cssText += `width:${COLUMN_COL_W};min-width:${COLUMN_COL_W};max-width:${COLUMN_COL_W};`;
           }
-          if (hasChildren) {
-            toggleSpan.addEventListener("click", () => {
-              rendered.expanded = !rendered.expanded;
-              toggleSpan.textContent = rendered.expanded ? "\u25BC" : "\u25B6";
-              applyVisibility(rendered, true);
+          const tbody = table.createEl("tbody");
+          const renderTaskNode = (node, depth, isRoot, rootAgeDate) => {
+            const row = tbody.createEl("tr");
+            row.style.cssText = "border-bottom:1px solid var(--background-modifier-border);";
+            const isOpen = isRoot || !node.checked;
+            const ageSourceDate = isRoot ? rootAgeDate : node.createdDate;
+            const ageDays = ageSourceDate ? Math.round((today.getTime() - ageSourceDate.getTime()) / 864e5) : null;
+            const ageCell = row.createEl("td", { text: isOpen ? ageDays === null ? "\u2014" : String(ageDays) : "" });
+            ageCell.style.cssText = `padding:8px 10px;white-space:nowrap;vertical-align:top;width:${AGE_COL_W};min-width:${AGE_COL_W};max-width:${AGE_COL_W};`;
+            const taskCell = row.createEl("td");
+            taskCell.style.cssText = `padding:8px 10px 8px ${10 + depth * 18}px;`;
+            const checkboxEl = taskCell.createEl("input", { attr: { type: "checkbox" } });
+            checkboxEl.disabled = true;
+            checkboxEl.checked = isRoot ? false : node.checked;
+            checkboxEl.style.cssText = "margin-right:6px;vertical-align:middle;cursor:default;";
+            const hasChildren = node.children.length > 0;
+            const toggleSpan = taskCell.createSpan({ text: hasChildren ? "\u25B6" : "" });
+            toggleSpan.style.cssText = `display:inline-block;width:1.2em;color:var(--kb-accent);user-select:none;${hasChildren ? "cursor:pointer;" : "visibility:hidden;"}`;
+            const textSpan = taskCell.createSpan({ attr: { style: isRoot ? "font-weight:600;" : "" } });
+            textSpan.innerHTML = node.displayHtml;
+            const subCell = row.createEl("td", { text: hasChildren ? String(node.children.length) : "" });
+            subCell.style.cssText = `padding:8px 10px;white-space:nowrap;vertical-align:top;color:var(--kb-text);opacity:.7;width:${SUB_COL_W};min-width:${SUB_COL_W};max-width:${SUB_COL_W};`;
+            const columnCell = row.createEl("td", { text: node.column || "\u2014" });
+            columnCell.style.cssText = `padding:8px 10px;white-space:nowrap;vertical-align:top;color:var(--kb-text);opacity:.7;width:${COLUMN_COL_W};min-width:${COLUMN_COL_W};max-width:${COLUMN_COL_W};`;
+            const fileCell = row.createEl("td");
+            fileCell.style.cssText = "padding:8px 10px;white-space:nowrap;vertical-align:top;";
+            const basename = node.filePath.split("/").pop().replace(/\.md$/, "");
+            const link = fileCell.createEl("a", { text: basename });
+            link.style.cssText = "color:var(--kb-link);text-decoration:underline dotted;cursor:pointer;";
+            link.addEventListener("click", (e) => {
+              e.preventDefault();
+              void this.openSource(node.filePath, node.line);
             });
+            const rendered = { row, children: [], expanded: false };
+            for (const child of node.children) {
+              rendered.children.push(renderTaskNode(child, depth + 1, false));
+            }
+            if (hasChildren) {
+              toggleSpan.addEventListener("click", () => {
+                rendered.expanded = !rendered.expanded;
+                toggleSpan.textContent = rendered.expanded ? "\u25BC" : "\u25B6";
+                applyVisibility(rendered, true);
+              });
+            }
+            return rendered;
+          };
+          for (const row of oldest) {
+            const rendered = renderTaskNode(row, 0, true, row.ageDate);
+            applyVisibility(rendered, true);
           }
-          return rendered;
-        };
-        for (const row of oldest) {
-          const ageDays = row.createdDate ? Math.round((today.getTime() - row.createdDate.getTime()) / 864e5) : null;
-          const rendered = renderTaskNode(row, 0, true, ageDays);
-          applyVisibility(rendered, true);
+        }
+      } else {
+        const doneGroups = collectDoneGroups(items, vaultName, weekStart, today);
+        if (!doneGroups.length) {
+          tableWrap.createEl("p", { text: "No completed tasks in this range.", attr: { style: "color:var(--kb-text);opacity:.7;" } });
+        } else {
+          const table = tableWrap.createEl("table");
+          table.style.cssText = "width:100%;table-layout:fixed;border-collapse:collapse;color:var(--kb-text);";
+          const DAY_COL_W = "100px";
+          const TASK_COL_W = "40%";
+          const SUB_COL_W = "90px";
+          const headRow = table.createEl("thead").createEl("tr");
+          for (const label of ["Day", "Task", "Subtasks", "File"]) {
+            const th = headRow.createEl("th", { text: label });
+            th.style.cssText = "text-align:left;padding:8px 10px;border-bottom:2px solid var(--background-modifier-border);white-space:nowrap;";
+            if (label === "Day")
+              th.style.cssText += `width:${DAY_COL_W};min-width:${DAY_COL_W};max-width:${DAY_COL_W};`;
+            if (label === "Task")
+              th.style.cssText += `width:${TASK_COL_W};`;
+            if (label === "Subtasks")
+              th.style.cssText += `width:${SUB_COL_W};min-width:${SUB_COL_W};max-width:${SUB_COL_W};`;
+          }
+          const tbody = table.createEl("tbody");
+          const renderDoneNode = (node, isRoot) => {
+            const row = tbody.createEl("tr");
+            row.style.cssText = "border-bottom:1px solid var(--background-modifier-border);";
+            const dayCell = row.createEl("td", { text: node.matched && node.date ? dayLabel(node.date, today) : "\u2014" });
+            dayCell.style.cssText = `padding:8px 10px;white-space:nowrap;vertical-align:top;width:${DAY_COL_W};min-width:${DAY_COL_W};max-width:${DAY_COL_W};`;
+            const taskCell = row.createEl("td");
+            taskCell.style.cssText = `padding:8px 10px 8px ${10 + node.depth * 18}px;`;
+            const checkboxEl = taskCell.createEl("input", { attr: { type: "checkbox" } });
+            checkboxEl.disabled = true;
+            checkboxEl.checked = node.matched;
+            checkboxEl.style.cssText = "margin-right:6px;vertical-align:middle;cursor:default;";
+            const hasChildren = node.children.length > 0;
+            const toggleSpan = taskCell.createSpan({ text: hasChildren ? "\u25B6" : "" });
+            toggleSpan.style.cssText = `display:inline-block;width:1.2em;color:var(--kb-accent);user-select:none;${hasChildren ? "cursor:pointer;" : "visibility:hidden;"}`;
+            const textSpan = taskCell.createSpan({ attr: { style: isRoot ? "font-weight:600;" : "" } });
+            textSpan.innerHTML = node.displayHtml;
+            const subCell = row.createEl("td", { text: hasChildren ? String(node.children.length) : "" });
+            subCell.style.cssText = `padding:8px 10px;white-space:nowrap;vertical-align:top;color:var(--kb-text);opacity:.7;width:${SUB_COL_W};min-width:${SUB_COL_W};max-width:${SUB_COL_W};`;
+            const fileCell = row.createEl("td");
+            fileCell.style.cssText = "padding:8px 10px;white-space:nowrap;vertical-align:top;";
+            const basename = node.filePath.split("/").pop().replace(/\.md$/, "");
+            const link = fileCell.createEl("a", { text: basename });
+            link.style.cssText = "color:var(--kb-link);text-decoration:underline dotted;cursor:pointer;";
+            link.addEventListener("click", (e) => {
+              e.preventDefault();
+              void this.openSource(node.filePath, node.line);
+            });
+            const rendered = { row, children: [], expanded: false };
+            for (const child of node.children) {
+              rendered.children.push(renderDoneNode(child, false));
+            }
+            if (hasChildren) {
+              toggleSpan.addEventListener("click", () => {
+                rendered.expanded = !rendered.expanded;
+                toggleSpan.textContent = rendered.expanded ? "\u25BC" : "\u25B6";
+                applyVisibility(rendered, true);
+              });
+            }
+            return rendered;
+          };
+          for (const group of doneGroups) {
+            const rendered = renderDoneNode(group.root, true);
+            applyVisibility(rendered, true);
+          }
+          let totalCards = 0;
+          let totalSubtasks = 0;
+          const tallyMatched = (node, isRoot) => {
+            if (node.matched) {
+              if (isRoot)
+                totalCards++;
+              else
+                totalSubtasks++;
+            }
+            for (const c of node.children)
+              tallyMatched(c, false);
+          };
+          for (const g of doneGroups)
+            tallyMatched(g.root, true);
+          const totalCompleted = totalCards + totalSubtasks;
+          const tfoot = table.createEl("tfoot");
+          const totalRow = tfoot.createEl("tr");
+          totalRow.style.cssText = "border-top:2px solid var(--background-modifier-border);font-weight:600;";
+          totalRow.createEl("td");
+          const totalLabelCell = totalRow.createEl("td", {
+            text: `Total: ${totalCompleted} completed (${totalCards} card${totalCards === 1 ? "" : "s"}, ${totalSubtasks} subtask${totalSubtasks === 1 ? "" : "s"})`
+          });
+          totalLabelCell.style.cssText = "padding:10px;";
+          const totalSubtaskCell = totalRow.createEl("td", { text: String(totalSubtasks) });
+          totalSubtaskCell.style.cssText = "padding:10px;";
+          totalRow.createEl("td");
         }
       }
     } catch (e) {
@@ -5191,7 +5392,7 @@ var KanbanStatisticsView = class extends import_obsidian4.ItemView {
   }
   async openSource(filePath, line) {
     const file = this.app.vault.getAbstractFileByPath(filePath);
-    if (!(file instanceof import_obsidian4.TFile))
+    if (!(file instanceof import_obsidian3.TFile))
       return;
     const leaf = this.app.workspace.getLeaf(false);
     await leaf.openFile(file, { eState: { line: line - 1 } });
@@ -5222,6 +5423,12 @@ var DEFAULT_COLORS = {
   italicUnderscoreLightnessDelta: 0,
   hueLink: 237,
   hueDate: 244,
+  chartSaturation: 70,
+  chartLightness: 48,
+  hueChartOpened: null,
+  hueChartDone: null,
+  hueChartDeleted: null,
+  hueChartZeroAxis: null,
   hueColumnTitle: 225,
   textContrastThreshold: 45,
   columnTitleShadowLength: 2,
@@ -5256,7 +5463,7 @@ var DEFAULT_SETTINGS = {
   fontSizeSubtask: "",
   fontSizeSubtaskMobile: ""
 };
-var KanbanPlugin = class extends import_obsidian5.Plugin {
+var KanbanPlugin = class extends import_obsidian4.Plugin {
   constructor() {
     super(...arguments);
     this.usingDesktopFallback = false;
@@ -5264,17 +5471,11 @@ var KanbanPlugin = class extends import_obsidian5.Plugin {
   async onload() {
     await this.loadSettings();
     this.registerView(VIEW_TYPE_KANBAN, (leaf) => new KanbanView(leaf, this));
-    this.registerView(VIEW_TYPE_DONE_WEEK, (leaf) => new DoneWeekView(leaf, this));
     this.registerView(VIEW_TYPE_KANBAN_STATS, (leaf) => new KanbanStatisticsView(leaf, this));
     this.addRibbonIcon(
       "layout-kanban",
       "Open Kanban Board",
       () => this.activateView()
-    );
-    this.addRibbonIcon(
-      "list-checks",
-      "Open Done This Week",
-      () => this.activateDoneWeekView()
     );
     this.addRibbonIcon(
       "bar-chart-3",
@@ -5292,11 +5493,6 @@ var KanbanPlugin = class extends import_obsidian5.Plugin {
       callback: () => this.activateViewInWindow()
     });
     this.addCommand({
-      id: "open-done-this-week",
-      name: "Open Done This Week",
-      callback: () => this.activateDoneWeekView()
-    });
-    this.addCommand({
       id: "open-kanban-statistics",
       name: "Open Kanban Statistics",
       callback: () => this.activateStatsView()
@@ -5308,10 +5504,6 @@ var KanbanPlugin = class extends import_obsidian5.Plugin {
     this.registerObsidianProtocolHandler(
       "open-kanban-window",
       () => this.activateViewInWindow()
-    );
-    this.registerObsidianProtocolHandler(
-      "open-done-this-week",
-      () => this.activateDoneWeekView()
     );
     this.registerObsidianProtocolHandler(
       "open-kanban-statistics",
@@ -5346,13 +5538,6 @@ var KanbanPlugin = class extends import_obsidian5.Plugin {
         });
         btn.addEventListener("click", () => this.activateView());
       }
-      if (!container.querySelector(".kanban-done-week-new-tab-btn")) {
-        const btn = container.createEl("button", {
-          text: "Open Done This Week",
-          cls: "empty-state-action kanban-done-week-new-tab-btn"
-        });
-        btn.addEventListener("click", () => this.activateDoneWeekView());
-      }
       if (!container.querySelector(".kanban-stats-new-tab-btn")) {
         const btn = container.createEl("button", {
           text: "Open Kanban Statistics",
@@ -5364,7 +5549,6 @@ var KanbanPlugin = class extends import_obsidian5.Plugin {
   }
   onunload() {
     this.app.workspace.detachLeavesOfType(VIEW_TYPE_KANBAN);
-    this.app.workspace.detachLeavesOfType(VIEW_TYPE_DONE_WEEK);
     this.app.workspace.detachLeavesOfType(VIEW_TYPE_KANBAN_STATS);
   }
   async activateViewInWindow() {
@@ -5376,7 +5560,7 @@ var KanbanPlugin = class extends import_obsidian5.Plugin {
       workspace.revealLeaf(popoutLeaf);
       return;
     }
-    const leaf = import_obsidian5.Platform.isMobile ? workspace.getLeaf(true) : workspace.openPopoutLeaf();
+    const leaf = import_obsidian4.Platform.isMobile ? workspace.getLeaf(true) : workspace.openPopoutLeaf();
     await leaf.setViewState({ type: VIEW_TYPE_KANBAN, active: true });
     workspace.revealLeaf(leaf);
   }
@@ -5389,17 +5573,6 @@ var KanbanPlugin = class extends import_obsidian5.Plugin {
     }
     const leaf = workspace.getLeaf(true);
     await leaf.setViewState({ type: VIEW_TYPE_KANBAN, active: true });
-    workspace.revealLeaf(leaf);
-  }
-  async activateDoneWeekView() {
-    const { workspace } = this.app;
-    const leaves = workspace.getLeavesOfType(VIEW_TYPE_DONE_WEEK);
-    if (leaves.length > 0) {
-      workspace.revealLeaf(leaves[0]);
-      return;
-    }
-    const leaf = workspace.getLeaf(true);
-    await leaf.setViewState({ type: VIEW_TYPE_DONE_WEEK, active: true });
     workspace.revealLeaf(leaf);
   }
   async activateStatsView() {
@@ -5416,7 +5589,7 @@ var KanbanPlugin = class extends import_obsidian5.Plugin {
   async loadSettings() {
     let data = await this.loadData();
     this.usingDesktopFallback = false;
-    if (!data && import_obsidian5.Platform.isMobile) {
+    if (!data && import_obsidian4.Platform.isMobile) {
       try {
         const raw = await this.app.vault.adapter.read(".obsidian/plugins/kanban-board/data.json");
         data = JSON.parse(raw);
@@ -5432,9 +5605,6 @@ var KanbanPlugin = class extends import_obsidian5.Plugin {
   }
   refreshOpenBoards() {
     this.app.workspace.getLeavesOfType(VIEW_TYPE_KANBAN).forEach((leaf) => {
-      leaf.view.refresh();
-    });
-    this.app.workspace.getLeavesOfType(VIEW_TYPE_DONE_WEEK).forEach((leaf) => {
       leaf.view.refresh();
     });
     this.app.workspace.getLeavesOfType(VIEW_TYPE_KANBAN_STATS).forEach((leaf) => {
@@ -5482,7 +5652,7 @@ function ensureHueSliderStyles(doc) {
   `;
   doc.head.appendChild(style);
 }
-var KanbanSettingTab = class extends import_obsidian5.PluginSettingTab {
+var KanbanSettingTab = class extends import_obsidian4.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.ignoreWarning = false;
@@ -5531,7 +5701,7 @@ var KanbanSettingTab = class extends import_obsidian5.PluginSettingTab {
       const s = this.plugin.settings;
       const hueSetting = (container, name, desc, get, set, lightness, opts, saturation = s.colorSaturation) => {
         const current = get();
-        const setting = new import_obsidian5.Setting(container).setName(name).setDesc((desc + (opts.nullable && current === null ? opts.nullSuffix ?? " (using theme default)" : "")).trim());
+        const setting = new import_obsidian4.Setting(container).setName(name).setDesc((desc + (opts.nullable && current === null ? opts.nullSuffix ?? " (using theme default)" : "")).trim());
         setting.settingEl.style.flexWrap = "wrap";
         setting.infoEl.style.flex = "1 1 38%";
         setting.infoEl.style.minWidth = "0";
@@ -5566,7 +5736,7 @@ var KanbanSettingTab = class extends import_obsidian5.PluginSettingTab {
         }
       };
       const plainSlider = (container, name, desc, get, set, cssClass, range = [0, 100]) => {
-        const setting = new import_obsidian5.Setting(container).setName(name).setDesc(desc);
+        const setting = new import_obsidian4.Setting(container).setName(name).setDesc(desc);
         setting.settingEl.style.flexWrap = "wrap";
         setting.infoEl.style.flex = "1 1 38%";
         setting.infoEl.style.minWidth = "0";
@@ -5589,7 +5759,7 @@ var KanbanSettingTab = class extends import_obsidian5.PluginSettingTab {
         build(settingItems);
         return settingItems;
       };
-      if (import_obsidian5.Platform.isMobile) {
+      if (import_obsidian4.Platform.isMobile) {
         const mobilePath = ".obsidian-mobile/plugins/kanban-board/data.json";
         const hasMobileSettings = await this.app.vault.adapter.exists(mobilePath);
         if (!hasMobileSettings && !this.ignoreWarning) {
@@ -5600,7 +5770,7 @@ var KanbanSettingTab = class extends import_obsidian5.PluginSettingTab {
             containerEl.createEl("p", { text: "No settings found on this device. The desktop settings have not synced yet. The Kanban board will not work until they arrive." });
             containerEl.createEl("p", { text: "Wait for iCloud to sync, then restart the app. Alternatively, press Ignore to configure settings manually on this device." });
           }
-          new import_obsidian5.Setting(containerEl).addButton((btn) => {
+          new import_obsidian4.Setting(containerEl).addButton((btn) => {
             btn.setButtonText("Ignore");
             btn.buttonEl.addClass("mod-warning");
             btn.onClick(async () => {
@@ -5612,7 +5782,7 @@ var KanbanSettingTab = class extends import_obsidian5.PluginSettingTab {
           return;
         }
         if (hasMobileSettings) {
-          new import_obsidian5.Setting(containerEl).setName("Mobile settings").setDesc(
+          new import_obsidian4.Setting(containerEl).setName("Mobile settings").setDesc(
             "This device has its own settings that may differ from the desktop. Deleting them will cause this app to use the desktop settings instead, keeping everything in sync. Restart the app after deleting."
           ).addButton((btn) => {
             btn.setButtonText("Delete mobile settings");
@@ -5624,7 +5794,7 @@ var KanbanSettingTab = class extends import_obsidian5.PluginSettingTab {
           });
         }
       }
-      new import_obsidian5.Setting(containerEl).setName("Kanban columns").setDesc("Comma-separated column tags, in display order (e.g. #todo, #inprogress, #later, #done)").addText((text) => {
+      new import_obsidian4.Setting(containerEl).setName("Kanban columns").setDesc("Comma-separated column tags, in display order (e.g. #todo, #inprogress, #later, #done)").addText((text) => {
         const applyKanban = (value) => {
           this.plugin.settings.kanban = value.split(",").map((t) => t.trim()).filter(Boolean);
         };
@@ -5635,7 +5805,7 @@ var KanbanSettingTab = class extends import_obsidian5.PluginSettingTab {
         this.bindDefaultOnEmpty(text, DEFAULT_SETTINGS.kanban.join(", "), applyKanban);
       });
       typeGroup((box) => {
-        new import_obsidian5.Setting(box).setName("Done column").setDesc("Tag for the done column \u2014 tasks moved here get their checkbox checked").addText((text) => {
+        new import_obsidian4.Setting(box).setName("Done column").setDesc("Tag for the done column \u2014 tasks moved here get their checkbox checked").addText((text) => {
           const applyDoneColumn = (value) => {
             this.plugin.settings.doneColumn = value.trim();
           };
@@ -5650,7 +5820,7 @@ var KanbanSettingTab = class extends import_obsidian5.PluginSettingTab {
         }, s.colorLightness, { nullable: true });
       });
       typeGroup((box) => {
-        new import_obsidian5.Setting(box).setName("Start column in single row view").setDesc("Tag for the column shown by default when the board is displayed as a single column (narrow/mobile view)").addText((text) => {
+        new import_obsidian4.Setting(box).setName("Start column in single row view").setDesc("Tag for the column shown by default when the board is displayed as a single column (narrow/mobile view)").addText((text) => {
           const applyStartColumn = (value) => {
             this.plugin.settings.startColumn = value.trim();
           };
@@ -5665,7 +5835,7 @@ var KanbanSettingTab = class extends import_obsidian5.PluginSettingTab {
         }, s.colorLightness, { nullable: true });
       });
       typeGroup((box) => {
-        new import_obsidian5.Setting(box).setName("Target column for due later and recurrent tasks").setDesc(
+        new import_obsidian4.Setting(box).setName("Target column for due later and recurrent tasks").setDesc(
           "Tag for the column where past-due/undated #later tasks and triggered #recurrent tasks are moved to (e.g. #due). This column is hidden whenever it has no cards, and reappears automatically once the board moves a card into it."
         ).addText((text) => {
           const applyDueColumn = (value) => {
@@ -5688,7 +5858,7 @@ var KanbanSettingTab = class extends import_obsidian5.PluginSettingTab {
         });
       });
       typeGroup((box) => {
-        new import_obsidian5.Setting(box).setName("Later column").setDesc("Tag for the scheduled / later column \u2014 shows a date picker on drop").addText((text) => {
+        new import_obsidian4.Setting(box).setName("Later column").setDesc("Tag for the scheduled / later column \u2014 shows a date picker on drop").addText((text) => {
           const applyLaterColumn = (value) => {
             this.plugin.settings.laterColumn = value.trim();
           };
@@ -5703,7 +5873,7 @@ var KanbanSettingTab = class extends import_obsidian5.PluginSettingTab {
         }, s.colorLightness, { nullable: true });
       });
       typeGroup((box) => {
-        new import_obsidian5.Setting(box).setName("Recurrent column").setDesc("Tag for the recurrent column. Cards with a matching @annotation and no other kanban tag are automatically placed here. Must be included in 'Kanban columns'.").addText((text) => {
+        new import_obsidian4.Setting(box).setName("Recurrent column").setDesc("Tag for the recurrent column. Cards with a matching @annotation and no other kanban tag are automatically placed here. Must be included in 'Kanban columns'.").addText((text) => {
           const applyRecurrentColumn = (value) => {
             this.plugin.settings.recurrentColumn = value.trim();
           };
@@ -5718,7 +5888,7 @@ var KanbanSettingTab = class extends import_obsidian5.PluginSettingTab {
         }, s.colorLightness, { nullable: true });
       });
       typeGroup((box) => {
-        new import_obsidian5.Setting(box).setName("Project columns").setDesc(
+        new import_obsidian4.Setting(box).setName("Project columns").setDesc(
           "Comma-separated tags for columns where adding a new card automatically offers to create a linked Obsidian note. When a card is added in one of these columns, the 'Create new document' checkbox in the add dialog is pre-checked. The new note is created in the vault root and the card text becomes a wiki link [[Note Title]] pointing to it."
         ).addText(
           (text) => text.setPlaceholder("#todo, #inprogress").setValue((this.plugin.settings.projectColumns || []).join(", ")).onChange(async (value) => {
@@ -5731,7 +5901,7 @@ var KanbanSettingTab = class extends import_obsidian5.PluginSettingTab {
         }, s.colorLightness, { nullable: true });
       });
       typeGroup((box) => {
-        new import_obsidian5.Setting(box).setName("Active columns").setDesc(
+        new import_obsidian4.Setting(box).setName("Active columns").setDesc(
           "Comma-separated tags for columns considered 'active' work. A project card is highlighted as unmanaged work only when none of its sub-tasks are in one of these columns, and not all of its sub-tasks are in the Later or Recurrent columns."
         ).addText((text) => {
           const applyActiveColumns = (value) => {
@@ -5743,7 +5913,7 @@ var KanbanSettingTab = class extends import_obsidian5.PluginSettingTab {
           });
           this.bindDefaultOnEmpty(text, DEFAULT_SETTINGS.activeColumns.join(", "), applyActiveColumns);
         });
-        new import_obsidian5.Setting(box).setName("Active / Non-active columns").setDesc(
+        new import_obsidian4.Setting(box).setName("Active / Non-active columns").setDesc(
           "Any column not covered by a more specific type above uses Column background's Hue \u2014 Active columns get it at the general Lightness unmodified; Non-active columns shift by the offset below."
         );
         plainSlider(
@@ -5758,7 +5928,7 @@ var KanbanSettingTab = class extends import_obsidian5.PluginSettingTab {
           [-15, 15]
         );
       });
-      new import_obsidian5.Setting(containerEl).setName("Project master document").setDesc(
+      new import_obsidian4.Setting(containerEl).setName("Project master document").setDesc(
         "Note where [[Project name]] links are collected when adding a card with 'Create new document' checked. Each new project link is prepended here (newest on top). Leave blank to disable."
       ).addText(
         (text) => text.setPlaceholder("Projects").setValue(this.plugin.settings.projectsDocument).onChange(async (value) => {
@@ -5766,7 +5936,7 @@ var KanbanSettingTab = class extends import_obsidian5.PluginSettingTab {
           await this.plugin.saveSettings();
         })
       );
-      new import_obsidian5.Setting(containerEl).setName("New task insert document").setDesc(
+      new import_obsidian4.Setting(containerEl).setName("New task insert document").setDesc(
         'Note (and optional heading) where the + button inserts new tasks, e.g. "Tasks" or "Tasks#Inbox"'
       ).addText((text) => {
         const applyNewTaskInsert = (value) => {
@@ -5778,7 +5948,7 @@ var KanbanSettingTab = class extends import_obsidian5.PluginSettingTab {
         });
         this.bindDefaultOnEmpty(text, DEFAULT_SETTINGS.newTaskInsert, applyNewTaskInsert);
       });
-      new import_obsidian5.Setting(containerEl).setName("Scan all vault notes").setDesc(
+      new import_obsidian4.Setting(containerEl).setName("Scan all vault notes").setDesc(
         "When enabled, every note in the vault is scanned for kanban-tagged tasks. When disabled, only notes linked from Parent pages are scanned."
       ).addToggle(
         (toggle) => toggle.setValue(this.plugin.settings.allVaultNotes).onChange(async (value) => {
@@ -5788,7 +5958,7 @@ var KanbanSettingTab = class extends import_obsidian5.PluginSettingTab {
         })
       );
       if (!this.plugin.settings.allVaultNotes) {
-        new import_obsidian5.Setting(containerEl).setName("Parent pages").setDesc(
+        new import_obsidian4.Setting(containerEl).setName("Parent pages").setDesc(
           "Comma-separated note names. Tasks are collected from these notes and all notes they link to."
         ).addText(
           (text) => text.setPlaceholder("Dashboard, Projects").setValue(this.plugin.settings.parentPages.join(", ")).onChange(async (value) => {
@@ -5802,7 +5972,7 @@ var KanbanSettingTab = class extends import_obsidian5.PluginSettingTab {
         text: "Each color picks its own Hue independently \u2014 Saturation and Lightness are fixed per field. Theme-override fields show a \u21BA button to revert to the Obsidian theme default.",
         attr: { style: "color:var(--text-muted);font-size:.85em;margin-top:-6px;" }
       });
-      new import_obsidian5.Setting(containerEl).setName("Reset colors").setDesc("Reset every color's Hue (including per-column-type colors) back to the plugin defaults. Other settings are unaffected.").addButton((btn) => {
+      new import_obsidian4.Setting(containerEl).setName("Reset colors").setDesc("Reset every color's Hue (including per-column-type colors) back to the plugin defaults. Other settings are unaffected.").addButton((btn) => {
         btn.setButtonText("Reset all colors to default");
         btn.buttonEl.addClass("mod-warning");
         btn.onClick(async () => {
@@ -5988,11 +6158,84 @@ var KanbanSettingTab = class extends import_obsidian5.PluginSettingTab {
       hueSetting(containerEl, "Date color", "Color for date annotations on cards (e.g. 'Jun 24', 'next Mon').", () => s.hueDate, (v) => {
         s.hueDate = v;
       }, s.textLightness, { nullable: true }, s.textSaturation);
-      new import_obsidian5.Setting(containerEl).setName("Date font").setDesc("Font family for date annotations. Default: monospace.").addText(
+      new import_obsidian4.Setting(containerEl).setName("Date font").setDesc("Font family for date annotations. Default: monospace.").addText(
         (t) => t.setPlaceholder("monospace").setValue(this.plugin.settings.fontDate || "").onChange(async (v) => {
           this.plugin.settings.fontDate = v;
           await this.plugin.saveSettings();
         })
+      );
+      containerEl.createEl("h4", { text: "Chart colors" });
+      containerEl.createEl("p", {
+        text: "Colors for the Kanban Statistics page's charts \u2014 Newly opened, Done, Deleted, and the Net change chart's zero axis. Each has its own Hue; Saturation/Lightness below are shared by all four, independent of the general Saturation/Lightness above (which is tuned for pastel column backgrounds, not chart marks). Unset (\u21BA) follows the active Obsidian theme's own red/green/blue/orange instead of a fixed hue.",
+        attr: { style: "color:var(--text-muted);font-size:.85em;margin-top:-6px;" }
+      });
+      plainSlider(
+        containerEl,
+        "Chart saturation",
+        "Shared saturation for the four chart colors below, independent of the general Saturation above.",
+        () => s.chartSaturation,
+        (v) => {
+          s.chartSaturation = v;
+        },
+        "kb-saturation"
+      );
+      plainSlider(
+        containerEl,
+        "Chart lightness",
+        "Shared lightness for the four chart colors below, independent of the general Lightness above.",
+        () => s.chartLightness,
+        (v) => {
+          s.chartLightness = v;
+        },
+        "kb-lightness"
+      );
+      hueSetting(
+        containerEl,
+        "Newly opened",
+        "Bar/line color for cards and subtasks created in the selected range.",
+        () => s.hueChartOpened,
+        (v) => {
+          s.hueChartOpened = v;
+        },
+        s.chartLightness,
+        { nullable: true, nullSuffix: " (using the theme's blue)" },
+        s.chartSaturation
+      );
+      hueSetting(
+        containerEl,
+        "Done",
+        "Bar color for cards and subtasks completed in the selected range.",
+        () => s.hueChartDone,
+        (v) => {
+          s.hueChartDone = v;
+        },
+        s.chartLightness,
+        { nullable: true, nullSuffix: " (using the theme's green)" },
+        s.chartSaturation
+      );
+      hueSetting(
+        containerEl,
+        "Deleted",
+        "Bar color for cards and subtasks deleted in the selected range.",
+        () => s.hueChartDeleted,
+        (v) => {
+          s.hueChartDeleted = v;
+        },
+        s.chartLightness,
+        { nullable: true, nullSuffix: " (using the theme's red)" },
+        s.chartSaturation
+      );
+      hueSetting(
+        containerEl,
+        "Net change zero axis",
+        "Color of the emphasized zero line on the Net change chart.",
+        () => s.hueChartZeroAxis,
+        (v) => {
+          s.hueChartZeroAxis = v;
+        },
+        s.chartLightness,
+        { nullable: true, nullSuffix: " (using the theme's orange)" },
+        s.chartSaturation
       );
       containerEl.createEl("h4", { text: "Font sizes" });
       containerEl.createEl("p", {
@@ -6000,7 +6243,7 @@ var KanbanSettingTab = class extends import_obsidian5.PluginSettingTab {
         attr: { style: "color:var(--text-muted);font-size:.85em;margin-top:-6px;" }
       });
       const fontSizeSetting = (name, desc, get, set) => {
-        new import_obsidian5.Setting(containerEl).setName(name).setDesc(desc).addText(
+        new import_obsidian4.Setting(containerEl).setName(name).setDesc(desc).addText(
           (text) => text.setPlaceholder("theme default").setValue(get()).onChange(async (value) => {
             set(value.trim());
             await this.plugin.saveSettings();
@@ -6079,7 +6322,7 @@ var KanbanSettingTab = class extends import_obsidian5.PluginSettingTab {
         const currentMax = (this.plugin.settings.columnMaxCards || [])[i] || 0;
         const isDueColumn = normalizeTag(tag) === normalizeTag(this.plugin.settings.dueColumn);
         let numberInputEl;
-        new import_obsidian5.Setting(containerEl).setName("Max cards \u2014 " + tag.replace(/^#/, "").toUpperCase()).addToggle(
+        new import_obsidian4.Setting(containerEl).setName("Max cards \u2014 " + tag.replace(/^#/, "").toUpperCase()).addToggle(
           (toggle) => toggle.setTooltip("No limit").setValue(currentMax === 0).onChange(async (noLimit) => {
             numberInputEl.disabled = noLimit;
             numberInputEl.style.opacity = noLimit ? "0.4" : "1";
@@ -6115,13 +6358,9 @@ var KanbanSettingTab = class extends import_obsidian5.PluginSettingTab {
           });
         });
       });
-      new import_obsidian5.Setting(containerEl).setName("Open board").addButton(
+      new import_obsidian4.Setting(containerEl).setName("Open board").addButton(
         (btn) => btn.setButtonText("Open Kanban Board").onClick(() => {
           this.plugin.activateView();
-        })
-      ).addButton(
-        (btn) => btn.setButtonText("Open Done This Week").onClick(() => {
-          this.plugin.activateDoneWeekView();
         })
       ).addButton(
         (btn) => btn.setButtonText("Open Kanban Statistics").onClick(() => {

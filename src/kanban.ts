@@ -64,6 +64,13 @@ export interface KanbanConfig {
   colorBold: string;
   colorItalicStar: string;
   colorItalicUnderscore: string;
+  // Kanban Statistics chart colors — always a usable CSS color (a computed
+  // hex, or a "var(--color-...)" theme fallback when the hue is unset),
+  // never "".
+  colorChartOpened: string;
+  colorChartDone: string;
+  colorChartDeleted: string;
+  colorChartZeroAxis: string;
   // Resolved for the current device (desktop vs. mobile) — empty means "use default".
   fontSizeColumnTitle: string;
   fontSizeCardTitle: string;
@@ -149,6 +156,14 @@ export function buildConfig(settings: KanbanSettings): KanbanConfig {
   const textHueHex = (hue: number | null | undefined, light: number): string =>
     hue === null || hue === undefined ? "" : hslToHex(((hue % 360) + 360) % 360, textSatC, light);
   const textHex = (hue: number | null | undefined) => textHueHex(hue, textL);
+  // Chart marks get their own Saturation/Lightness (like text colors do) —
+  // solid bar/line fills need more vividness than the pastel column-
+  // background default. Unset hue → the matching Obsidian theme color, so
+  // charts follow the active theme rather than resolving to "" (unusable).
+  const chartSatC = clamp(settings.chartSaturation ?? 70, 0, 100);
+  const chartL = clamp(settings.chartLightness ?? 48, 0, 100);
+  const chartHex = (hue: number | null | undefined, themeFallback: string): string =>
+    hue === null || hue === undefined ? themeFallback : hslToHex(((hue % 360) + 360) % 360, chartSatC, chartL);
   // Column title text: a hue-selectable dark color, at Font color's own
   // Saturation/Lightness — white is substituted per-column when the
   // column's own background is too dark for this to read (see
@@ -205,6 +220,10 @@ export function buildConfig(settings: KanbanSettings): KanbanConfig {
     colorBold: textHueHex(settings.hueBold, boldL),
     colorItalicStar: textHueHex(settings.hueItalicStar, italicStarL),
     colorItalicUnderscore: textHueHex(settings.hueItalicUnderscore, italicUnderscoreL),
+    colorChartOpened: chartHex(settings.hueChartOpened, "var(--color-blue)"),
+    colorChartDone: chartHex(settings.hueChartDone, "var(--color-green)"),
+    colorChartDeleted: chartHex(settings.hueChartDeleted, "var(--color-red)"),
+    colorChartZeroAxis: chartHex(settings.hueChartZeroAxis, "var(--color-orange)"),
     fontSizeColumnTitle: (Platform.isMobile
       ? settings.fontSizeColumnTitleMobile
       : settings.fontSizeColumnTitle) || "",

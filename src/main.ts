@@ -1,6 +1,5 @@
 import { App, Platform, Plugin, PluginSettingTab, Setting, TextComponent, WorkspaceLeaf } from "obsidian";
 import { KanbanView, VIEW_TYPE_KANBAN } from "./KanbanView";
-import { DoneWeekView, VIEW_TYPE_DONE_WEEK } from "./DoneThisWeekView";
 import { KanbanStatisticsView, VIEW_TYPE_KANBAN_STATS } from "./KanbanStatisticsView";
 import { buildConfig, addDueColumnExplanationCard, normalizeTag, hslToHex, clamp, invalidateCachedFile, renameCachedFile } from "./kanban";
 
@@ -51,6 +50,19 @@ export interface KanbanSettings {
   italicUnderscoreLightnessDelta: number;
   hueLink: number | null;
   hueDate: number | null;
+  // ── Kanban Statistics chart colors ────────────────────────────────────
+  // Chart marks (bars/lines) get their own Saturation/Lightness, distinct
+  // from the general Saturation/Lightness above — that pair is tuned for
+  // pastel column backgrounds, not solid fills that need to read clearly on
+  // a plot surface. null hue → the matching Obsidian theme color
+  // (--color-blue/green/red/orange), so charts follow the active theme
+  // until the user picks a specific hue of their own.
+  chartSaturation: number;
+  chartLightness: number;
+  hueChartOpened: number | null;
+  hueChartDone: number | null;
+  hueChartDeleted: number | null;
+  hueChartZeroAxis: number | null;
   // Column title text: a hue-selectable dark color at Font color's own
   // Saturation/Lightness. White is substituted per-column when that
   // column's own background is too dark for this dark color to read. null
@@ -124,6 +136,12 @@ export const DEFAULT_COLORS = {
   italicUnderscoreLightnessDelta: 0,
   hueLink: 237,
   hueDate: 244,
+  chartSaturation: 70,
+  chartLightness: 48,
+  hueChartOpened: null as number | null,
+  hueChartDone: null as number | null,
+  hueChartDeleted: null as number | null,
+  hueChartZeroAxis: null as number | null,
   hueColumnTitle: 225,
   textContrastThreshold: 45,
   columnTitleShadowLength: 2,
@@ -168,14 +186,10 @@ export default class KanbanPlugin extends Plugin {
     await this.loadSettings();
 
     this.registerView(VIEW_TYPE_KANBAN, (leaf) => new KanbanView(leaf, this));
-    this.registerView(VIEW_TYPE_DONE_WEEK, (leaf) => new DoneWeekView(leaf, this));
     this.registerView(VIEW_TYPE_KANBAN_STATS, (leaf) => new KanbanStatisticsView(leaf, this));
 
     this.addRibbonIcon("layout-kanban", "Open Kanban Board", () =>
       this.activateView()
-    );
-    this.addRibbonIcon("list-checks", "Open Done This Week", () =>
-      this.activateDoneWeekView()
     );
     this.addRibbonIcon("bar-chart-3", "Open Kanban Statistics", () =>
       this.activateStatsView()
@@ -194,12 +208,6 @@ export default class KanbanPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "open-done-this-week",
-      name: "Open Done This Week",
-      callback: () => this.activateDoneWeekView(),
-    });
-
-    this.addCommand({
       id: "open-kanban-statistics",
       name: "Open Kanban Statistics",
       callback: () => this.activateStatsView(),
@@ -211,9 +219,6 @@ export default class KanbanPlugin extends Plugin {
     );
     this.registerObsidianProtocolHandler("open-kanban-window", () =>
       this.activateViewInWindow()
-    );
-    this.registerObsidianProtocolHandler("open-done-this-week", () =>
-      this.activateDoneWeekView()
     );
     this.registerObsidianProtocolHandler("open-kanban-statistics", () =>
       this.activateStatsView()
@@ -255,13 +260,6 @@ export default class KanbanPlugin extends Plugin {
         });
         btn.addEventListener("click", () => this.activateView());
       }
-      if (!container.querySelector(".kanban-done-week-new-tab-btn")) {
-        const btn = container.createEl("button", {
-          text: "Open Done This Week",
-          cls: "empty-state-action kanban-done-week-new-tab-btn",
-        });
-        btn.addEventListener("click", () => this.activateDoneWeekView());
-      }
       if (!container.querySelector(".kanban-stats-new-tab-btn")) {
         const btn = container.createEl("button", {
           text: "Open Kanban Statistics",
@@ -274,7 +272,6 @@ export default class KanbanPlugin extends Plugin {
 
   onunload() {
     this.app.workspace.detachLeavesOfType(VIEW_TYPE_KANBAN);
-    this.app.workspace.detachLeavesOfType(VIEW_TYPE_DONE_WEEK);
     this.app.workspace.detachLeavesOfType(VIEW_TYPE_KANBAN_STATS);
   }
 
@@ -312,18 +309,6 @@ export default class KanbanPlugin extends Plugin {
     workspace.revealLeaf(leaf);
   }
 
-  async activateDoneWeekView() {
-    const { workspace } = this.app;
-    const leaves = workspace.getLeavesOfType(VIEW_TYPE_DONE_WEEK);
-    if (leaves.length > 0) {
-      workspace.revealLeaf(leaves[0]);
-      return;
-    }
-    const leaf = workspace.getLeaf(true);
-    await leaf.setViewState({ type: VIEW_TYPE_DONE_WEEK, active: true });
-    workspace.revealLeaf(leaf);
-  }
-
   async activateStatsView() {
     const { workspace } = this.app;
     const leaves = workspace.getLeavesOfType(VIEW_TYPE_KANBAN_STATS);
@@ -357,9 +342,6 @@ export default class KanbanPlugin extends Plugin {
   refreshOpenBoards() {
     this.app.workspace.getLeavesOfType(VIEW_TYPE_KANBAN).forEach((leaf) => {
       (leaf.view as KanbanView).refresh();
-    });
-    this.app.workspace.getLeavesOfType(VIEW_TYPE_DONE_WEEK).forEach((leaf) => {
-      (leaf.view as DoneWeekView).refresh();
     });
     this.app.workspace.getLeavesOfType(VIEW_TYPE_KANBAN_STATS).forEach((leaf) => {
       (leaf.view as KanbanStatisticsView).refresh();
@@ -1065,6 +1047,54 @@ class KanbanSettingTab extends PluginSettingTab {
           })
       );
 
+    containerEl.createEl("h4", { text: "Chart colors" });
+    containerEl.createEl("p", {
+      text: "Colors for the Kanban Statistics page's charts — Newly opened, Done, Deleted, and the Net change " +
+        "chart's zero axis. Each has its own Hue; Saturation/Lightness below are shared by all four, independent " +
+        "of the general Saturation/Lightness above (which is tuned for pastel column backgrounds, not chart marks). " +
+        "Unset (↺) follows the active Obsidian theme's own red/green/blue/orange instead of a fixed hue.",
+      attr: { style: "color:var(--text-muted);font-size:.85em;margin-top:-6px;" },
+    });
+
+    plainSlider(
+      containerEl,
+      "Chart saturation",
+      "Shared saturation for the four chart colors below, independent of the general Saturation above.",
+      () => s.chartSaturation,
+      (v) => { s.chartSaturation = v; },
+      "kb-saturation"
+    );
+
+    plainSlider(
+      containerEl,
+      "Chart lightness",
+      "Shared lightness for the four chart colors below, independent of the general Lightness above.",
+      () => s.chartLightness,
+      (v) => { s.chartLightness = v; },
+      "kb-lightness"
+    );
+
+    hueSetting(
+      containerEl, "Newly opened", "Bar/line color for cards and subtasks created in the selected range.",
+      () => s.hueChartOpened, (v) => { s.hueChartOpened = v; }, s.chartLightness,
+      { nullable: true, nullSuffix: " (using the theme's blue)" }, s.chartSaturation
+    );
+    hueSetting(
+      containerEl, "Done", "Bar color for cards and subtasks completed in the selected range.",
+      () => s.hueChartDone, (v) => { s.hueChartDone = v; }, s.chartLightness,
+      { nullable: true, nullSuffix: " (using the theme's green)" }, s.chartSaturation
+    );
+    hueSetting(
+      containerEl, "Deleted", "Bar color for cards and subtasks deleted in the selected range.",
+      () => s.hueChartDeleted, (v) => { s.hueChartDeleted = v; }, s.chartLightness,
+      { nullable: true, nullSuffix: " (using the theme's red)" }, s.chartSaturation
+    );
+    hueSetting(
+      containerEl, "Net change zero axis", "Color of the emphasized zero line on the Net change chart.",
+      () => s.hueChartZeroAxis, (v) => { s.hueChartZeroAxis = v; }, s.chartLightness,
+      { nullable: true, nullSuffix: " (using the theme's orange)" }, s.chartSaturation
+    );
+
     containerEl.createEl("h4", { text: "Font sizes" });
     containerEl.createEl("p", {
       text: "CSS font-size values (e.g. 14px, 1.1em). Leave blank to use the theme/browser default. " +
@@ -1191,11 +1221,6 @@ class KanbanSettingTab extends PluginSettingTab {
       .addButton((btn) =>
         btn.setButtonText("Open Kanban Board").onClick(() => {
           this.plugin.activateView();
-        })
-      )
-      .addButton((btn) =>
-        btn.setButtonText("Open Done This Week").onClick(() => {
-          this.plugin.activateDoneWeekView();
         })
       )
       .addButton((btn) =>

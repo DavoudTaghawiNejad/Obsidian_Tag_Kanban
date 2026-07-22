@@ -130,7 +130,7 @@ export class KanbanView extends ItemView {
 
       const config = buildConfig(this.plugin.settings);
       await buildBoard(this.app, container, config, savedActiveCol);
-      this.ensureDoneWeekLink(container);
+      this.ensureStatsLink(container);
 
       const boardEl = container.querySelector<HTMLElement>("#kanban-wrapper");
       if (boardEl) {
@@ -154,11 +154,11 @@ export class KanbanView extends ItemView {
     }
   }
 
-  // Small, idempotent links to the companion "Done This Week" / "Kanban
-  // Statistics" views — appended once after the board; later re-renders find
-  // it already there and leave it alone (buildBoard only reconciles
-  // #kanban-wrapper, so appending here keeps it below the board).
-  private ensureDoneWeekLink(container: HTMLElement) {
+  // Small, idempotent link to the companion "Kanban Statistics" view —
+  // appended once after the board; later re-renders find it already there
+  // and leave it alone (buildBoard only reconciles #kanban-wrapper, so
+  // appending here keeps it below the board).
+  private ensureStatsLink(container: HTMLElement) {
     if (container.querySelector("#kb-nav-links")) return;
     const bar = container.createEl("div", { attr: { id: "kb-nav-links" } });
     bar.style.cssText = "text-align:right;padding:6px 6px 2px;";
@@ -170,7 +170,6 @@ export class KanbanView extends ItemView {
         onClick();
       });
     };
-    navLink("📅 Done this week", () => this.plugin.activateDoneWeekView());
     navLink("📊 Statistics", () => this.plugin.activateStatsView());
     container.appendChild(bar);
   }
