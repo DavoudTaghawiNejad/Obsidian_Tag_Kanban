@@ -5144,11 +5144,7 @@ var KanbanStatisticsView = class extends import_obsidian3.ItemView {
       const openedTitles = buckets.map((b) => titlesInBucket(createdEntries, b));
       const doneTitles = buckets.map((b) => titlesInBucket(doneEntries, b));
       const deletedTitles = buckets.map((b) => titlesInBucket(deletedEvents, b));
-      const netCumulative = [];
-      buckets.forEach((_, i) => {
-        const delta = openedCounts[i] - doneCounts[i] - deletedCounts[i];
-        netCumulative.push((netCumulative[i - 1] ?? 0) + delta);
-      });
+      const netChange = buckets.map((_, i) => openedCounts[i] - doneCounts[i] - deletedCounts[i]);
       const isLongRange = isLongRangeMode(this.rangeMode);
       const renderChart = isLongRange ? renderLineChart : renderBarChart;
       const renderDoneDeletedChart = isLongRange ? renderLineChart : renderStackedBarChart;
@@ -5169,8 +5165,8 @@ var KanbanStatisticsView = class extends import_obsidian3.ItemView {
       ], sharedMax);
       const chart3Wrap = container.createDiv();
       chart3Wrap.style.cssText = "margin-bottom:28px;";
-      chart3Wrap.createEl("h3", { text: "Net change (cumulative)", attr: { style: "margin:0 0 8px;color:var(--kb-text);font-size:1em;" } });
-      renderChart(chart3Wrap, doc, buckets, [{ name: "Net change", color: "var(--kb-accent)", values: netCumulative }], void 0, config.colorChartZeroAxis);
+      chart3Wrap.createEl("h3", { text: "Net change", attr: { style: "margin:0 0 8px;color:var(--kb-text);font-size:1em;" } });
+      renderChart(chart3Wrap, doc, buckets, [{ name: "Net change", color: "var(--kb-accent)", values: netChange }], void 0, config.colorChartZeroAxis);
       const tabBar = container.createDiv();
       tabBar.style.cssText = "display:flex;gap:4px;border:1px solid var(--background-modifier-border);border-radius:6px;padding:2px;margin-bottom:12px;width:fit-content;";
       const tabs = [
