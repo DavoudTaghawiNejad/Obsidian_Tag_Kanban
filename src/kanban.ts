@@ -3813,6 +3813,26 @@ export async function buildBoard(
     scroll = wrapper.querySelector<HTMLElement>("#kanban-scroll")!;
   }
 
+  // Search/filter bar — built once and left alone on later renders so the
+  // user's in-progress query (and focus) survives a re-render; attachListeners
+  // re-applies the filter to whatever cards exist after each reconcile.
+  if (!wrapper.querySelector("#kb-search-bar")) {
+    const searchBar = boardDoc.createElement("div");
+    searchBar.id = "kb-search-bar";
+    searchBar.style.cssText =
+      "display:flex;gap:8px;align-items:center;padding:10px 6px 0;";
+    searchBar.innerHTML = `
+      <input id="kb-search-input" type="text" placeholder="Filter cards… (supports * and ?)"
+        style="flex:1;padding:7px 10px;border:1px solid var(--background-modifier-border);
+               border-radius:6px;background:var(--background-primary);color:var(--kb-text);
+               font-size:.9em;box-sizing:border-box;">
+      <button id="kb-search-clear" type="button"
+        style="padding:7px 14px;border:1px solid var(--background-modifier-border);
+               border-radius:6px;background:var(--background-secondary);color:var(--kb-text);
+               cursor:pointer;font-size:.9em;white-space:nowrap;">Clear</button>`;
+    wrapper.insertBefore(searchBar, wrapper.firstChild);
+  }
+
   const isNarrow = isNarrowLayout(
     wrapper.clientWidth > 0 ? wrapper.clientWidth : window.innerWidth
   );
@@ -3981,6 +4001,96 @@ export function attachListeners(
     const toEl = e.relatedTarget as Element | null;
     if (!toEl?.closest(".kanban-card")) clearHighlights();
   }
+
+  // ── Search / filter ──
+  // Strips markdown emphasis markers and all whitespace from card text so
+  // "text hig" and "texthig" both match "...**higlightedguy**..." — words
+  // glued together without spaces or ** are treated the same as words typed
+  // with them. The query gets its own (lighter) normalization below, since
+  // "*"/"?" in the query are wildcards, not markdown to strip.
+  const normalizeHaystack = (s: string): string =>
+    s.toLowerCase().replace(/[*_`]/g, "").replace(/\s+/g, "");
+
+  const normalizeQuery = (s: string): string =>
+    s.toLowerCase().replace(/\s+/g, "");
+
+  // "*" → any run of characters, "?" → any single character; everything
+  // else is matched literally (regex-escaped first).
+  const wildcardToRegExp = (query: string): RegExp => {
+    const escaped = query.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(escaped.replace(/\*/g, ".*").replace(/\?/g, "."));
+  };
+
+  const subsSearchText = (subs: any[]): string =>
+    (subs || []).map((s: any) => (s.text || "") + subsSearchText(s.subs || [])).join("");
+
+  const cardSearchText = (card: HTMLElement): string => {
+    let subs: any[] = [];
+    try { subs = JSON.parse(card.dataset.subs || "[]"); } catch { /* ignore malformed subs */ }
+    return normalizeHaystack((card.dataset.raw || "") + subsSearchText(subs));
+  };
+
+  // Same ancestry walk as applyHighlights (top-most ancestor within the same
+  // file, following the outline nesting) — used here purely to group cards
+  // into families for the filter, not for the hover-highlight colouring.
+  const familyRootOf = (card: HTMLElement, allCards: HTMLElement[]): HTMLElement => {
+    const file = card.dataset.file!;
+    let topParent = card;
+    for (let safety = 0; safety < 20; safety++) {
+      const tpLine = parseInt(topParent.dataset.line!, 10);
+      const parent = allCards.find(
+        (o) => o !== topParent && o.dataset.file === file &&
+          subsHasLineDeep(JSON.parse(o.dataset.subs || "[]"), tpLine)
+      );
+      if (!parent) break;
+      topParent = parent;
+    }
+    return topParent;
+  };
+
+  // Cards that don't match the query are hidden, unless another card in the
+  // same family (see familyRootOf) does match — then the whole family stays
+  // visible, so context (parent/siblings) around a hit is never cut off.
+  const applyFilter = () => {
+    const searchInput = boardEl.querySelector<HTMLInputElement>("#kb-search-input");
+    const query = normalizeQuery(searchInput?.value ?? "");
+    const allCards = Array.from(boardEl.querySelectorAll<HTMLElement>(".kanban-card"));
+
+    if (!query) {
+      allCards.forEach((c) => { c.style.display = ""; });
+      return;
+    }
+
+    const regex = wildcardToRegExp(query);
+    const matches = new Map<HTMLElement, boolean>();
+    for (const card of allCards) matches.set(card, regex.test(cardSearchText(card)));
+
+    const rootOf = new Map<HTMLElement, HTMLElement>();
+    const familyMatches = new Set<HTMLElement>();
+    for (const card of allCards) {
+      const root = familyRootOf(card, allCards);
+      rootOf.set(card, root);
+      if (matches.get(card)) familyMatches.add(root);
+    }
+
+    for (const card of allCards) {
+      const show = matches.get(card) || familyMatches.has(rootOf.get(card)!);
+      card.style.display = show ? "" : "none";
+    }
+  };
+
+  const searchInputEl = boardEl.querySelector<HTMLInputElement>("#kb-search-input");
+  const searchClearEl = boardEl.querySelector<HTMLButtonElement>("#kb-search-clear");
+  const onSearchClear = () => {
+    if (searchInputEl) searchInputEl.value = "";
+    applyFilter();
+    searchInputEl?.focus();
+  };
+  searchInputEl?.addEventListener("input", applyFilter);
+  searchClearEl?.addEventListener("click", onSearchClear);
+  // Re-apply immediately: reconcileZoneCards may have swapped in fresh card
+  // nodes (whose display style always starts unset) since the last render.
+  applyFilter();
 
   // Shared by the desktop blank-margin click and the mobile card-menu sheet.
   function openCardColorDialog(card: HTMLElement) {
@@ -5130,5 +5240,7 @@ export function attachListeners(
     boardEl.removeEventListener("touchmove", onTouchMove as unknown as EventListener);
     boardEl.removeEventListener("touchend", onTouchEnd as unknown as EventListener);
     boardEl.removeEventListener("touchcancel", clearTouch);
+    searchInputEl?.removeEventListener("input", applyFilter);
+    searchClearEl?.removeEventListener("click", onSearchClear);
   };
 }
