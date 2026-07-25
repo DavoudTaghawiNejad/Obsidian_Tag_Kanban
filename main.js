@@ -852,6 +852,8 @@ async function editCardText(app, filePath, lineNum, newText) {
     );
     const marker = markerMatch ? markerMatch[1] : "- ";
     const tags = extractTags(original).join(" ");
+    const createdMatch = original.match(/%% @created:\d{4}-\d{2}-\d{2} %%/);
+    const createdComment = createdMatch ? createdMatch[0] : "";
     const orderMatch = original.match(/%% @\d+\w %%/);
     const orderComment = orderMatch ? orderMatch[0] : "";
     const colorMatch = original.match(/%% @color:#[0-9a-fA-F]{6} %%/);
@@ -859,6 +861,8 @@ async function editCardText(app, filePath, lineNum, newText) {
     const parts = [indent + marker + newText.trim()];
     if (tags)
       parts.push(tags);
+    if (createdComment)
+      parts.push(createdComment);
     if (orderComment)
       parts.push(orderComment);
     if (colorComment)
@@ -2551,18 +2555,23 @@ async function moveCheckedCardsToDone(app, paths, config) {
       const parsed = parseTaskLine(lines[i]);
       if (parsed.checked !== true)
         continue;
-      if (!parsed.tags.some((t) => matchesKanbanTag(t, config.normKanban)))
-        continue;
-      if (parsed.tags.some((t) => normalizeTag(t) === config.normDone))
-        continue;
-      parsed.tags = parsed.tags.filter((t) => !matchesKanbanTag(t, config.normKanban));
-      parsed.tags.push(config.doneColumn);
+      let lineChanged = false;
+      const hasOwnKanbanTag = parsed.tags.some((t) => matchesKanbanTag(t, config.normKanban));
+      const alreadyDone = parsed.tags.some((t) => normalizeTag(t) === config.normDone);
+      if (hasOwnKanbanTag && !alreadyDone) {
+        parsed.tags = parsed.tags.filter((t) => !matchesKanbanTag(t, config.normKanban));
+        parsed.tags.push(config.doneColumn);
+        lineChanged = true;
+      }
       if (!parsed.doneDate) {
         const n = new Date();
         parsed.doneDate = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
+        lineChanged = true;
       }
-      lines[i] = serializeTaskLine(parsed);
-      changed = true;
+      if (lineChanged) {
+        lines[i] = serializeTaskLine(parsed);
+        changed = true;
+      }
     }
     if (changed)
       await app.vault.modify(tFile, lines.join("\n"));
@@ -4357,8 +4366,33 @@ function buildBuckets(mode) {
 function countInBucket(dates, bucket) {
   return dates.filter((d) => d && d.getTime() >= bucket.start.getTime() && d.getTime() < bucket.endExclusive.getTime()).length;
 }
-function titlesInBucket(entries, bucket) {
-  return entries.filter((e) => e.date.getTime() >= bucket.start.getTime() && e.date.getTime() < bucket.endExclusive.getTime()).map((e) => e.title);
+function entriesInBucket(entries, bucket, getDate) {
+  return entries.filter((e) => {
+    const d = getDate(e).getTime();
+    return d >= bucket.start.getTime() && d < bucket.endExclusive.getTime();
+  });
+}
+function formatHoverList(entries) {
+  const INDENT = "\xA0\xA0\xA0\xA0";
+  const CHECKED_BOX = "\u2611";
+  const UNCHECKED_BOX = "\u2610";
+  const box = (checked) => checked ? CHECKED_BOX : UNCHECKED_BOX;
+  const lines = [];
+  let prevPath = [];
+  for (const e of entries) {
+    const title = e.title || "(untitled)";
+    let common = 0;
+    while (common < prevPath.length && common < e.ancestors.length && prevPath[common].title === e.ancestors[common].title) {
+      common++;
+    }
+    for (let level = common; level < e.ancestors.length; level++) {
+      const a = e.ancestors[level];
+      lines.push(`${INDENT.repeat(level)}${box(a.checked)} ${a.title}`);
+    }
+    lines.push(`${INDENT.repeat(e.ancestors.length)}${box(e.checked)} ${title}`);
+    prevPath = [...e.ancestors, { title, checked: e.checked }];
+  }
+  return lines;
 }
 function extractCreatedDate(text) {
   const m = (text ?? "").match(/%% @created:(\d{4}-\d{2}-\d{2}) %%/);
@@ -4397,16 +4431,24 @@ function cleanTaskText(raw) {
 }
 function collectOpenAndEvents(items, config, vaultName) {
   const events = [];
-  const visitForEvents = (node) => {
+  const NEW_EXCLUDED_TAGS = /* @__PURE__ */ new Set([config.normLater, config.normRecurrent, "maybesomeday"]);
+  const visitForEvents = (node, ancestors) => {
     if (isDeletedNode(node))
       return;
+    const norms = (node.tags ?? []).map(normalizeTag);
+    const title = cleanTaskText(node.text);
+    const checked = isCheckedItemText(node.text);
     events.push({
       createdDate: extractCreatedDate(node.text),
       doneDate: extractDoneDate(node.text),
-      title: cleanTaskText(node.text)
+      title,
+      isOwnCard: norms.some((t) => config.normKanban.includes(t)),
+      checked,
+      ancestors,
+      excludedFromNew: norms.some((t) => NEW_EXCLUDED_TAGS.has(t))
     });
     for (const sub of node.subs ?? [])
-      visitForEvents(sub);
+      visitForEvents(sub, [...ancestors, { title, checked }]);
   };
   const countSubs = (subs) => {
     let total = 0;
@@ -4472,7 +4514,7 @@ function collectOpenAndEvents(items, config, vaultName) {
   const openCards = [];
   for (const card of items) {
     if (!childKeys.has(`${card.filePath}::${card.item.line}`)) {
-      visitForEvents(card.item);
+      visitForEvents(card.item, []);
     }
     const norms = card.item.tags.map(normalizeTag);
     if (!norms.some((t) => OPEN_EXCLUDED_TAGS.has(t))) {
@@ -4510,13 +4552,28 @@ async function collectDeletedEvents(app, paths) {
     } catch {
       continue;
     }
+    const stack = [];
     for (const line of raw.split("\n")) {
-      const m = line.match(RE);
-      if (!m)
+      const bulletMatch = line.match(/^(\s*)[-*+]\s/);
+      if (!bulletMatch)
         continue;
-      const d = new Date(m[1] + "T00:00:00");
-      if (!isNaN(d.getTime()))
-        results.push({ date: d, title: cleanTaskText(line) });
+      const indent = bulletMatch[1].length;
+      while (stack.length && stack[stack.length - 1].indent >= indent)
+        stack.pop();
+      const m = line.match(RE);
+      if (m) {
+        const d = new Date(m[1] + "T00:00:00");
+        if (!isNaN(d.getTime())) {
+          results.push({
+            date: d,
+            title: cleanTaskText(line),
+            isOwnCard: indent === 0,
+            checked: isCheckedItemText(line),
+            ancestors: stack.map((a) => ({ title: a.title, checked: a.checked }))
+          });
+        }
+      }
+      stack.push({ indent, title: cleanTaskText(line), checked: isCheckedItemText(line) });
     }
   }
   return results;
@@ -4585,19 +4642,37 @@ function svgEl(doc, tag, attrs = {}) {
     el.setAttribute(k, String(v));
   return el;
 }
+function drawWeekendBands(doc, svg, buckets, slotX, slotW, plotTop, plotBottom) {
+  for (let i = 0; i < buckets.length; i++) {
+    const day = buckets[i].start.getDay();
+    if (day !== 0 && day !== 6)
+      continue;
+    const band = svgEl(doc, "rect", { x: slotX(i), y: plotTop, width: slotW, height: plotBottom - plotTop });
+    band.style.setProperty("fill", "var(--background-modifier-border)");
+    band.style.opacity = "0.35";
+    svg.appendChild(band);
+  }
+}
 function appendTooltipSeriesRow(tooltip, s, i) {
   const row = tooltip.createDiv();
   row.style.cssText = "display:flex;align-items:center;gap:6px;";
   const key = row.createSpan();
   key.style.cssText = `width:10px;height:10px;border-radius:2px;background:${s.color};display:inline-block;flex:none;`;
-  row.createSpan({ text: String(s.values[i]), attr: { style: "font-weight:600;" } });
-  row.createSpan({ text: s.name, attr: { style: "opacity:.75;" } });
   const titles = s.labels?.[i];
+  const shown = s.labelCounts ? s.labelCounts[i] : s.values[i];
+  row.createSpan({ text: String(shown), attr: { style: "font-weight:600;" } });
+  row.createSpan({ text: s.name, attr: { style: "opacity:.75;" } });
+  if (s.labelCounts && shown !== s.values[i]) {
+    row.createSpan({ text: `(${s.values[i]} total)`, attr: { style: "opacity:.55;font-size:.9em;" } });
+  }
   if (titles && titles.length) {
     const list = tooltip.createDiv();
     list.style.cssText = "margin:2px 0 6px 16px;";
-    for (const title of titles) {
-      list.createDiv({ text: `\u2022 ${title || "(untitled)"}`, attr: { style: "opacity:.8;line-height:1.35;" } });
+    for (const line of titles) {
+      list.createDiv({
+        text: line,
+        attr: { style: "max-width:550px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.8;line-height:1.35;" }
+      });
     }
   }
 }
@@ -4771,6 +4846,7 @@ function renderBarChart(parent, doc, buckets, series, yMaxOverride, zeroLineColo
   });
   svg.style.display = "block";
   wrap.appendChild(svg);
+  drawWeekendBands(doc, svg, buckets, slotX, slotW, PAD.top, VB_H - PAD.bottom);
   const ticks = 3;
   for (let t = 0; t <= ticks; t++) {
     const v = yMin + yRange * t / ticks;
@@ -4822,7 +4898,7 @@ function renderBarChart(parent, doc, buckets, series, yMaxOverride, zeroLineColo
   zeroLine.style.opacity = zeroLineColor ? "0.7" : "0.45";
   svg.appendChild(zeroLine);
   const tooltip = wrap.createDiv();
-  tooltip.style.cssText = "position:absolute;pointer-events:none;max-width:260px;background:var(--background-primary);border:1px solid var(--background-modifier-border);border-radius:6px;padding:6px 9px;font-size:.8em;color:var(--kb-text);box-shadow:0 2px 6px rgba(0,0,0,.15);display:none;white-space:normal;z-index:5;";
+  tooltip.style.cssText = "position:absolute;pointer-events:none;max-width:650px;background:var(--background-primary);border:1px solid var(--background-modifier-border);border-radius:6px;padding:6px 9px;font-size:.8em;color:var(--kb-text);box-shadow:0 2px 6px rgba(0,0,0,.15);display:none;white-space:normal;z-index:5;";
   for (let i = 0; i < n; i++) {
     const hit = svgEl(doc, "rect", { x: slotX(i), y: 0, width: slotW, height: VB_H, fill: "transparent" });
     svg.appendChild(hit);
@@ -4889,6 +4965,7 @@ function renderStackedBarChart(parent, doc, buckets, series, yMaxOverride) {
   });
   svg.style.display = "block";
   wrap.appendChild(svg);
+  drawWeekendBands(doc, svg, buckets, slotX, slotW, PAD.top, VB_H - PAD.bottom);
   const ticks = 3;
   for (let t = 0; t <= ticks; t++) {
     const v = yMax * t / ticks;
@@ -4953,7 +5030,7 @@ function renderStackedBarChart(parent, doc, buckets, series, yMaxOverride) {
   zeroLine.style.opacity = "0.45";
   svg.appendChild(zeroLine);
   const tooltip = wrap.createDiv();
-  tooltip.style.cssText = "position:absolute;pointer-events:none;max-width:260px;background:var(--background-primary);border:1px solid var(--background-modifier-border);border-radius:6px;padding:6px 9px;font-size:.8em;color:var(--kb-text);box-shadow:0 2px 6px rgba(0,0,0,.15);display:none;white-space:normal;z-index:5;";
+  tooltip.style.cssText = "position:absolute;pointer-events:none;max-width:650px;background:var(--background-primary);border:1px solid var(--background-modifier-border);border-radius:6px;padding:6px 9px;font-size:.8em;color:var(--kb-text);box-shadow:0 2px 6px rgba(0,0,0,.15);display:none;white-space:normal;z-index:5;";
   for (let i = 0; i < n; i++) {
     const hit = svgEl(doc, "rect", { x: slotX(i), y: 0, width: slotW, height: VB_H, fill: "transparent" });
     svg.appendChild(hit);
@@ -5097,6 +5174,7 @@ var KanbanStatisticsView = class extends import_obsidian3.ItemView {
       const vaultName = this.app.vault.getName();
       const paths = await getTargetFilePaths(this.app, config);
       await stampMissingCreatedDates(this.app, paths, config);
+      await moveCheckedCardsToDone(this.app, paths, config);
       const items = await collectItems(this.app, paths, config);
       const { events, openCards } = collectOpenAndEvents(items, config, vaultName);
       const deletedEvents = await collectDeletedEvents(this.app, paths);
@@ -5104,7 +5182,7 @@ var KanbanStatisticsView = class extends import_obsidian3.ItemView {
       const weekStart = getLast7DaysStart();
       const inLast7 = (d) => d.getTime() >= weekStart.getTime() && d.getTime() <= today.getTime();
       const totalOpen = openCards.length;
-      const newThisWeek = events.filter((e) => e.createdDate && inLast7(e.createdDate)).length;
+      const newThisWeek = events.filter((e) => e.createdDate && inLast7(e.createdDate) && !e.excludedFromNew).length;
       const doneThisWeek = events.filter((e) => e.doneDate && inLast7(e.doneDate)).length;
       const agedCards = openCards.filter((c) => c.createdDate);
       const avgAgeDays = agedCards.length ? Math.round(agedCards.reduce((sum, c) => sum + (today.getTime() - c.createdDate.getTime()) / 864e5, 0) / agedCards.length) : 0;
@@ -5129,21 +5207,35 @@ var KanbanStatisticsView = class extends import_obsidian3.ItemView {
         String(totalOpen),
         "Cards not in Done, Later, Recurrent, or tagged #MaybeSomeday \u2014 including subtasks that have been spun out into their own kanban column, counted the same as any other card."
       );
-      tile("New this week", String(newThisWeek), "Cards or subtasks whose creation stamp falls in the last 7 days (today and the 6 days before it).");
+      tile(
+        "New this week",
+        String(newThisWeek),
+        "Cards or subtasks whose creation stamp falls in the last 7 days (today and the 6 days before it) \u2014 except ones tagged Later, Recurrent, or #MaybeSomeday."
+      );
       tile("Done this week", String(doneThisWeek), "Cards or subtasks whose \u2705 done-date stamp falls in the last 7 days (today and the 6 days before it).");
       tile("Avg. age of open (days)", String(avgAgeDays), "Average of (today \u2212 creation date) across open cards (same definition as the Open tasks tile) with a recorded creation date. Cards with no recorded date aren't counted.");
       const buckets = buildBuckets(this.rangeMode);
-      const createdDates = events.map((e) => e.createdDate);
+      const createdDates = events.filter((e) => !e.excludedFromNew).map((e) => e.createdDate);
       const doneDates = events.map((e) => e.doneDate);
       const deletedDates = deletedEvents.map((e) => e.date);
       const openedCounts = buckets.map((b) => countInBucket(createdDates, b));
       const doneCounts = buckets.map((b) => countInBucket(doneDates, b));
       const deletedCounts = buckets.map((b) => countInBucket(deletedDates, b));
-      const createdEntries = events.filter((e) => e.createdDate !== null).map((e) => ({ date: e.createdDate, title: e.title }));
-      const doneEntries = events.filter((e) => e.doneDate !== null).map((e) => ({ date: e.doneDate, title: e.title }));
-      const openedTitles = buckets.map((b) => titlesInBucket(createdEntries, b));
-      const doneTitles = buckets.map((b) => titlesInBucket(doneEntries, b));
-      const deletedTitles = buckets.map((b) => titlesInBucket(deletedEvents, b));
+      const createdEntries = events.filter(
+        (e) => e.createdDate !== null && !e.excludedFromNew
+      );
+      const doneEntries = events.filter((e) => e.doneDate !== null);
+      const openedBucketEntries = buckets.map(
+        (b) => entriesInBucket(createdEntries, b, (e) => e.createdDate).filter((e) => e.isOwnCard || !e.checked)
+      );
+      const openedTitles = openedBucketEntries.map((entries) => formatHoverList(entries));
+      const openedListedCounts = openedBucketEntries.map((entries) => entries.length);
+      const doneBucketEntries = buckets.map((b) => entriesInBucket(doneEntries, b, (e) => e.doneDate));
+      const doneTitles = doneBucketEntries.map((entries) => formatHoverList(entries));
+      const doneListedCounts = doneBucketEntries.map((entries) => entries.length);
+      const deletedBucketEntries = buckets.map((b) => entriesInBucket(deletedEvents, b, (e) => e.date));
+      const deletedTitles = deletedBucketEntries.map((entries) => formatHoverList(entries));
+      const deletedListedCounts = deletedBucketEntries.map((entries) => entries.length);
       const netChange = buckets.map((_, i) => openedCounts[i] - doneCounts[i] - deletedCounts[i]);
       const isLongRange = isLongRangeMode(this.rangeMode);
       const renderChart = isLongRange ? renderLineChart : renderBarChart;
@@ -5155,13 +5247,13 @@ var KanbanStatisticsView = class extends import_obsidian3.ItemView {
       const chart1Wrap = chartRow.createDiv();
       chart1Wrap.style.cssText = "flex:1;min-width:320px;";
       chart1Wrap.createEl("h3", { text: "Newly opened", attr: { style: "margin:0 0 8px;color:var(--kb-text);font-size:1em;" } });
-      renderChart(chart1Wrap, doc, buckets, [{ name: "Newly opened", color: config.colorChartOpened, values: openedCounts, labels: openedTitles }], sharedMax);
+      renderChart(chart1Wrap, doc, buckets, [{ name: "Newly opened", color: config.colorChartOpened, values: openedCounts, labels: openedTitles, labelCounts: openedListedCounts }], sharedMax);
       const chart2Wrap = chartRow.createDiv();
       chart2Wrap.style.cssText = "flex:1;min-width:320px;";
       chart2Wrap.createEl("h3", { text: "Done / Deleted", attr: { style: "margin:0 0 8px;color:var(--kb-text);font-size:1em;" } });
       renderDoneDeletedChart(chart2Wrap, doc, buckets, [
-        { name: "Done", color: config.colorChartDone, values: doneCounts, labels: doneTitles },
-        { name: "Deleted", color: config.colorChartDeleted, values: deletedCounts, labels: deletedTitles }
+        { name: "Done", color: config.colorChartDone, values: doneCounts, labels: doneTitles, labelCounts: doneListedCounts },
+        { name: "Deleted", color: config.colorChartDeleted, values: deletedCounts, labels: deletedTitles, labelCounts: deletedListedCounts }
       ], sharedMax);
       const chart3Wrap = container.createDiv();
       chart3Wrap.style.cssText = "margin-bottom:28px;";

@@ -1139,6 +1139,8 @@ async function editCardText(
     );
     const marker = markerMatch ? markerMatch[1] : "- ";
     const tags = extractTags(original).join(" ");
+    const createdMatch = original.match(/%% @created:\d{4}-\d{2}-\d{2} %%/);
+    const createdComment = createdMatch ? createdMatch[0] : "";
     const orderMatch = original.match(/%% @\d+\w %%/);
     const orderComment = orderMatch ? orderMatch[0] : "";
     const colorMatch = original.match(/%% @color:#[0-9a-fA-F]{6} %%/);
@@ -1146,6 +1148,7 @@ async function editCardText(
 
     const parts = [indent + marker + newText.trim()];
     if (tags) parts.push(tags);
+    if (createdComment) parts.push(createdComment);
     if (orderComment) parts.push(orderComment);
     if (colorComment) parts.push(colorComment);
     lines[lineNum - 1] = parts.join(" ");
@@ -3324,9 +3327,19 @@ async function tagUntaggedRecurrentCards(app: App, paths: string[], config: Kanb
 }
 
 // Scans every task line (cards and sub-items) for ones that were checked off
-// directly in the document — not via the board UI — and swaps their kanban
-// column tag for the done tag, so hand-edited files still land in #done.
-async function moveCheckedCardsToDone(app: App, paths: string[], config: KanbanConfig): Promise<void> {
+// directly in the document — not via the board UI — and (a) swaps their own
+// kanban column tag for the done tag, so hand-edited files still land in
+// #done, and (b) backfills a missing "✅YYYY-MM-DD" done-date on ANY checked
+// line that lacks one, independent of (a). These used to be one combined
+// step gated on "not already tagged #done" — which meant a line that was
+// checked and tagged #done by some route other than this function or the
+// board's own checkbox click (a hand-edit, a promoted subtask stamped
+// #done directly, a plain subtask with no kanban tag at all) could end up
+// permanently stuck with no done-date at all, since nothing would ever
+// revisit it. The date backfill now runs unconditionally on any checked,
+// undated line, matching stampMissingCreatedDates' own "if we don't know,
+// stamp with today" precedent.
+export async function moveCheckedCardsToDone(app: App, paths: string[], config: KanbanConfig): Promise<void> {
   if (!config.normDone) return;
   for (const filePath of paths) {
     const tFile = app.vault.getAbstractFileByPath(filePath) as TFile | null;
@@ -3336,16 +3349,24 @@ async function moveCheckedCardsToDone(app: App, paths: string[], config: KanbanC
     for (let i = 0; i < lines.length; i++) {
       const parsed = parseTaskLine(lines[i]);
       if (parsed.checked !== true) continue;
-      if (!parsed.tags.some((t) => matchesKanbanTag(t, config.normKanban))) continue;
-      if (parsed.tags.some((t) => normalizeTag(t) === config.normDone)) continue;
-      parsed.tags = parsed.tags.filter((t) => !matchesKanbanTag(t, config.normKanban));
-      parsed.tags.push(config.doneColumn);
+
+      let lineChanged = false;
+      const hasOwnKanbanTag = parsed.tags.some((t) => matchesKanbanTag(t, config.normKanban));
+      const alreadyDone = parsed.tags.some((t) => normalizeTag(t) === config.normDone);
+      if (hasOwnKanbanTag && !alreadyDone) {
+        parsed.tags = parsed.tags.filter((t) => !matchesKanbanTag(t, config.normKanban));
+        parsed.tags.push(config.doneColumn);
+        lineChanged = true;
+      }
       if (!parsed.doneDate) {
         const n = new Date();
         parsed.doneDate = `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,"0")}-${String(n.getDate()).padStart(2,"0")}`;
+        lineChanged = true;
       }
-      lines[i] = serializeTaskLine(parsed);
-      changed = true;
+      if (lineChanged) {
+        lines[i] = serializeTaskLine(parsed);
+        changed = true;
+      }
     }
     if (changed) await app.vault.modify(tFile, lines.join("\n"));
   }
