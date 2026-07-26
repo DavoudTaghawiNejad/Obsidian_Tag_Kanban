@@ -4908,14 +4908,26 @@ var KanbanView = class extends import_obsidian2.ItemView {
   async onOpen() {
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", (leaf) => {
-        if (leaf === this.leaf)
+        if (leaf === this.leaf) {
           this.scheduleRefresh(100);
+          this.scrollPastSearchBar();
+        }
       })
     );
     this.scheduleMidnightRefresh();
     this.resizeObserver = new ResizeObserver(() => this.scheduleResizeCheck());
     this.resizeObserver.observe(this.contentEl);
     await this.renderBoard();
+    this.scrollPastSearchBar();
+  }
+  // Scrolls the filter row out of view on activation so the board columns start
+  // at the top; the user scrolls up to reveal the filter box when they need it.
+  scrollPastSearchBar() {
+    const scroll = this.contentEl.querySelector("#kanban-scroll");
+    if (!scroll)
+      return;
+    const offset = scroll.getBoundingClientRect().top - this.contentEl.getBoundingClientRect().top + this.contentEl.scrollTop;
+    this.contentEl.scrollTop = offset;
   }
   async onClose() {
     if (this.debounceTimer)
