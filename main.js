@@ -2623,15 +2623,19 @@ function showCardColorDialog(existingColor, title, subtasks, onApply, onReorder,
     deleteBtn.style.display = subtasksExpanded || orderChanged ? "none" : "";
   };
   const dragCtl = subtaskColEl ? wireSubtaskDrag(subtaskColEl, subtasks, onEditSubtask, onDeleteSubtask, updateDeleteVisibility) : null;
-  const checkedByLine = new Map(subtasks.map((s) => [s.line, s.checked]));
+  const infoByLine = new Map(subtasks.map((s) => [s.line, { hasCheckbox: s.hasCheckbox, checked: s.checked }]));
   let deletedGoLast = false;
   subtaskSortBtn?.addEventListener("click", () => {
     if (!dragCtl)
       return;
     const current = dragCtl.getOrder();
-    const open = current.filter((line) => !checkedByLine.get(line));
-    const done = current.filter((line) => checkedByLine.get(line));
-    dragCtl.setOrder([...open, ...done]);
+    const plain = current.filter((line) => !infoByLine.get(line)?.hasCheckbox);
+    const open = current.filter((line) => {
+      const info = infoByLine.get(line);
+      return !!info?.hasCheckbox && !info.checked;
+    });
+    const done = current.filter((line) => infoByLine.get(line)?.checked);
+    dragCtl.setOrder([...plain, ...open, ...done]);
     deletedGoLast = true;
   });
   const applySubtaskExpanded = () => {
@@ -3677,11 +3681,12 @@ function attachListeners(boardEl, config, app, refresh) {
     } catch {
     }
     const visibleSubtasks = subs.filter((s) => !extractTags(s.text || "").some(isDeletedTag)).map((s) => {
-      const { raw } = cleanSubtaskText(s.text, config);
+      const { hasCheckbox, raw } = cleanSubtaskText(s.text, config);
       return {
         line: s.line,
         labelHtml: renderSubtaskPreviewHTML(s, config),
         checked: /^- \[[xX]\] /.test(s.text || ""),
+        hasCheckbox,
         raw
       };
     });

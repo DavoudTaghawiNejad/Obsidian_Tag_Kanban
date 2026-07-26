@@ -3366,7 +3366,7 @@ function wireSubtaskDrag(
 function showCardColorDialog(
   existingColor: string | null,
   title: string,
-  subtasks: { line: number; labelHtml: string; checked: boolean; raw: string }[],
+  subtasks: { line: number; labelHtml: string; checked: boolean; hasCheckbox: boolean; raw: string }[],
   onApply: (hex: string | null) => void,
   onReorder: (newOrder: number[], deletedGoLast: boolean) => void,
   onDelete: () => void,
@@ -3457,20 +3457,27 @@ function showCardColorDialog(
   const dragCtl = subtaskColEl
     ? wireSubtaskDrag(subtaskColEl, subtasks, onEditSubtask, onDeleteSubtask, updateDeleteVisibility)
     : null;
-  const checkedByLine = new Map(subtasks.map((s) => [s.line, s.checked]));
+  const infoByLine = new Map(subtasks.map((s) => [s.line, { hasCheckbox: s.hasCheckbox, checked: s.checked }]));
 
   // Deleted children are never shown/draggable here, so this sort can only
-  // ever reorder the visible list into open-then-done — but it also flags
-  // that deleted children should move to the very end on Apply, rather than
-  // staying pinned at their original slot (reorderSubtasks' normal default
-  // for a plain drag).
+  // ever reorder the visible list into plain-bullets-then-open-then-done —
+  // but it also flags that deleted children should move to the very end on
+  // Apply, rather than staying pinned at their original slot
+  // (reorderSubtasks' normal default for a plain drag).
   let deletedGoLast = false;
   subtaskSortBtn?.addEventListener("click", () => {
     if (!dragCtl) return;
     const current = dragCtl.getOrder();
-    const open = current.filter((line) => !checkedByLine.get(line));
-    const done = current.filter((line) => checkedByLine.get(line));
-    dragCtl.setOrder([...open, ...done]);
+    // Plain bullets (no checkbox at all) are usually descriptive/context
+    // lines rather than actual tasks, so they stay pinned above both open
+    // and done checkboxes instead of being treated as "open".
+    const plain = current.filter((line) => !infoByLine.get(line)?.hasCheckbox);
+    const open = current.filter((line) => {
+      const info = infoByLine.get(line);
+      return !!info?.hasCheckbox && !info.checked;
+    });
+    const done = current.filter((line) => infoByLine.get(line)?.checked);
+    dragCtl.setOrder([...plain, ...open, ...done]);
     deletedGoLast = true;
   });
 
@@ -4878,11 +4885,12 @@ export function attachListeners(
     const visibleSubtasks = subs
       .filter((s: any) => !extractTags(s.text || "").some(isDeletedTag))
       .map((s: any) => {
-        const { raw } = cleanSubtaskText(s.text, config);
+        const { hasCheckbox, raw } = cleanSubtaskText(s.text, config);
         return {
           line: s.line,
           labelHtml: renderSubtaskPreviewHTML(s, config),
           checked: /^- \[[xX]\] /.test(s.text || ""),
+          hasCheckbox,
           raw,
         };
       });
