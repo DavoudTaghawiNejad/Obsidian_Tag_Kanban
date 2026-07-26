@@ -4795,7 +4795,8 @@ async function collectDeletedEvents(app, paths) {
       continue;
     }
     const stack = [];
-    for (const line of raw.split("\n")) {
+    for (const rawLine of raw.split("\n")) {
+      const line = rawLine.replace(/^(?:>\s?)+/, "");
       const bulletMatch = line.match(/^(\s*)[-*+]\s/);
       if (!bulletMatch)
         continue;

@@ -533,7 +533,11 @@ async function collectDeletedEvents(app: App, paths: string[]): Promise<DeletedE
       continue;
     }
     const stack: { indent: number; title: string; checked: boolean }[] = [];
-    for (const line of raw.split("\n")) {
+    for (const rawLine of raw.split("\n")) {
+      // A deleted card is archived into a blockquoted "> " callout
+      // (see archiveToSection), which would otherwise make its bullet
+      // unrecognizable here and silently drop it from this scan.
+      const line = rawLine.replace(/^(?:>\s?)+/, "");
       const bulletMatch = line.match(/^(\s*)[-*+]\s/);
       if (!bulletMatch) continue;
       const indent = bulletMatch[1].length;
