@@ -1972,6 +1972,61 @@ function indentColumns(ws: string): number {
   return col;
 }
 
+// Rewrites a line's leading whitespace to tabs-only, rounding its column
+// width up to the nearest tab stop — e.g. a stray single space (column 1,
+// probably meant as "one level" but typed as a space instead of a tab)
+// becomes one full tab (column 4), matching a sibling that already used a
+// real tab. A pure multiple-of-4 space indent (column 4, 8, ...) round-trips
+// losslessly since it already lands exactly on a tab stop. Returns null when
+// there's no space to convert (already tabs-only, or no indentation at all)
+// so callers can tell "nothing to do" from "converted to zero tabs".
+function normalizeIndentWhitespace(ws: string): string | null {
+  if (!ws.includes(" ")) return null;
+  const tabs = Math.ceil(indentColumns(ws) / INDENT_TAB_WIDTH);
+  return "\t".repeat(tabs);
+}
+
+// Every line reachable from a tagged card's own subtree, however deep —
+// i.e. everything parseFileEntries considers part of "this kanban card's
+// data", regardless of whether the current (possibly still tabs-vs-spaces
+// miscomputed) nesting depth is itself correct.
+function collectSubLineNumbers(subs: any[], out: Set<number>): void {
+  for (const s of subs ?? []) {
+    out.add(s.line);
+    collectSubLineNumbers(s.subs, out);
+  }
+}
+
+// Auto-heals the exact bug class the tab-width fix above can't fully cover
+// on its own: a line typed with spaces instead of a tab (e.g. pasted from
+// elsewhere, or a stray auto-indent) silently nests under the wrong parent
+// because its column comes out shallower than intended. Since every kanban
+// card's subtree is walked here regardless of the current (possibly wrong)
+// depth, a line ends up in scope as long as it's reachable at all from a
+// tagged root — only its own leading whitespace gets rewritten, never its
+// content. Returns the corrected lines, or null if nothing needed fixing.
+function normalizeKanbanIndentation(lines: string[], fileItems: any[]): string[] | null {
+  const kanbanLines = new Set<number>();
+  for (const e of fileItems) {
+    kanbanLines.add(e.item.line);
+    collectSubLineNumbers(e.item.subs, kanbanLines);
+  }
+
+  let changed = false;
+  const newLines = lines.slice();
+  for (const lineNum of kanbanLines) {
+    const raw = newLines[lineNum - 1];
+    if (typeof raw !== "string") continue;
+    const ws = (raw.match(/^(\s*)/) || [""])[0];
+    const normalized = normalizeIndentWhitespace(ws);
+    if (normalized !== null) {
+      newLines[lineNum - 1] = normalized + raw.slice(ws.length);
+      changed = true;
+    }
+  }
+  return changed ? newLines : null;
+}
+
 // Nearest ancestor on the current outline stack that itself carries a
 // kanban tag — i.e. the ancestor that gets its own card rendered elsewhere
 // on the board. Untagged ancestors (plain outline sections/headings with no
@@ -2167,6 +2222,18 @@ async function getCachedFileEntries(app: App, filePath: string, config: KanbanCo
   if (cached && cached.mtime === tFile.stat.mtime) return cached.entries;
   const lines = await getCachedFileLines(app, filePath);
   const entries = parseFileEntries(lines, filePath, config);
+
+  const normalizedLines = normalizeKanbanIndentation(lines, entries);
+  if (normalizedLines) {
+    await writeFileLines(app, tFile, normalizedLines);
+    // Don't guess at the post-write mtime — just drop both caches for this
+    // file so the next scan does a normal, correct read/parse/cache cycle.
+    // The re-parse below (in memory, not yet cached) is only so *this*
+    // render already reflects the fix instead of lagging one refresh.
+    invalidateCachedFile(filePath);
+    return parseFileEntries(normalizedLines, filePath, config);
+  }
+
   fileEntryCache.set(filePath, { mtime: tFile.stat.mtime, entries });
   return entries;
 }

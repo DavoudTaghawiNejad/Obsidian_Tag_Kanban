@@ -1403,6 +1403,39 @@ function indentColumns(ws) {
   }
   return col;
 }
+function normalizeIndentWhitespace(ws) {
+  if (!ws.includes(" "))
+    return null;
+  const tabs = Math.ceil(indentColumns(ws) / INDENT_TAB_WIDTH);
+  return "	".repeat(tabs);
+}
+function collectSubLineNumbers(subs, out) {
+  for (const s of subs ?? []) {
+    out.add(s.line);
+    collectSubLineNumbers(s.subs, out);
+  }
+}
+function normalizeKanbanIndentation(lines, fileItems) {
+  const kanbanLines = /* @__PURE__ */ new Set();
+  for (const e of fileItems) {
+    kanbanLines.add(e.item.line);
+    collectSubLineNumbers(e.item.subs, kanbanLines);
+  }
+  let changed = false;
+  const newLines = lines.slice();
+  for (const lineNum of kanbanLines) {
+    const raw = newLines[lineNum - 1];
+    if (typeof raw !== "string")
+      continue;
+    const ws = (raw.match(/^(\s*)/) || [""])[0];
+    const normalized = normalizeIndentWhitespace(ws);
+    if (normalized !== null) {
+      newLines[lineNum - 1] = normalized + raw.slice(ws.length);
+      changed = true;
+    }
+  }
+  return changed ? newLines : null;
+}
 function nearestTaggedAncestor(stack, config) {
   for (let i = stack.length - 1; i >= 0; i--) {
     if (stack[i].item.tags.some((t) => matchesKanbanTag(t, config.normKanban)))
@@ -1542,6 +1575,12 @@ async function getCachedFileEntries(app, filePath, config) {
     return cached.entries;
   const lines = await getCachedFileLines(app, filePath);
   const entries = parseFileEntries(lines, filePath, config);
+  const normalizedLines = normalizeKanbanIndentation(lines, entries);
+  if (normalizedLines) {
+    await writeFileLines(app, tFile, normalizedLines);
+    invalidateCachedFile(filePath);
+    return parseFileEntries(normalizedLines, filePath, config);
+  }
   fileEntryCache.set(filePath, { mtime: tFile.stat.mtime, entries });
   return entries;
 }
