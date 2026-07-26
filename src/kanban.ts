@@ -661,6 +661,19 @@ async function addTagAndClearDate(app: App, filePath: string, lineNum: number, t
   } catch { /* ignore */ }
 }
 
+// Adds a kanban tag to an existing line, leaving everything else on it untouched.
+async function addTagToLine(app: App, filePath: string, lineNum: number, tag: string): Promise<void> {
+  try {
+    const { tFile, lines } = await readFileLines(app, filePath);
+    const idx = lineNum - 1;
+    if (idx < 0 || idx >= lines.length) return;
+    const parsed = parseTaskLine(lines[idx]);
+    if (!parsed.tags.some((t) => normalizeTag(t) === normalizeTag(tag))) parsed.tags.push(tag);
+    lines[idx] = serializeTaskLine(parsed);
+    await writeFileLines(app, tFile, lines);
+  } catch { /* ignore */ }
+}
+
 // Adds the due tag and removes the date from every subtask of a #later card whose @YYYY-MM-DD has arrived.
 async function triggerDatedLaterSubs(
   app: App, subs: any[], filePath: string, config: KanbanConfig, today: Date
@@ -705,6 +718,61 @@ async function triggerRecurrentSubs(
     if (sub.subs?.length)
       if (await triggerRecurrentSubs(app, sub.subs, filePath, config, today, todayStr)) changed = true;
   }
+  return changed;
+}
+
+// Deep search: does any descendant sub carry its own "@recurrent" *with* a valid
+// trigger — i.e. is a properly-configured recurring subcard? That's the only
+// legitimate reason a "no trigger" top-level card (see applyRecurrentTrigger —
+// missing "@recurrent" outright, since it's a plain container, or carrying it
+// with no schedule) should exist at all: to hold a collection of such subcards.
+// Used by the Step B filter below — a container with none anywhere in its
+// subtree isn't serving that purpose and moves to Due instead.
+function hasChildWithTrigger(subs: any[], normRecurrent: string): boolean {
+  for (const sub of subs || []) {
+    if (hasRecurrentAnnotation(sub.text, normRecurrent) && hasValidTriggers(sub.text, normRecurrent)) return true;
+    if (hasChildWithTrigger(sub.subs, normRecurrent)) return true;
+  }
+  return false;
+}
+
+// Any subtask with no valid trigger of its own — whether or not it's itself
+// "@recurrent" — is otherwise silently stuck forever once its top-level ancestor
+// card is *also* untriggered (missing "@recurrent" outright, or carrying it with
+// no schedule set): nothing above or below it will ever fire it automatically.
+// Tagging it into Due makes it an immediately actionable, visible card instead.
+// Left alone if the ancestor itself has a real trigger — only a fully-untriggered
+// branch gets popped. Checked-off, deleted, and non-checkbox (plain note) lines
+// are skipped — there's no task there to make actionable.
+async function popOrphanedRecurrentSubs(app: App, items: any[], config: KanbanConfig): Promise<boolean> {
+  if (!config.normRecurrent) return false;
+  let changed = false;
+
+  const isNoTrigger = (text: string) =>
+    !hasRecurrentAnnotation(text, config.normRecurrent) || !hasValidTriggers(text, config.normRecurrent);
+
+  const popIfOrphaned = async (subs: any[], filePath: string): Promise<void> => {
+    for (const sub of subs || []) {
+      if (
+        isCheckboxItem(sub) &&
+        !isCheckedItem(sub) &&
+        !isDeletedItem(sub) &&
+        !hasValidTriggers(sub.text, config.normRecurrent) &&
+        !sub.tags.some((t: string) => config.normKanban.includes(normalizeTag(t)))
+      ) {
+        await addTagToLine(app, filePath, sub.line, config.dueColumn);
+        changed = true;
+      }
+      if (sub.subs?.length) await popIfOrphaned(sub.subs, filePath);
+    }
+  };
+
+  for (const i of items) {
+    if (!i.item.tags.some((t: string) => normalizeTag(t) === config.normRecurrent)) continue;
+    if (!isNoTrigger(i.item.text)) continue;
+    await popIfOrphaned(i.item.subs, i.filePath);
+  }
+
   return changed;
 }
 
@@ -1210,6 +1278,29 @@ async function deleteLineRange(
   }
 }
 
+// Applies the outcome of showRecurrentTriggerDialog to a task line. "No trigger"
+// (triggerAnnotation === "") means the card stays a plain container — meant for
+// adding recurring subtasks to, not for firing on its own — so it deliberately does
+// NOT get "@recurrent"; it's skip-dated for today instead, so the "no untriggered
+// children" rule in Step B doesn't sweep a brand-new (or just-returned) empty
+// container into Due before there's been a chance to add anything under it. Only an
+// actual trigger (space-separated "@word"/"@repeat:..." tokens) adds "@recurrent"
+// plus those tokens, skipping ones already present.
+function applyRecurrentTrigger(parsed: TaskLine, normRecurrent: string, triggerAnnotation: string | null): void {
+  if (!triggerAnnotation) {
+    const n = new Date();
+    parsed.skipDate = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
+    return;
+  }
+  const annRe = new RegExp(`@${normRecurrent}\\b`, 'i');
+  if (!annRe.test(parsed.text)) parsed.text += ` @${normRecurrent}`;
+  for (const tok of triggerAnnotation.trim().split(/\s+/)) {
+    if (!tok) continue;
+    const tokRe = new RegExp(`@${tok.replace(/^@/, '')}\\b`, 'i');
+    if (!tokRe.test(parsed.text)) parsed.text += ` ${tok}`;
+  }
+}
+
 async function moveToColumn(
   app: App,
   filePath: string,
@@ -1248,14 +1339,7 @@ async function moveToColumn(
     parsed.tags.push(targetTag);
 
     if (config.normRecurrent && normalizeTag(targetTag) === config.normRecurrent) {
-      const annRe = new RegExp(`@${config.normRecurrent}\\b`, 'i');
-      if (!annRe.test(parsed.text)) parsed.text += ` @${config.normRecurrent}`;
-      if (triggerAnnotation) {
-        for (const tok of triggerAnnotation.trim().split(/\s+/)) {
-          const tokRe = new RegExp(`@${tok.replace(/^@/, '')}\\b`, 'i');
-          if (!tokRe.test(parsed.text)) parsed.text += ` ${tok}`;
-        }
-      }
+      applyRecurrentTrigger(parsed, config.normRecurrent, triggerAnnotation);
       // Created-date resets to today whenever a card lands in Recurrent — its
       // "creation" is treated as the start of the current cycle (same reasoning
       // as the equivalent reset in archiveToSection's keepRecurring path, the
@@ -1713,19 +1797,41 @@ async function promoteSubToChild(
     if (subLineNum < 1 || subLineNum > lines.length) return false;
 
     const parsed = parseTaskLine(lines[subLineNum - 1]);
-    if (!parsed.tags.some((t) => normalizeTag(t) === normParent)) {
-      parsed.tags.push(parentTag);
-    }
-    if (parentCard && !parsed.date) {
-      const dm = parentCard.item.text.match(/@\d{4}-\d{2}-\d{2}/);
-      if (dm) parsed.date = dm[0];
-    }
-    parsed.orderDigits = newCalc.digits;
-    parsed.orderState = newState;
-    lines[subLineNum - 1] = serializeTaskLine(parsed);
-    await writeFileLines(app, tFile, lines);
 
-    new Notice(`Tagged subtask with ${parentTag.replace(/^#/, "").toUpperCase()}.`);
+    const finish = async (triggerAnnotation: string | null) => {
+      if (!parsed.tags.some((t) => normalizeTag(t) === normParent)) {
+        parsed.tags.push(parentTag);
+      }
+      if (normParent === config.normRecurrent) {
+        applyRecurrentTrigger(parsed, config.normRecurrent, triggerAnnotation);
+      }
+      if (parentCard && !parsed.date) {
+        const dm = parentCard.item.text.match(/@\d{4}-\d{2}-\d{2}/);
+        if (dm) parsed.date = dm[0];
+      }
+      parsed.orderDigits = newCalc.digits;
+      parsed.orderState = newState;
+      lines[subLineNum - 1] = serializeTaskLine(parsed);
+      await writeFileLines(app, tFile, lines);
+      new Notice(`Tagged subtask with ${parentTag.replace(/^#/, "").toUpperCase()}.`);
+    };
+
+    // Promoting into Recurrent without an already-complete trigger asks for one
+    // first — the same "Set" / "No trigger" choice offered by every other entry
+    // point into that column — so a promoted subtask never ends up with the
+    // "#recurrent" tag but no "@recurrent" annotation.
+    if (
+      normParent === config.normRecurrent &&
+      !(hasRecurrentAnnotation(parsed.text, config.normRecurrent) && hasValidTriggers(parsed.text, config.normRecurrent))
+    ) {
+      showRecurrentTriggerDialog(async (trigger) => {
+        await finish(trigger);
+        requestAnimationFrame(() => setTimeout(refresh, 50));
+      }, extractTriggerAnnotations(parsed.text, config.normRecurrent), extractRepeatSpec(parsed.text));
+      return true;
+    }
+
+    await finish(null);
     requestAnimationFrame(() => setTimeout(refresh, 50));
     return true;
   } catch (e: any) {
@@ -2557,8 +2663,10 @@ function showDateDialog(
 function showRecurrentTriggerDialog(
   onSubmit: (trigger: string) => void,
   existingTriggers: string[] = [],
-  existingRepeatSpec: RepeatSpec | null = null
+  existingRepeatSpec: RepeatSpec | null = null,
+  opts: { allowNoTrigger?: boolean } = {}
 ) {
+  const { allowNoTrigger = true } = opts;
   const { dialog, close } = makeOverlay("kanban-recurrent-trigger-dialog");
 
   const WD_KEYS   = ['sun','mon','tue','wed','thu','fri','sat'];
@@ -2634,7 +2742,7 @@ function showRecurrentTriggerDialog(
     <div id="k-dom-rows" style="display:flex;flex-wrap:wrap;gap:4px;min-height:4px;margin-bottom:10px;"></div>
     <div id="k-month-rows" style="display:flex;flex-wrap:wrap;gap:4px;min-height:4px;margin-bottom:10px;"></div>
     <p id="k-trigger-err" style="margin:2px 0 8px;font-size:.82em;color:#e03e3e;min-height:1.2em;"></p>
-    <div id="k-recur-actions" style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">${buttonHtml("Set", true)}${buttonHtml("No trigger", false)}${buttonHtml("Cancel", false)}</div>`;
+    <div id="k-recur-actions" style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">${buttonHtml("Set", true)}${allowNoTrigger ? buttonHtml("No trigger", false) : ""}${buttonHtml("Cancel", false)}</div>`;
 
   const repeatCountSel  = dialog.querySelector("#k-repeat-count") as HTMLSelectElement;
   const repeatUnitSel   = dialog.querySelector("#k-repeat-unit") as HTMLSelectElement;
@@ -2644,7 +2752,10 @@ function showRecurrentTriggerDialog(
   const domRows      = dialog.querySelector("#k-dom-rows") as HTMLElement;
   const moRows       = dialog.querySelector("#k-month-rows") as HTMLElement;
   const errEl        = dialog.querySelector("#k-trigger-err") as HTMLElement;
-  const [setBtn, noTriggerBtn, cancelBtn] = dialog.querySelectorAll<HTMLButtonElement>("#k-recur-actions button");
+  const actionBtns = dialog.querySelectorAll<HTMLButtonElement>("#k-recur-actions button");
+  const setBtn = actionBtns[0];
+  const noTriggerBtn = allowNoTrigger ? actionBtns[1] : null;
+  const cancelBtn = allowNoTrigger ? actionBtns[2] : actionBtns[1];
 
   const renderDomRows = () => {
     domRows.innerHTML = selectedDays.map((d, i) =>
@@ -2763,7 +2874,7 @@ function showRecurrentTriggerDialog(
   };
 
   setBtn.onclick = submit;
-  noTriggerBtn.onclick = () => { close(); onSubmit(""); };
+  if (noTriggerBtn) noTriggerBtn.onclick = () => { close(); onSubmit(""); };
   cancelBtn.onclick = close;
   dialog.addEventListener("keydown", (e) => {
     if (e.key === "Enter") submit();
@@ -3774,16 +3885,23 @@ export async function buildBoard(
   if (config.normRecurrent) {
     const todayStr = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}`;
     // A card with a literal @date (interval-based recurrence) fires once that date
-    // arrives; otherwise a card with no trigger annotations fires every day, and a
-    // card with weekday/month/day-of-month triggers fires on matching days.
+    // arrives; a card with weekday/month/day-of-month triggers fires on matching
+    // days; a card with no working trigger of its own (missing "@recurrent"
+    // outright — a plain container for adding recurring subtasks to, see
+    // applyRecurrentTrigger — or carrying it with no schedule set) is only
+    // legitimate while it holds at least one properly-triggered recurring
+    // subcard anywhere in its subtree — once it doesn't (never did, or every
+    // subcard it once held is gone), it's not serving that purpose and fires
+    // into Due instead.
     const recurrentToMove = items.filter((i) => {
       if (!i.item.tags.some((t: string) => normalizeTag(t) === config.normRecurrent)) return false;
-      if (!hasRecurrentAnnotation(i.item.text, config.normRecurrent)) return false;
       if (extractSkipDate(i.item.text) === todayStr) return false;
+      if (!hasRecurrentAnnotation(i.item.text, config.normRecurrent) || !hasValidTriggers(i.item.text, config.normRecurrent)) {
+        return !hasChildWithTrigger(i.item.subs, config.normRecurrent);
+      }
       const repeatDate = parseCardDate(i.item.text);
       if (repeatDate) return repeatDate <= today;
       const triggers = extractTriggerAnnotations(i.item.text, config.normRecurrent);
-      if (triggers.length === 0) return !i.item.subs || i.item.subs.length === 0;
       return matchesTriggerAnnotations(triggers, today);
     });
     if (recurrentToMove.length) {
@@ -3799,6 +3917,9 @@ export async function buildBoard(
         anySubTriggered = true;
     }
     if (anySubTriggered) items = await collectItems(app, paths, config);
+
+    // Step D: pop subtasks that will never fire (see popOrphanedRecurrentSubs) into Due
+    if (await popOrphanedRecurrentSubs(app, items, config)) items = await collectItems(app, paths, config);
   }
 
   const columns = groupByColumns(items, config);
@@ -4322,6 +4443,16 @@ export function attachListeners(
     const normTags = tags.map(normalizeTag);
     const isLater = normTags.some(t => t === config.normLater);
     const isRecurrent = !!(config.normRecurrent && normTags.some(t => t === config.normRecurrent));
+    // A parent that's tagged #recurrent but has no working "@recurrent" trigger of
+    // its own (missing the annotation outright, or carrying it with no schedule
+    // set) will never fire — so a subtask added under it must be given a real
+    // trigger of its own, or it'd be just as permanently stuck. "No trigger" is
+    // only offered when the parent itself actually has a working trigger.
+    const parentRaw = card.dataset.raw || "";
+    const parentHasWorkingTrigger =
+      !!config.normRecurrent &&
+      hasRecurrentAnnotation(parentRaw, config.normRecurrent) &&
+      hasValidTriggers(parentRaw, config.normRecurrent);
 
     const doAdd = async (text: string) => {
       if (await addSubtaskToCard(app, filePath, afterLine, cardLine, text))
@@ -4340,7 +4471,7 @@ export function attachListeners(
           const skipStr = `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;
           const triggerPart = triggerStr ? ` ${triggerStr}` : '';
           await doAdd(appendToFirstLine(text, `@${config.normRecurrent}${triggerPart} %% @skip:${skipStr} %%`));
-        });
+        }, [], null, { allowNoTrigger: parentHasWorkingTrigger });
       } else {
         await doAdd(text);
       }
@@ -5136,8 +5267,11 @@ export function attachListeners(
         showRecurrentTriggerDialog(async (triggerStr) => {
           const n = new Date();
           const skipStr = `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;
-          const triggerPart = triggerStr ? ` ${triggerStr}` : '';
-          const annotated = `${text} @${config.normRecurrent}${triggerPart} %% @skip:${skipStr} %%`;
+          // "No trigger" stays a plain container (no "@recurrent") — see
+          // applyRecurrentTrigger for why; skip-dated today either way so a
+          // brand-new empty container isn't immediately swept into Due.
+          const recurrentPart = triggerStr ? ` @${config.normRecurrent} ${triggerStr}` : '';
+          const annotated = `${text}${recurrentPart} %% @skip:${skipStr} %%`;
           if (await addNewItem(app, tag, annotated, null, config, notes, docName, defaultDocName))
             requestAnimationFrame(() => setTimeout(refresh, 50));
         });

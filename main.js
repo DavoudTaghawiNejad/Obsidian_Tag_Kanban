@@ -476,6 +476,20 @@ async function addTagAndClearDate(app, filePath, lineNum, tag) {
   } catch {
   }
 }
+async function addTagToLine(app, filePath, lineNum, tag) {
+  try {
+    const { tFile, lines } = await readFileLines(app, filePath);
+    const idx = lineNum - 1;
+    if (idx < 0 || idx >= lines.length)
+      return;
+    const parsed = parseTaskLine(lines[idx]);
+    if (!parsed.tags.some((t) => normalizeTag(t) === normalizeTag(tag)))
+      parsed.tags.push(tag);
+    lines[idx] = serializeTaskLine(parsed);
+    await writeFileLines(app, tFile, lines);
+  } catch {
+  }
+}
 async function triggerDatedLaterSubs(app, subs, filePath, config, today) {
   if (!subs || !subs.length)
     return false;
@@ -512,6 +526,39 @@ async function triggerRecurrentSubs(app, subs, filePath, config, today, todayStr
       if (await triggerRecurrentSubs(app, sub.subs, filePath, config, today, todayStr))
         changed = true;
     }
+  }
+  return changed;
+}
+function hasChildWithTrigger(subs, normRecurrent) {
+  for (const sub of subs || []) {
+    if (hasRecurrentAnnotation(sub.text, normRecurrent) && hasValidTriggers(sub.text, normRecurrent))
+      return true;
+    if (hasChildWithTrigger(sub.subs, normRecurrent))
+      return true;
+  }
+  return false;
+}
+async function popOrphanedRecurrentSubs(app, items, config) {
+  if (!config.normRecurrent)
+    return false;
+  let changed = false;
+  const isNoTrigger = (text) => !hasRecurrentAnnotation(text, config.normRecurrent) || !hasValidTriggers(text, config.normRecurrent);
+  const popIfOrphaned = async (subs, filePath) => {
+    for (const sub of subs || []) {
+      if (isCheckboxItem(sub) && !isCheckedItem(sub) && !isDeletedItem(sub) && !hasValidTriggers(sub.text, config.normRecurrent) && !sub.tags.some((t) => config.normKanban.includes(normalizeTag(t)))) {
+        await addTagToLine(app, filePath, sub.line, config.dueColumn);
+        changed = true;
+      }
+      if (sub.subs?.length)
+        await popIfOrphaned(sub.subs, filePath);
+    }
+  };
+  for (const i of items) {
+    if (!i.item.tags.some((t) => normalizeTag(t) === config.normRecurrent))
+      continue;
+    if (!isNoTrigger(i.item.text))
+      continue;
+    await popIfOrphaned(i.item.subs, i.filePath);
   }
   return changed;
 }
@@ -911,6 +958,23 @@ async function deleteLineRange(app, filePath, startLine, endLine) {
     return false;
   }
 }
+function applyRecurrentTrigger(parsed, normRecurrent, triggerAnnotation) {
+  if (!triggerAnnotation) {
+    const n = new Date();
+    parsed.skipDate = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
+    return;
+  }
+  const annRe = new RegExp(`@${normRecurrent}\\b`, "i");
+  if (!annRe.test(parsed.text))
+    parsed.text += ` @${normRecurrent}`;
+  for (const tok of triggerAnnotation.trim().split(/\s+/)) {
+    if (!tok)
+      continue;
+    const tokRe = new RegExp(`@${tok.replace(/^@/, "")}\\b`, "i");
+    if (!tokRe.test(parsed.text))
+      parsed.text += ` ${tok}`;
+  }
+}
 async function moveToColumn(app, filePath, lineNum, originalTags, targetTag, isDone, config, dateStrToAppend = null, newDigits = null, newState = null, triggerAnnotation = null, clearDate = false) {
   try {
     const { tFile, lines } = await readFileLines(app, filePath);
@@ -930,16 +994,7 @@ async function moveToColumn(app, filePath, lineNum, originalTags, targetTag, isD
     parsed.tags = parsed.tags.filter((t) => !config.normKanban.includes(normalizeTag(t)));
     parsed.tags.push(targetTag);
     if (config.normRecurrent && normalizeTag(targetTag) === config.normRecurrent) {
-      const annRe = new RegExp(`@${config.normRecurrent}\\b`, "i");
-      if (!annRe.test(parsed.text))
-        parsed.text += ` @${config.normRecurrent}`;
-      if (triggerAnnotation) {
-        for (const tok of triggerAnnotation.trim().split(/\s+/)) {
-          const tokRe = new RegExp(`@${tok.replace(/^@/, "")}\\b`, "i");
-          if (!tokRe.test(parsed.text))
-            parsed.text += ` ${tok}`;
-        }
-      }
+      applyRecurrentTrigger(parsed, config.normRecurrent, triggerAnnotation);
       {
         const n2 = new Date();
         parsed.createdDate = `${n2.getFullYear()}-${String(n2.getMonth() + 1).padStart(2, "0")}-${String(n2.getDate()).padStart(2, "0")}`;
@@ -1244,19 +1299,32 @@ async function promoteSubToChild(app, filePath, subLineNum, parentTag, parentDig
     if (subLineNum < 1 || subLineNum > lines.length)
       return false;
     const parsed = parseTaskLine(lines[subLineNum - 1]);
-    if (!parsed.tags.some((t) => normalizeTag(t) === normParent)) {
-      parsed.tags.push(parentTag);
+    const finish = async (triggerAnnotation) => {
+      if (!parsed.tags.some((t) => normalizeTag(t) === normParent)) {
+        parsed.tags.push(parentTag);
+      }
+      if (normParent === config.normRecurrent) {
+        applyRecurrentTrigger(parsed, config.normRecurrent, triggerAnnotation);
+      }
+      if (parentCard && !parsed.date) {
+        const dm = parentCard.item.text.match(/@\d{4}-\d{2}-\d{2}/);
+        if (dm)
+          parsed.date = dm[0];
+      }
+      parsed.orderDigits = newCalc.digits;
+      parsed.orderState = newState;
+      lines[subLineNum - 1] = serializeTaskLine(parsed);
+      await writeFileLines(app, tFile, lines);
+      new import_obsidian.Notice(`Tagged subtask with ${parentTag.replace(/^#/, "").toUpperCase()}.`);
+    };
+    if (normParent === config.normRecurrent && !(hasRecurrentAnnotation(parsed.text, config.normRecurrent) && hasValidTriggers(parsed.text, config.normRecurrent))) {
+      showRecurrentTriggerDialog(async (trigger) => {
+        await finish(trigger);
+        requestAnimationFrame(() => setTimeout(refresh, 50));
+      }, extractTriggerAnnotations(parsed.text, config.normRecurrent), extractRepeatSpec(parsed.text));
+      return true;
     }
-    if (parentCard && !parsed.date) {
-      const dm = parentCard.item.text.match(/@\d{4}-\d{2}-\d{2}/);
-      if (dm)
-        parsed.date = dm[0];
-    }
-    parsed.orderDigits = newCalc.digits;
-    parsed.orderState = newState;
-    lines[subLineNum - 1] = serializeTaskLine(parsed);
-    await writeFileLines(app, tFile, lines);
-    new import_obsidian.Notice(`Tagged subtask with ${parentTag.replace(/^#/, "").toUpperCase()}.`);
+    await finish(null);
     requestAnimationFrame(() => setTimeout(refresh, 50));
     return true;
   } catch (e) {
@@ -1899,7 +1967,8 @@ function showDateDialog(title, defaultDate, app, onSubmit, opts = {}) {
   });
   (textInput ?? dateInput).focus();
 }
-function showRecurrentTriggerDialog(onSubmit, existingTriggers = [], existingRepeatSpec = null) {
+function showRecurrentTriggerDialog(onSubmit, existingTriggers = [], existingRepeatSpec = null, opts = {}) {
+  const { allowNoTrigger = true } = opts;
   const { dialog, close } = makeOverlay("kanban-recurrent-trigger-dialog");
   const WD_KEYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
   const WD_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -1950,7 +2019,7 @@ function showRecurrentTriggerDialog(onSubmit, existingTriggers = [], existingRep
     <div id="k-dom-rows" style="display:flex;flex-wrap:wrap;gap:4px;min-height:4px;margin-bottom:10px;"></div>
     <div id="k-month-rows" style="display:flex;flex-wrap:wrap;gap:4px;min-height:4px;margin-bottom:10px;"></div>
     <p id="k-trigger-err" style="margin:2px 0 8px;font-size:.82em;color:#e03e3e;min-height:1.2em;"></p>
-    <div id="k-recur-actions" style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">${buttonHtml("Set", true)}${buttonHtml("No trigger", false)}${buttonHtml("Cancel", false)}</div>`;
+    <div id="k-recur-actions" style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">${buttonHtml("Set", true)}${allowNoTrigger ? buttonHtml("No trigger", false) : ""}${buttonHtml("Cancel", false)}</div>`;
   const repeatCountSel = dialog.querySelector("#k-repeat-count");
   const repeatUnitSel = dialog.querySelector("#k-repeat-unit");
   const wdWrap = dialog.querySelector("#k-wd-wrap");
@@ -1959,7 +2028,10 @@ function showRecurrentTriggerDialog(onSubmit, existingTriggers = [], existingRep
   const domRows = dialog.querySelector("#k-dom-rows");
   const moRows = dialog.querySelector("#k-month-rows");
   const errEl = dialog.querySelector("#k-trigger-err");
-  const [setBtn, noTriggerBtn, cancelBtn] = dialog.querySelectorAll("#k-recur-actions button");
+  const actionBtns = dialog.querySelectorAll("#k-recur-actions button");
+  const setBtn = actionBtns[0];
+  const noTriggerBtn = allowNoTrigger ? actionBtns[1] : null;
+  const cancelBtn = allowNoTrigger ? actionBtns[2] : actionBtns[1];
   const renderDomRows = () => {
     domRows.innerHTML = selectedDays.map(
       (d, i) => `<button type="button" class="kb-rm-day" data-idx="${i}" style="${selectedChipStyle}">${d}</button>`
@@ -1973,17 +2045,17 @@ function showRecurrentTriggerDialog(onSubmit, existingTriggers = [], existingRep
   renderDomRows();
   renderMoRows();
   const populateRepeatCountOptions = (unit, selectValue) => {
-    let opts = [["", "-"]];
+    let opts2 = [["", "-"]];
     if (unit === "day") {
-      opts.push(...Array.from({ length: 30 }, (_, i) => [String(i + 1), `${i + 1} day${i > 0 ? "s" : ""}`]));
+      opts2.push(...Array.from({ length: 30 }, (_, i) => [String(i + 1), `${i + 1} day${i > 0 ? "s" : ""}`]));
     } else if (unit === "week") {
-      opts.push(...Array.from({ length: 8 }, (_, i) => [String(i + 1), `${i + 1} week${i > 0 ? "s" : ""}`]));
+      opts2.push(...Array.from({ length: 8 }, (_, i) => [String(i + 1), `${i + 1} week${i > 0 ? "s" : ""}`]));
     } else {
-      opts.push(...Array.from({ length: 11 }, (_, i) => [String(i + 1), `${i + 1} month${i > 0 ? "s" : ""}`]));
-      opts.push([YEAR_SENTINEL, "1 year"]);
+      opts2.push(...Array.from({ length: 11 }, (_, i) => [String(i + 1), `${i + 1} month${i > 0 ? "s" : ""}`]));
+      opts2.push([YEAR_SENTINEL, "1 year"]);
     }
-    repeatCountSel.innerHTML = opts.map(([v, l]) => `<option value="${v}">${l}</option>`).join("");
-    if (selectValue !== void 0 && opts.some(([v]) => v === selectValue))
+    repeatCountSel.innerHTML = opts2.map(([v, l]) => `<option value="${v}">${l}</option>`).join("");
+    if (selectValue !== void 0 && opts2.some(([v]) => v === selectValue))
       repeatCountSel.value = selectValue;
   };
   repeatUnitSel.value = initRepeatUnit;
@@ -2075,10 +2147,11 @@ function showRecurrentTriggerDialog(onSubmit, existingTriggers = [], existingRep
     onSubmit(tokens.map((t) => `@${t}`).join(" "));
   };
   setBtn.onclick = submit;
-  noTriggerBtn.onclick = () => {
-    close();
-    onSubmit("");
-  };
+  if (noTriggerBtn)
+    noTriggerBtn.onclick = () => {
+      close();
+      onSubmit("");
+    };
   cancelBtn.onclick = close;
   dialog.addEventListener("keydown", (e) => {
     if (e.key === "Enter")
@@ -2838,16 +2911,15 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
     const recurrentToMove = items.filter((i) => {
       if (!i.item.tags.some((t) => normalizeTag(t) === config.normRecurrent))
         return false;
-      if (!hasRecurrentAnnotation(i.item.text, config.normRecurrent))
-        return false;
       if (extractSkipDate(i.item.text) === todayStr)
         return false;
+      if (!hasRecurrentAnnotation(i.item.text, config.normRecurrent) || !hasValidTriggers(i.item.text, config.normRecurrent)) {
+        return !hasChildWithTrigger(i.item.subs, config.normRecurrent);
+      }
       const repeatDate = parseCardDate(i.item.text);
       if (repeatDate)
         return repeatDate <= today;
       const triggers = extractTriggerAnnotations(i.item.text, config.normRecurrent);
-      if (triggers.length === 0)
-        return !i.item.subs || i.item.subs.length === 0;
       return matchesTriggerAnnotations(triggers, today);
     });
     if (recurrentToMove.length) {
@@ -2863,6 +2935,8 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
         anySubTriggered = true;
     }
     if (anySubTriggered)
+      items = await collectItems(app, paths, config);
+    if (await popOrphanedRecurrentSubs(app, items, config))
       items = await collectItems(app, paths, config);
   }
   const columns = groupByColumns(items, config);
@@ -3309,6 +3383,8 @@ function attachListeners(boardEl, config, app, refresh) {
     const normTags = tags.map(normalizeTag);
     const isLater = normTags.some((t) => t === config.normLater);
     const isRecurrent = !!(config.normRecurrent && normTags.some((t) => t === config.normRecurrent));
+    const parentRaw = card.dataset.raw || "";
+    const parentHasWorkingTrigger = !!config.normRecurrent && hasRecurrentAnnotation(parentRaw, config.normRecurrent) && hasValidTriggers(parentRaw, config.normRecurrent);
     const doAdd = async (text) => {
       if (await addSubtaskToCard(app, filePath, afterLine, cardLine, text))
         requestAnimationFrame(() => setTimeout(refresh, 50));
@@ -3325,7 +3401,7 @@ function attachListeners(boardEl, config, app, refresh) {
           const skipStr = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
           const triggerPart = triggerStr ? ` ${triggerStr}` : "";
           await doAdd(appendToFirstLine(text, `@${config.normRecurrent}${triggerPart} %% @skip:${skipStr} %%`));
-        });
+        }, [], null, { allowNoTrigger: parentHasWorkingTrigger });
       } else {
         await doAdd(text);
       }
@@ -4085,8 +4161,8 @@ function attachListeners(boardEl, config, app, refresh) {
         showRecurrentTriggerDialog(async (triggerStr) => {
           const n = new Date();
           const skipStr = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
-          const triggerPart = triggerStr ? ` ${triggerStr}` : "";
-          const annotated = `${text} @${config.normRecurrent}${triggerPart} %% @skip:${skipStr} %%`;
+          const recurrentPart = triggerStr ? ` @${config.normRecurrent} ${triggerStr}` : "";
+          const annotated = `${text}${recurrentPart} %% @skip:${skipStr} %%`;
           if (await addNewItem(app, tag, annotated, null, config, notes, docName, defaultDocName))
             requestAnimationFrame(() => setTimeout(refresh, 50));
         });
