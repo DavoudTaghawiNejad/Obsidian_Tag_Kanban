@@ -1777,6 +1777,37 @@ function setLevels(node: any, level = 0) {
   node.subs?.forEach((s: any) => setLevels(s, level + 1));
 }
 
+// Tab stop width (columns) used only for comparing indentation depth —
+// matches Obsidian's own default tab width, so a tab and 4 spaces of
+// indentation read as the same depth instead of a tab (1 character) losing
+// to a 4-space indent.
+//
+// Deliberately NOT paired with a minimum-nest-past-parent floor (e.g.
+// requiring +2 columns, matching CommonMark's "- " marker width): a vault
+// scan turned up many existing notes that rely on a single extra space for
+// looser nesting throughout an entire outline, not just as an isolated
+// mistake. A floor treats every one of those as "not nested," which pops
+// the real ancestor off the stack for good — so a stray shallow line
+// permanently detaches everything typed after it (further down the file,
+// at a normal deeper indent) from a project card it was still meant to be
+// under, and any of those with no kanban tag of their own then vanish from
+// the board entirely. Comparing tab-expanded columns with a plain "deeper
+// than parent" rule (any increase counts) fixes the tabs-vs-spaces
+// miscompare without that collateral damage.
+const INDENT_TAB_WIDTH = 4;
+
+// Leading-whitespace column width, with tabs expanded to the next tab stop.
+// A bare tab and a single space both have raw .length 1, but very different
+// visual/semantic depth — comparing indentation by character count alone
+// (as this used to) silently treats them as equal.
+function indentColumns(ws: string): number {
+  let col = 0;
+  for (const ch of ws) {
+    col += ch === "\t" ? INDENT_TAB_WIDTH - (col % INDENT_TAB_WIDTH) : 1;
+  }
+  return col;
+}
+
 // One file's contribution to collectItems' result — everything collectItems
 // used to compute per-line inside its own loop, minus discoveryIndex (that's
 // inherently cross-file, assigned by collectItems once entries are merged).
@@ -1816,7 +1847,7 @@ function parseFileEntries(lines: string[], filePath: string, config: KanbanConfi
     }
     if (inCode || EMBED_RE.test(line) || LINK_RE.test(line)) continue;
 
-    const indent = (line.match(/^(\s*)/) || [""])[0].length;
+    const col = indentColumns((line.match(/^(\s*)/) || [""])[0]);
 
     // Headings with kanban tags
     const hMatch = line.match(/^\s*(#{1,6})\s+(.+)$/);
@@ -1829,7 +1860,7 @@ function parseFileEntries(lines: string[], filePath: string, config: KanbanConfi
       // get silently attributed as that card's subtask.
       while (
         stack.length &&
-        stack[stack.length - 1].indent >= indent
+        stack[stack.length - 1].col >= col
       ) {
         const p = stack.pop();
         if (
@@ -1848,8 +1879,9 @@ function parseFileEntries(lines: string[], filePath: string, config: KanbanConfi
           state: parsed?.state ?? "collapsed",
           digits: parsed?.digits ?? null,
           len: parsed?.len ?? null,
-          isPromoted: indent > 0,
-          indent,
+          isPromoted: stack.length > 0,
+          indent: stack.length ? col : 0,
+          col,
           hierarchy_level: stack.length,
           inheritedColor: stack.length
             ? (extractCardColor(stack[stack.length - 1].item.text) || stack[stack.length - 1].inheritedColor || null)
@@ -1864,9 +1896,13 @@ function parseFileEntries(lines: string[], filePath: string, config: KanbanConfi
     const ownTags = extractTags(line);
     const parsed = parseOrderComment(trim);
 
+    // A following line nests under the current stack top as soon as its
+    // column exceeds that top's own column at all (same "any increase
+    // counts" rule as before the tab-width fix) — otherwise the top is done
+    // (a sibling or a completed deeper scope) and gets popped.
     while (
       stack.length &&
-      stack[stack.length - 1].indent >= indent
+      stack[stack.length - 1].col >= col
     ) {
       const p = stack.pop();
       if (
@@ -1887,7 +1923,11 @@ function parseFileEntries(lines: string[], filePath: string, config: KanbanConfi
       isPromoted: stack.length > 0 && ownTags.some((t: string) =>
         matchesKanbanTag(t, config.normKanban)
       ),
-      indent,
+      // 0 when this line has no parent on the stack (i.e. it's not really
+      // anyone's child) — matches isPromoted rather than echoing the source
+      // line's raw indentation regardless of whether it actually nested.
+      indent: stack.length ? col : 0,
+      col,
       hierarchy_level: stack.length,
       // Nearest ancestor's own (or itself-inherited) color — used as this
       // item's card color only when it has no "%% @color %%" of its own,
@@ -1899,7 +1939,10 @@ function parseFileEntries(lines: string[], filePath: string, config: KanbanConfi
         : null,
     };
 
-    if (stack.length && stack[stack.length - 1].indent < indent) {
+    // The pop loop above guarantees that whatever remains on top (if
+    // anything) is strictly shallower than `col` — no need to recheck it
+    // here.
+    if (stack.length) {
       stack[stack.length - 1].item.subs.push(entry.item);
     }
 

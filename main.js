@@ -1297,6 +1297,14 @@ function setLevels(node, level = 0) {
   node.hierarchy_level = level;
   node.subs?.forEach((s) => setLevels(s, level + 1));
 }
+var INDENT_TAB_WIDTH = 4;
+function indentColumns(ws) {
+  let col = 0;
+  for (const ch of ws) {
+    col += ch === "	" ? INDENT_TAB_WIDTH - col % INDENT_TAB_WIDTH : 1;
+  }
+  return col;
+}
 function parseFileEntries(lines, filePath, config) {
   const fileItems = [];
   const LIST_RE = /^(\s*)(?:[-*+]|\d+[\.\)]|-\s*\[\s*\])\s+/;
@@ -1328,11 +1336,11 @@ function parseFileEntries(lines, filePath, config) {
     }
     if (inCode || EMBED_RE.test(line) || LINK_RE.test(line))
       continue;
-    const indent = (line.match(/^(\s*)/) || [""])[0].length;
+    const col = indentColumns((line.match(/^(\s*)/) || [""])[0]);
     const hMatch = line.match(/^\s*(#{1,6})\s+(.+)$/);
     if (hMatch) {
       const tags = extractTags(hMatch[2]);
-      while (stack.length && stack[stack.length - 1].indent >= indent) {
+      while (stack.length && stack[stack.length - 1].col >= col) {
         const p = stack.pop();
         if (p.item.tags.some(
           (t) => matchesKanbanTag(t, config.normKanban)
@@ -1348,8 +1356,9 @@ function parseFileEntries(lines, filePath, config) {
           state: parsed2?.state ?? "collapsed",
           digits: parsed2?.digits ?? null,
           len: parsed2?.len ?? null,
-          isPromoted: indent > 0,
-          indent,
+          isPromoted: stack.length > 0,
+          indent: stack.length ? col : 0,
+          col,
           hierarchy_level: stack.length,
           inheritedColor: stack.length ? extractCardColor(stack[stack.length - 1].item.text) || stack[stack.length - 1].inheritedColor || null : null
         });
@@ -1360,7 +1369,7 @@ function parseFileEntries(lines, filePath, config) {
       continue;
     const ownTags = extractTags(line);
     const parsed = parseOrderComment(trim);
-    while (stack.length && stack[stack.length - 1].indent >= indent) {
+    while (stack.length && stack[stack.length - 1].col >= col) {
       const p = stack.pop();
       if (p.item.tags.some(
         (t) => matchesKanbanTag(t, config.normKanban)
@@ -1377,7 +1386,11 @@ function parseFileEntries(lines, filePath, config) {
       isPromoted: stack.length > 0 && ownTags.some(
         (t) => matchesKanbanTag(t, config.normKanban)
       ),
-      indent,
+      // 0 when this line has no parent on the stack (i.e. it's not really
+      // anyone's child) — matches isPromoted rather than echoing the source
+      // line's raw indentation regardless of whether it actually nested.
+      indent: stack.length ? col : 0,
+      col,
       hierarchy_level: stack.length,
       // Nearest ancestor's own (or itself-inherited) color — used as this
       // item's card color only when it has no "%% @color %%" of its own,
@@ -1386,7 +1399,7 @@ function parseFileEntries(lines, filePath, config) {
       // (renderSub) never uses this — see createCardHTML.
       inheritedColor: stack.length ? extractCardColor(stack[stack.length - 1].item.text) || stack[stack.length - 1].inheritedColor || null : null
     };
-    if (stack.length && stack[stack.length - 1].indent < indent) {
+    if (stack.length) {
       stack[stack.length - 1].item.subs.push(entry.item);
     }
     stack.push(entry);
