@@ -1375,6 +1375,13 @@ function indentColumns(ws) {
   }
   return col;
 }
+function nearestTaggedAncestor(stack, config) {
+  for (let i = stack.length - 1; i >= 0; i--) {
+    if (stack[i].item.tags.some((t) => matchesKanbanTag(t, config.normKanban)))
+      return stack[i];
+  }
+  return null;
+}
 function parseFileEntries(lines, filePath, config) {
   const fileItems = [];
   const LIST_RE = /^(\s*)(?:[-*+]|\d+[\.\)]|-\s*\[\s*\])\s+/;
@@ -1430,7 +1437,8 @@ function parseFileEntries(lines, filePath, config) {
           indent: stack.length ? col : 0,
           col,
           hierarchy_level: stack.length,
-          inheritedColor: stack.length ? extractCardColor(stack[stack.length - 1].item.text) || stack[stack.length - 1].inheritedColor || null : null
+          inheritedColor: stack.length ? extractCardColor(stack[stack.length - 1].item.text) || stack[stack.length - 1].inheritedColor || null : null,
+          parentRef: nearestTaggedAncestor(stack, config)
         });
       }
       continue;
@@ -1467,7 +1475,11 @@ function parseFileEntries(lines, filePath, config) {
       // and only once this item is itself rendered as a card (a promoted
       // sub-task getting its own top-level card). Nested/unpromoted display
       // (renderSub) never uses this — see createCardHTML.
-      inheritedColor: stack.length ? extractCardColor(stack[stack.length - 1].item.text) || stack[stack.length - 1].inheritedColor || null : null
+      inheritedColor: stack.length ? extractCardColor(stack[stack.length - 1].item.text) || stack[stack.length - 1].inheritedColor || null : null,
+      // The nearest ancestor that itself gets its own card — used to show a
+      // "belongs to <parent>" link on this card's badge row (createCardHTML)
+      // instead of "from: <file>" when this item is a promoted sub-task.
+      parentRef: nearestTaggedAncestor(stack, config)
     };
     if (stack.length) {
       stack[stack.length - 1].item.subs.push(entry.item);
@@ -2318,6 +2330,23 @@ function hasUnchecked(subs) {
   }
   return false;
 }
+var SOURCE_DOC_ICON = `<svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block;"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><polyline points="14 2 14 8 20 8"/></svg>`;
+function buildParentPreviewHTML(parentRawText, config, vaultName) {
+  let display = parentRawText.replace(/\s*%%[\s\S]*?%%\s*/g, " ").replace(/\s*✅\d{4}-\d{2}-\d{2}/, "").trim();
+  display = display.split(/\s+/).filter((w) => !(w.startsWith("#") && config.normKanban.includes(normalizeTag(w)))).join(" ").trim();
+  let raw = display.replace(/^- \[[ xX]\] /, "").replace(/^[-*+]\s+/, "").replace(/^#{1,6}\s+/, "").trim();
+  raw = raw.replace(/@(\d{4})-(\d{2})-(\d{2})\b/g, "").trim();
+  if (config.normRecurrent) {
+    raw = raw.replace(new RegExp(`@${config.normRecurrent}\\b`, "gi"), "");
+    raw = raw.replace(/@repeat:(\d+)(day|week|month|year)s?\b/gi, "");
+    raw = raw.replace(
+      /@([a-zA-Z][a-zA-Z_]*(?:[+-]\d+)?|\d{1,2})\b/g,
+      (match, token) => isValidTriggerToken(token.toLowerCase()) ? "" : match
+    );
+  }
+  raw = raw.replace(/\s{2,}/g, " ").trim();
+  return formatInlineEmphasis(linksToHtml(raw, vaultName));
+}
 function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
   let display = item.item.text;
   display = display.replace(/\s*%%[\s\S]*?%%\s*/g, " ").replace(/\s*✅\d{4}-\d{2}-\d{2}/, "").trim();
@@ -2424,8 +2453,14 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
   const border = isMulti ? "background:var(--background-modifier-error-hover);border:1px solid var(--background-modifier-error);" : hasUnmanagedWork ? `border:2px solid var(--kb-children-done);background:color-mix(in srgb,var(--kb-children-done) 20%,var(--kb-card-bg));` : "border:1px solid var(--background-modifier-border);";
   const src = item.source.path.split("/").pop().replace(/\.md$/, "");
   const href = `obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(item.filePath)}`;
-  const badge = `<div style="margin-top:8px;font-size:.8em;color:${textColor};">
-    from: <a href="${href}" style="color:var(--kb-link);text-decoration:none;">${src}</a></div>`;
+  const sourceIcon = `<a href="${href}" class="kb-source-icon" title="Open source document" style="flex-shrink:0;display:inline-flex;color:${textColor};">${SOURCE_DOC_ICON}</a>`;
+  const parentEntry = item.parentRef || null;
+  const badge = parentEntry ? `<div class="kb-parent-row" data-parent-file="${item.filePath}" data-parent-line="${parentEntry.item.line}" style="margin-top:8px;font-size:.8em;color:${textColor};display:flex;align-items:center;gap:5px;">
+         <span class="kb-parent-link" title="Open parent card" style="cursor:pointer;color:var(--kb-link);text-decoration:underline dotted;text-underline-offset:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;">${buildParentPreviewHTML(parentEntry.item.text, config, vaultName)}</span>
+         ${sourceIcon}
+       </div>` : `<div style="margin-top:8px;font-size:.8em;color:${textColor};display:flex;align-items:center;gap:5px;">
+         <span>from: <a href="${href}" style="color:var(--kb-link);text-decoration:none;">${src}</a></span>
+       </div>`;
   const lastSubLn = maxSubLine(item.item.subs) || item.item.line;
   return `<div class="kanban-card"
     data-file="${item.filePath}"
@@ -3249,6 +3284,37 @@ function attachListeners(boardEl, config, app, refresh) {
     if (e.target === card && !isNarrowNow()) {
       openCardColorDialog(card);
     }
+  }
+  function onParentLinkClick(e) {
+    const link = e.target.closest(".kb-parent-link");
+    if (!link)
+      return;
+    e.stopImmediatePropagation();
+    const row = link.closest(".kb-parent-row");
+    if (!row)
+      return;
+    const file = row.dataset.parentFile;
+    const line = row.dataset.parentLine;
+    const findParentCard = () => Array.from(boardEl.querySelectorAll(".kanban-card")).find((c) => c.dataset.file === file && c.dataset.line === line) ?? null;
+    const jumpToParent = () => {
+      const parentCard = findParentCard();
+      if (!parentCard)
+        return;
+      parentCard.querySelector("details")?.setAttribute("open", "");
+      parentCard.scrollIntoView({ behavior: "smooth", block: "center" });
+      applyHighlights(parentCard);
+    };
+    if (isNarrowNow()) {
+      const parentCol = findParentCard()?.closest("[data-col-container]")?.dataset.colContainer;
+      const wrapper = ownerDoc().getElementById("kanban-wrapper");
+      if (parentCol && wrapper && wrapper.dataset.activeCol !== parentCol) {
+        wrapper.dataset.activeCol = parentCol;
+        refresh();
+        requestAnimationFrame(() => setTimeout(jumpToParent, 50));
+        return;
+      }
+    }
+    jumpToParent();
   }
   async function doMove(card, targetNorm, zone) {
     if (!card)
@@ -4260,6 +4326,7 @@ function attachListeners(boardEl, config, app, refresh) {
   boardEl.addEventListener("click", onSubCheckClick);
   boardEl.addEventListener("click", onDateLabelClick);
   boardEl.addEventListener("click", onTriggerLabelClick);
+  boardEl.addEventListener("click", onParentLinkClick);
   boardEl.addEventListener("click", onCardClick);
   boardEl.addEventListener("click", onAddSubClick);
   boardEl.addEventListener("click", onPromoteClick);
