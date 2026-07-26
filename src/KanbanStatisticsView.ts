@@ -650,9 +650,9 @@ function svgEl<K extends keyof SVGElementTagNameMap>(
 
 // A soft grey band behind a Saturday or Sunday slot, drawn first so every
 // later mark (gridlines, bars, zero axis) sits on top of it. Only meaningful
-// where one bucket == one calendar day — renderBarChart/renderStackedBarChart
-// (the three short, daily-bucketed ranges), never renderLineChart's weekly
-// buckets, where a single bucket spans a whole week rather than one day.
+// where one bucket == one calendar day — renderBarChart (the three short,
+// daily-bucketed ranges), never renderLineChart's weekly buckets, where a
+// single bucket spans a whole week rather than one day.
 function drawWeekendBands(
   doc: Document,
   svg: SVGSVGElement,
@@ -677,9 +677,9 @@ interface ChartSeries {
   color: string;
   values: number[];
   // Per-bucket list of display lines behind that bucket's value — optional,
-  // consumed only by the bar-chart tooltips (renderBarChart/
-  // renderStackedBarChart) to list the actual tasks/subtasks on hover. A
-  // parent header counts as an extra line but isn't itself a counted item,
+  // consumed only by renderBarChart's tooltips to list the actual
+  // tasks/subtasks on hover. A parent header counts as an extra line but
+  // isn't itself a counted item,
   // so `labels[i].length` is a line count, not an item count — see
   // labelCounts.
   labels?: string[][];
@@ -990,11 +990,8 @@ function renderBarChart(parent: HTMLElement, doc: Document, buckets: Bucket[], s
   }
 
   // Bars: each slot holds series.length bars side by side, separated by a
-  // 2px surface-color gap. Each bar is capped at 32px — capping here, not
-  // just insetting a percentage of the slot, is what keeps this chart's bars
-  // the same thickness as renderStackedBarChart's single bar instead of
-  // ballooning to fill a wide slot. The (possibly narrower than the slot)
-  // group is centered in the slot.
+  // 2px surface-color gap. Each bar is capped at 32px, so a wide slot leaves
+  // the group centered rather than ballooning the bars to fill it.
   const GAP = 2;
   const inset = slotW * 0.12;
   const rawGroupW = Math.max(1, slotW - inset * 2);
@@ -1053,170 +1050,6 @@ function renderBarChart(parent: HTMLElement, doc: Document, buckets: Bucket[], s
     });
     hit.addEventListener("pointerleave", () => {
       for (const bar of slotBarEls[i]) bar.style.opacity = "1";
-      tooltip.style.display = "none";
-    });
-  }
-}
-
-// Path for a rect whose top corners only are rounded — the "4px rounded
-// data-end, square at the baseline" mark spec, adapted to a stacked bar's
-// topmost segment (its own bottom edge sits against the segment below, not
-// a baseline, but the same "square where another mark touches it" logic
-// applies).
-function roundedTopRectPath(x: number, y: number, w: number, h: number, r: number): string {
-  const rr = Math.max(0, Math.min(r, h, w / 2));
-  return `M ${x},${y + h} L ${x},${y + rr} Q ${x},${y} ${x + rr},${y} L ${x + w - rr},${y} Q ${x + w},${y} ${x + w},${y + rr} L ${x + w},${y + h} Z`;
-}
-
-// A stacked bar chart — used for "Done / Deleted", where the two counts are
-// read as parts of one whole (total completions that day) rather than
-// compared side by side. One bar per bucket, segments stacked bottom-up in
-// `series` order with a 2px surface gap between them (same spacer the
-// grouped bar chart uses between neighbors); only the visually topmost
-// non-zero segment of each bar gets the rounded "data-end", since a
-// segment's other edges all touch either the baseline or another segment.
-function renderStackedBarChart(parent: HTMLElement, doc: Document, buckets: Bucket[], series: ChartSeries[], yMaxOverride?: number): void {
-  const VB_W = 760;
-  const VB_H = 200;
-  const PAD = { top: 12, right: 14, bottom: 24, left: 34 };
-  const plotW = VB_W - PAD.left - PAD.right;
-  const plotH = VB_H - PAD.top - PAD.bottom;
-  const n = buckets.length;
-  const slotW = n > 0 ? plotW / n : plotW;
-  const slotX = (i: number) => PAD.left + i * slotW;
-
-  // A shared yMaxOverride (passed when this chart is paired with another one
-  // in the same row) keeps both charts' gridlines at the same scale, so the
-  // two are directly comparable at a glance instead of each auto-scaling to
-  // its own data and coincidentally lining up gridlines with different values.
-  let yMax = yMaxOverride ?? Math.max(0, ...buckets.map((_, i) => series.reduce((sum, s) => sum + s.values[i], 0)));
-  if (yMax === 0) yMax = 1;
-  const yAt = (v: number) => PAD.top + plotH - (v / yMax) * plotH;
-  const zeroY = yAt(0);
-
-  const wrap = parent.createDiv();
-  wrap.style.cssText = "position:relative;";
-
-  if (series.length > 1) {
-    const legend = wrap.createDiv();
-    legend.style.cssText = "display:flex;gap:16px;flex-wrap:wrap;margin-bottom:6px;font-size:.82em;";
-    for (const s of series) {
-      const row = legend.createDiv();
-      row.style.cssText = "display:flex;align-items:center;gap:6px;";
-      const dot = row.createSpan();
-      dot.style.cssText = `width:9px;height:9px;border-radius:50%;background:${s.color};display:inline-block;flex:none;`;
-      row.createSpan({ text: s.name, attr: { style: "color:var(--kb-text);opacity:.85;" } });
-    }
-  }
-
-  const svg = svgEl(doc, "svg", {
-    viewBox: `0 0 ${VB_W} ${VB_H}`,
-    width: "100%",
-    height: VB_H,
-    preserveAspectRatio: "none",
-  });
-  svg.style.display = "block";
-  wrap.appendChild(svg);
-
-  drawWeekendBands(doc, svg, buckets, slotX, slotW, PAD.top, VB_H - PAD.bottom);
-
-  const ticks = 3;
-  for (let t = 0; t <= ticks; t++) {
-    const v = (yMax * t) / ticks;
-    const y = yAt(v);
-    const line = svgEl(doc, "line", { x1: PAD.left, x2: VB_W - PAD.right, y1: y, y2: y, "stroke-width": "1" });
-    line.style.setProperty("stroke", "var(--background-modifier-border)");
-    svg.appendChild(line);
-    const label = svgEl(doc, "text", { x: PAD.left - 6, y: y + 3, "text-anchor": "end", "font-size": "9" });
-    label.style.setProperty("fill", "var(--kb-text)");
-    label.style.opacity = "0.6";
-    label.textContent = String(Math.round(v));
-    svg.appendChild(label);
-  }
-
-  // Every bucket gets its own label rather than a sparse subset — see
-  // renderBarChart's identical reasoning.
-  const stride = n <= 16 ? 1 : Math.max(1, Math.ceil(n / 8));
-  const labelIndices = new Set<number>();
-  for (let i = 0; i < n; i += stride) labelIndices.add(i);
-  labelIndices.add(n - 1);
-  for (const i of labelIndices) {
-    const label = svgEl(doc, "text", { x: slotX(i) + slotW / 2, y: VB_H - 4, "text-anchor": "middle", "font-size": "9" });
-    label.style.setProperty("fill", "var(--kb-text)");
-    label.style.opacity = "0.6";
-    label.textContent = buckets[i].label;
-    svg.appendChild(label);
-  }
-
-  // One bar per slot (not grouped), capped at 32px — matching
-  // renderBarChart's cap so the two charts in a row read as one system —
-  // and centered in the slot.
-  const GAP = 2;
-  const inset = slotW * 0.18;
-  const barW = Math.min(32, Math.max(4, slotW - inset * 2));
-  const barX = (i: number) => slotX(i) + (slotW - barW) / 2;
-  const slotSegEls: SVGElement[][] = buckets.map(() => []);
-
-  for (let i = 0; i < n; i++) {
-    const x = barX(i);
-    let topSegIdx = -1;
-    for (let si = series.length - 1; si >= 0; si--) {
-      if (series[si].values[i] > 0) { topSegIdx = si; break; }
-    }
-    let cumBottom = 0;
-    series.forEach((s, si) => {
-      const v = s.values[i];
-      if (v <= 0) return;
-      const rawTop = yAt(cumBottom + v);
-      const rawBottom = yAt(cumBottom);
-      const isBottom = si === 0;
-      const isTop = si === topSegIdx;
-      const top = rawTop + (isTop ? 0 : GAP / 2);
-      const bottom = rawBottom - (isBottom ? 0 : GAP / 2);
-      const h = Math.max(bottom - top, 1);
-      cumBottom += v;
-
-      const d = isTop ? roundedTopRectPath(x, top, barW, h, 2) : `M ${x},${top} h ${barW} v ${h} h ${-barW} Z`;
-      const seg = svgEl(doc, "path", { d });
-      seg.style.setProperty("fill", s.color);
-      svg.appendChild(seg);
-      slotSegEls[i].push(seg);
-    });
-  }
-
-  // Bolder than the recessive tick gridlines above — see renderBarChart's
-  // identical reasoning.
-  const zeroLine = svgEl(doc, "line", { x1: PAD.left, x2: VB_W - PAD.right, y1: zeroY, y2: zeroY, "stroke-width": "1.5" });
-  zeroLine.style.setProperty("stroke", "var(--kb-text)");
-  zeroLine.style.opacity = "0.45";
-  svg.appendChild(zeroLine);
-
-  const tooltip = wrap.createDiv();
-  tooltip.style.cssText =
-    "position:absolute;pointer-events:none;max-width:650px;background:var(--background-primary);border:1px solid var(--background-modifier-border);" +
-    "border-radius:6px;padding:6px 9px;font-size:.8em;color:var(--kb-text);box-shadow:0 2px 6px rgba(0,0,0,.15);display:none;white-space:normal;z-index:5;";
-
-  for (let i = 0; i < n; i++) {
-    const hit = svgEl(doc, "rect", { x: slotX(i), y: 0, width: slotW, height: VB_H, fill: "transparent" });
-    svg.appendChild(hit);
-
-    hit.addEventListener("pointerenter", () => {
-      for (const seg of slotSegEls[i]) seg.style.opacity = "0.75";
-
-      const rect = svg.getBoundingClientRect();
-      const xPix = ((slotX(i) + slotW / 2) / VB_W) * rect.width;
-      tooltip.empty();
-      tooltip.createDiv({ text: buckets[i].label, attr: { style: "font-weight:600;margin-bottom:3px;" } });
-      for (const s of series) appendTooltipSeriesRow(tooltip, s, i);
-      tooltip.style.display = "";
-      const tw = tooltip.offsetWidth;
-      let left = xPix + 10;
-      if (left + tw > rect.width) left = xPix - tw - 10;
-      tooltip.style.left = `${Math.max(0, left)}px`;
-      tooltip.style.top = "4px";
-    });
-    hit.addEventListener("pointerleave", () => {
-      for (const seg of slotSegEls[i]) seg.style.opacity = "1";
       tooltip.style.display = "none";
     });
   }
@@ -1459,18 +1292,16 @@ export class KanbanStatisticsView extends ItemView {
 
       const isLongRange = isLongRangeMode(this.rangeMode);
       const renderChart = isLongRange ? renderLineChart : renderBarChart;
-      // Done/Deleted are parts of one whole (completions that day), so they
-      // stack — but only in bar mode. A stacked *line* chart would need area
-      // fills the long-range chart doesn't have, so the 3 long, weekly-
-      // bucketed ranges fall back to two plain overlaid lines instead.
-      const renderDoneDeletedChart = isLongRange ? renderLineChart : renderStackedBarChart;
+      // Done/Deleted uses the same grouped-bar chart as Newly opened (Done
+      // and Deleted side by side within each slot) in bar mode, falling back
+      // to two plain overlaid lines for the long, weekly-bucketed ranges.
+      const renderDoneDeletedChart = isLongRange ? renderLineChart : renderBarChart;
 
       // Newly opened and Done/Deleted sit side by side specifically to be
       // compared at a glance, so they share one y-axis scale (the taller of
       // the two datasets' own maxes) rather than each auto-scaling to fill
       // its own plot height with unrelated tick values.
-      const doneDeletedTotals = buckets.map((_, i) => doneCounts[i] + deletedCounts[i]);
-      const sharedMax = Math.max(0, ...openedCounts, ...doneDeletedTotals);
+      const sharedMax = Math.max(0, ...openedCounts, ...doneCounts, ...deletedCounts);
 
       const chartRow = container.createDiv();
       chartRow.style.cssText = "display:flex;gap:20px;flex-wrap:wrap;margin-bottom:28px;";
