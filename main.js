@@ -959,7 +959,9 @@ async function deleteLineRange(app, filePath, startLine, endLine) {
   }
 }
 function applyRecurrentTrigger(parsed, normRecurrent, triggerAnnotation) {
-  if (!triggerAnnotation) {
+  if (triggerAnnotation === null)
+    return;
+  if (triggerAnnotation === "") {
     const n = new Date();
     parsed.skipDate = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
     return;
@@ -3277,7 +3279,7 @@ function attachListeners(boardEl, config, app, refresh) {
     if (config.normRecurrent && targetNorm === config.normRecurrent) {
       const { lines } = await readFileLines(app, card.filePath);
       const lineTxt = lines[card.lineNum - 1] || "";
-      if (!hasValidTriggers(lineTxt, config.normRecurrent)) {
+      if (!hasValidTriggers(lineTxt, config.normRecurrent) && !hasChildWithTrigger(card.subs, config.normRecurrent)) {
         showRecurrentTriggerDialog(async (trigger) => {
           await moveToColumn(app, card.filePath, card.lineNum, card.originalTags, targetTag, false, config, null, newCalc.digits, newState, trigger, wasLater);
           await uncheckSubtasks(app, card.filePath, card.subs);

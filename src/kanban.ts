@@ -1278,16 +1278,21 @@ async function deleteLineRange(
   }
 }
 
-// Applies the outcome of showRecurrentTriggerDialog to a task line. "No trigger"
-// (triggerAnnotation === "") means the card stays a plain container — meant for
-// adding recurring subtasks to, not for firing on its own — so it deliberately does
-// NOT get "@recurrent"; it's skip-dated for today instead, so the "no untriggered
-// children" rule in Step B doesn't sweep a brand-new (or just-returned) empty
-// container into Due before there's been a chance to add anything under it. Only an
-// actual trigger (space-separated "@word"/"@repeat:..." tokens) adds "@recurrent"
-// plus those tokens, skipping ones already present.
+// Applies the outcome of showRecurrentTriggerDialog to a task line.
+// triggerAnnotation === null means the dialog was never shown (the card already
+// qualified — see hasChildWithTrigger/hasValidTriggers at each call site) — leave
+// its existing trigger state untouched. triggerAnnotation === "" means "No
+// trigger" was actually chosen: the card stays a plain container — meant for
+// adding recurring subtasks to, not for firing on its own — so it deliberately
+// does NOT get "@recurrent"; it's skip-dated for today instead, so the "no
+// untriggered children" rule in Step B doesn't sweep a brand-new (or
+// just-returned) empty container into Due before there's been a chance to add
+// anything under it. Any other (non-empty) string is an actual trigger
+// (space-separated "@word"/"@repeat:..." tokens), and adds "@recurrent" plus
+// those tokens, skipping ones already present.
 function applyRecurrentTrigger(parsed: TaskLine, normRecurrent: string, triggerAnnotation: string | null): void {
-  if (!triggerAnnotation) {
+  if (triggerAnnotation === null) return;
+  if (triggerAnnotation === "") {
     const n = new Date();
     parsed.skipDate = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
     return;
@@ -4333,7 +4338,10 @@ export function attachListeners(
     if (config.normRecurrent && targetNorm === config.normRecurrent) {
       const { lines } = await readFileLines(app, card.filePath);
       const lineTxt = lines[card.lineNum - 1] || "";
-      if (!hasValidTriggers(lineTxt, config.normRecurrent)) {
+      // Already legitimate — either genuinely scheduled itself, or a container
+      // already holding a properly-triggered recurring subtask — so moving it
+      // around the board (drag, reorder, click-to-advance) never re-prompts.
+      if (!hasValidTriggers(lineTxt, config.normRecurrent) && !hasChildWithTrigger(card.subs, config.normRecurrent)) {
         showRecurrentTriggerDialog(async (trigger) => {
           await moveToColumn(app, card.filePath, card.lineNum, card.originalTags, targetTag, false, config, null, newCalc.digits, newState, trigger, wasLater);
           await uncheckSubtasks(app, card.filePath, card.subs);
