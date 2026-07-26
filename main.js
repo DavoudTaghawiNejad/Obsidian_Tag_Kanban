@@ -858,6 +858,34 @@ async function updateCardColor(app, filePath, lineNum, color) {
   lines[lineNum - 1] = serializeTaskLine(parsed);
   await writeFileLines(app, tFile, lines);
 }
+async function reorderSubtasks(app, filePath, subs, newVisibleOrder, deletedGoLast = false) {
+  if (subs.length < 2)
+    return;
+  const { tFile, lines } = await readFileLines(app, filePath);
+  const blocks = /* @__PURE__ */ new Map();
+  for (let i = 0; i < subs.length; i++) {
+    const start = subs[i].line;
+    const end = i < subs.length - 1 ? subs[i + 1].line - 1 : maxSubLine(subs[i].subs) || subs[i].line;
+    blocks.set(start, lines.slice(start - 1, end));
+  }
+  const originalOrder = subs.map((s) => s.line);
+  const visibleSet = new Set(newVisibleOrder);
+  let finalOrder;
+  if (deletedGoLast) {
+    const deletedLines = originalOrder.filter((line) => !visibleSet.has(line));
+    finalOrder = [...newVisibleOrder, ...deletedLines];
+  } else {
+    let cursor = 0;
+    finalOrder = originalOrder.map(
+      (line) => visibleSet.has(line) ? newVisibleOrder[cursor++] : line
+    );
+  }
+  const firstLine = originalOrder[0];
+  const totalLen = originalOrder.reduce((n, line) => n + (blocks.get(line)?.length ?? 0), 0);
+  const replacement = finalOrder.flatMap((line) => blocks.get(line) ?? []);
+  lines.splice(firstLine - 1, totalLen, ...replacement);
+  await writeFileLines(app, tFile, lines);
+}
 async function updateCardTriggers(app, filePath, lineNum, normRecurrent, newTriggerStr) {
   const { tFile, lines } = await readFileLines(app, filePath);
   if (lineNum < 1 || lineNum > lines.length)
@@ -1598,7 +1626,7 @@ function makeOverlay(id) {
   doc.getElementById(id)?.remove();
   const overlay = doc.createElement("div");
   overlay.id = id;
-  overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.5);z-index:10000;display:flex;align-items:center;justify-content:center;";
+  overlay.style.cssText = "position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,.5);z-index:10000;display:flex;align-items:center;justify-content:center;";
   doc.body.appendChild(overlay);
   const dialog = doc.createElement("div");
   dialog.style.cssText = "background:var(--background-primary);color:var(--kb-dialog-text,var(--text-normal));padding:20px;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,.15);min-width:300px;max-width:400px;max-height:90vh;overflow-y:auto;text-align:center;";
@@ -2230,37 +2258,412 @@ var CARD_COLOR_GRAY = "#888888";
 var CARD_COLOR_SATURATION = 65;
 var CARD_COLOR_LIGHTNESS = 55;
 var CARD_COLOR_NONE_SWATCH_BG = "repeating-linear-gradient(45deg, var(--background-modifier-border), var(--background-modifier-border) 3px, transparent 3px, transparent 7px)";
-function showCardColorDialog(existingColor, onApply, onDelete) {
+function wireSubtaskDrag(col, subtasks, onEditSubtask, onDeleteSubtask, onOrderChange) {
+  const doc = col.ownerDocument;
+  const DRAG_DELAY = 200, MOVE_THRESHOLD = 6;
+  let order = subtasks.map((s) => s.line);
+  const rowMap = /* @__PURE__ */ new Map();
+  for (const s of subtasks) {
+    const row = doc.createElement("div");
+    row.className = "kb-subtask-row";
+    row.dataset.subLine = String(s.line);
+    row.dataset.subRaw = s.raw;
+    row.style.cssText = "display:flex;align-items:center;gap:10px;padding:14px 16px;background:var(--kb-card-bg,var(--background-primary));border:1px solid var(--background-modifier-border);border-radius:10px;cursor:grab;text-align:left;box-shadow:0 1px 3px rgba(0,0,0,.08);";
+    const handle = doc.createElement("span");
+    handle.textContent = "\u283F";
+    handle.setAttribute("aria-hidden", "true");
+    handle.style.cssText = "color:var(--text-faint);font-size:1.2em;line-height:1;flex-shrink:0;user-select:none;";
+    const label = doc.createElement("span");
+    label.className = "kb-subtask-label";
+    label.style.cssText = `flex:1;min-width:0;pointer-events:none;overflow-wrap:anywhere;font-weight:${TITLE_FONT_WEIGHT};line-height:1.4;`;
+    label.innerHTML = s.labelHtml;
+    row.append(handle, label);
+    rowMap.set(s.line, row);
+  }
+  const makeSlot = (idx) => {
+    const s = doc.createElement("div");
+    s.className = "kb-subtask-slot";
+    s.dataset.index = String(idx);
+    s.style.cssText = "height:12px;margin:-6px 0;border-top:2px dashed transparent;width:100%;";
+    return s;
+  };
+  const setClamp = (lines) => {
+    rowMap.forEach((row) => {
+      const label = row.querySelector(".kb-subtask-label");
+      if (!label)
+        return;
+      if (lines === 0) {
+        label.style.removeProperty("display");
+        label.style.removeProperty("-webkit-box-orient");
+        label.style.removeProperty("-webkit-line-clamp");
+        label.style.removeProperty("overflow");
+      } else {
+        label.style.setProperty("display", "-webkit-box");
+        label.style.setProperty("-webkit-box-orient", "vertical");
+        label.style.setProperty("-webkit-line-clamp", String(lines));
+        label.style.setProperty("overflow", "hidden");
+      }
+    });
+  };
+  const fitsWithoutScroll = () => col.scrollHeight <= col.clientHeight + 1;
+  const adjustClamping = () => {
+    if (col.clientHeight === 0)
+      return;
+    setClamp(0);
+    if (fitsWithoutScroll())
+      return;
+    setClamp(2);
+    if (fitsWithoutScroll())
+      return;
+    setClamp(1);
+  };
+  const rebuild = () => {
+    col.innerHTML = "";
+    col.appendChild(makeSlot(0));
+    order.forEach((line, i) => {
+      col.appendChild(rowMap.get(line));
+      col.appendChild(makeSlot(i + 1));
+    });
+    adjustClamping();
+    onOrderChange(order.slice());
+  };
+  rebuild();
+  const removeRow = (line) => {
+    order = order.filter((l) => l !== line);
+    rowMap.delete(line);
+    rebuild();
+  };
+  const onRowDblClick = async (e) => {
+    const row = e.target.closest(".kb-subtask-row");
+    if (!row)
+      return;
+    if (row.querySelector(".card-edit-input"))
+      return;
+    const label = row.querySelector(".kb-subtask-label");
+    if (!label)
+      return;
+    const line = parseInt(row.dataset.subLine, 10);
+    const raw = row.dataset.subRaw || "";
+    const savedHTML = label.innerHTML;
+    const input = doc.createElement("textarea");
+    input.value = raw;
+    input.className = "card-edit-input";
+    input.rows = 1;
+    input.style.cssText = `
+      width:100%;box-sizing:border-box;
+      background:var(--background-primary);
+      color:var(--text-normal);
+      border:none;border-bottom:2px solid var(--kb-accent);
+      outline:none;padding:2px 0;font-size:inherit;font-weight:inherit;
+      font-family:inherit;border-radius:0;
+      resize:none;overflow:hidden;line-height:inherit;display:block;`;
+    const autoResize = () => {
+      input.style.height = "0px";
+      input.style.height = input.scrollHeight + "px";
+    };
+    label.innerHTML = "";
+    label.style.pointerEvents = "auto";
+    label.appendChild(input);
+    let finished = false;
+    const finishEdit = async (save) => {
+      if (finished || !label.contains(input))
+        return;
+      finished = true;
+      label.style.pointerEvents = "none";
+      const newText = input.value.trim();
+      if (save && !newText) {
+        const ok = await onDeleteSubtask(line);
+        if (ok)
+          removeRow(line);
+        else
+          label.innerHTML = savedHTML;
+      } else if (save && newText !== raw) {
+        row.dataset.subRaw = newText;
+        const newLabelHtml = await onEditSubtask(line, newText);
+        label.innerHTML = newLabelHtml ?? savedHTML;
+        adjustClamping();
+      } else {
+        label.innerHTML = savedHTML;
+      }
+    };
+    input.addEventListener("keydown", async (ev) => {
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        await finishEdit(true);
+      }
+      if (ev.key === "Escape") {
+        ev.stopPropagation();
+        await finishEdit(false);
+      }
+    });
+    input.addEventListener("input", autoResize);
+    input.addEventListener("blur", () => finishEdit(true));
+    input.addEventListener("dblclick", (ev) => ev.stopPropagation());
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      autoResize();
+      input.focus();
+      input.select();
+    }));
+  };
+  col.addEventListener("dblclick", onRowDblClick);
+  let dragLine = null;
+  let ghost = null;
+  let insertIndex = -1;
+  let activeMove = null;
+  let activeUp = null;
+  const clearHighlight = () => col.querySelectorAll(".kb-subtask-slot").forEach((s) => s.style.borderTopColor = "transparent");
+  const highlightNearest = (clientY) => {
+    let nearest = null, minDist = Infinity;
+    col.querySelectorAll(".kb-subtask-slot").forEach((s) => {
+      const r = s.getBoundingClientRect();
+      const dist = Math.abs(r.top + r.height / 2 - clientY);
+      if (dist < minDist) {
+        minDist = dist;
+        nearest = s;
+      }
+    });
+    clearHighlight();
+    if (nearest) {
+      nearest.style.borderTopColor = "var(--kb-accent)";
+      insertIndex = parseInt(nearest.dataset.index, 10);
+    }
+  };
+  const makeGhost = (row) => {
+    const r = row.getBoundingClientRect();
+    const g = row.cloneNode(true);
+    Object.assign(g.style, {
+      position: "fixed",
+      left: `${r.left}px`,
+      top: `${r.top}px`,
+      width: `${r.width}px`,
+      opacity: ".85",
+      pointerEvents: "none",
+      zIndex: "10002",
+      boxShadow: "0 8px 24px rgba(0,0,0,.25)",
+      cursor: "grabbing"
+    });
+    doc.body.appendChild(g);
+    return g;
+  };
+  const moveGhost = (clientX, clientY) => {
+    if (!ghost)
+      return;
+    ghost.style.left = `${clientX - ghost.offsetWidth / 2}px`;
+    ghost.style.top = `${clientY - ghost.offsetHeight / 2}px`;
+  };
+  const startDrag = (row, clientX, clientY) => {
+    dragLine = parseInt(row.dataset.subLine, 10);
+    ghost = makeGhost(row);
+    row.style.opacity = ".3";
+    moveGhost(clientX, clientY);
+  };
+  const endDrag = () => {
+    if (dragLine !== null && insertIndex >= 0) {
+      const oldIdx = order.indexOf(dragLine);
+      const newOrder = order.filter((l) => l !== dragLine);
+      const target = oldIdx < insertIndex ? insertIndex - 1 : insertIndex;
+      newOrder.splice(target, 0, dragLine);
+      order = newOrder;
+      rebuild();
+    }
+    if (ghost) {
+      ghost.remove();
+      ghost = null;
+    }
+    if (dragLine !== null)
+      rowMap.get(dragLine).style.opacity = "";
+    clearHighlight();
+    dragLine = null;
+    insertIndex = -1;
+  };
+  const onMouseDown = (e) => {
+    if (e.target.closest(".card-edit-input"))
+      return;
+    const row = e.target.closest(".kb-subtask-row");
+    if (!row)
+      return;
+    const startX = e.clientX, startY = e.clientY;
+    let dragging = false;
+    const onMove = (me) => {
+      if (!dragging) {
+        if (Math.abs(me.clientX - startX) <= MOVE_THRESHOLD && Math.abs(me.clientY - startY) <= MOVE_THRESHOLD)
+          return;
+        dragging = true;
+        startDrag(row, me.clientX, me.clientY);
+      }
+      moveGhost(me.clientX, me.clientY);
+      highlightNearest(me.clientY);
+    };
+    const onUp = () => {
+      doc.removeEventListener("mousemove", onMove);
+      doc.removeEventListener("mouseup", onUp);
+      activeMove = null;
+      activeUp = null;
+      if (dragging)
+        endDrag();
+    };
+    activeMove = onMove;
+    activeUp = onUp;
+    doc.addEventListener("mousemove", onMove);
+    doc.addEventListener("mouseup", onUp);
+  };
+  let touchRow = null;
+  let touchStartX = 0, touchStartY = 0, touchDragging = false;
+  let touchTimer = null;
+  const onTouchStart = (e) => {
+    if (e.touches.length !== 1)
+      return;
+    if (col.querySelector(".card-edit-input"))
+      return;
+    const row = e.target.closest(".kb-subtask-row");
+    if (!row)
+      return;
+    touchRow = row;
+    touchDragging = false;
+    touchStartX = e.touches[0].clientX;
+    touchStartY = e.touches[0].clientY;
+    touchTimer = setTimeout(() => {
+      if (touchRow) {
+        touchDragging = true;
+        startDrag(touchRow, touchStartX, touchStartY);
+      }
+    }, DRAG_DELAY);
+  };
+  const onTouchMove = (e) => {
+    if (!touchRow || e.touches.length !== 1)
+      return;
+    const t = e.touches[0];
+    if (!touchDragging) {
+      if (Math.abs(t.clientX - touchStartX) > MOVE_THRESHOLD || Math.abs(t.clientY - touchStartY) > MOVE_THRESHOLD) {
+        if (touchTimer)
+          clearTimeout(touchTimer);
+        touchDragging = true;
+        startDrag(touchRow, t.clientX, t.clientY);
+      } else {
+        return;
+      }
+    }
+    moveGhost(t.clientX, t.clientY);
+    highlightNearest(t.clientY);
+    e.preventDefault();
+  };
+  const onTouchEnd = () => {
+    if (touchTimer)
+      clearTimeout(touchTimer);
+    if (touchDragging)
+      endDrag();
+    touchRow = null;
+    touchDragging = false;
+  };
+  col.addEventListener("mousedown", onMouseDown);
+  col.addEventListener("touchstart", onTouchStart, { passive: true });
+  col.addEventListener("touchmove", onTouchMove, { passive: false });
+  col.addEventListener("touchend", onTouchEnd);
+  col.addEventListener("touchcancel", onTouchEnd);
+  return {
+    getOrder: () => order.slice(),
+    setOrder: (newOrder) => {
+      order = newOrder.slice();
+      rebuild();
+    },
+    refreshClamping: () => adjustClamping(),
+    destroy: () => {
+      col.removeEventListener("mousedown", onMouseDown);
+      col.removeEventListener("touchstart", onTouchStart);
+      col.removeEventListener("touchmove", onTouchMove);
+      col.removeEventListener("touchend", onTouchEnd);
+      col.removeEventListener("touchcancel", onTouchEnd);
+      col.removeEventListener("dblclick", onRowDblClick);
+      if (activeMove)
+        doc.removeEventListener("mousemove", activeMove);
+      if (activeUp)
+        doc.removeEventListener("mouseup", activeUp);
+      if (touchTimer)
+        clearTimeout(touchTimer);
+      if (ghost)
+        ghost.remove();
+    }
+  };
+}
+function showCardColorDialog(existingColor, title, subtasks, onApply, onReorder, onDelete, onEditSubtask, onDeleteSubtask) {
   const { dialog, close } = makeOverlay("kanban-card-color-dialog");
+  dialog.style.maxWidth = "720px";
   const validExisting = existingColor && /^#[0-9a-fA-F]{6}$/.test(existingColor) ? existingColor : null;
   const existingHsl = validExisting ? hexToHsl(validExisting) : null;
   let selectedHue = !existingHsl ? -2 : existingHsl.l > 90 ? -2 : existingHsl.s < 10 ? -1 : CARD_COLOR_HUES.reduce((best, [, h]) => Math.abs(h - existingHsl.h) < Math.abs(best - existingHsl.h) ? h : best, CARD_COLOR_HUES[0][1]);
   const swatchBtnStyle = (h, active) => `width:32px;height:32px;border-radius:50%;cursor:pointer;border:2px solid ${active ? "var(--kb-accent)" : h === -2 ? "var(--background-modifier-border)" : "transparent"};background:${h === -2 ? CARD_COLOR_NONE_SWATCH_BG : h === -1 ? CARD_COLOR_GRAY : hslToHex(h, CARD_COLOR_SATURATION, CARD_COLOR_LIGHTNESS)};`;
   const swatchesHtml = CARD_COLOR_HUES.map(([name, h]) => `<button type="button" class="kb-color-swatch" data-hue="${h}" title="${name}" style="${swatchBtnStyle(h, h === selectedHue)}"></button>`).join("") + `<button type="button" class="kb-color-swatch" data-hue="-1" title="Gray" style="${swatchBtnStyle(-1, selectedHue === -1)}"></button><button type="button" class="kb-color-swatch" data-hue="-2" title="Default (no color)" style="${swatchBtnStyle(-2, selectedHue === -2)}"></button>`;
   const deleteBtnStyle = "padding:8px 16px;background:var(--text-error, #e03e3e);border:none;border-radius:4px;cursor:pointer;color:#fff;";
+  const sortBtnStyle = "align-self:flex-start;flex-shrink:0;margin-bottom:8px;padding:5px 12px;border-radius:6px;border:1px solid var(--background-modifier-border);background:var(--background-secondary);color:var(--text-normal);cursor:pointer;font-size:.85em;";
+  const subtaskSectionHtml = subtasks.length > 0 ? `
+    <div id="k-subtask-section" style="margin-top:14px;text-align:left;flex:1;min-height:0;display:flex;flex-direction:column;">
+      <div id="k-subtask-toggle" style="font-size:.8em;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;flex-shrink:0;cursor:pointer;display:flex;align-items:center;gap:5px;user-select:none;">
+        <span id="k-subtask-arrow" style="font-size:1.1em;line-height:1;color:var(--kb-accent);">\u25BC</span>
+        <span>Order subtasks</span>
+      </div>
+      <button id="k-subtask-sort" type="button" style="${sortBtnStyle}" title="Move all done subtasks below the open ones">Open \u2192 Done</button>
+      <div id="k-subtask-col" style="flex:1;min-height:0;overflow-y:auto;padding:8px;border:1px solid var(--background-modifier-border);border-radius:8px;background:var(--background-secondary);display:flex;flex-direction:column;"></div>
+    </div>` : "";
   dialog.innerHTML = `
-    <h3 style="margin:0 0 12px;font-size:1.1em;">Card</h3>
-    <div id="k-color-preview" style="width:100%;height:44px;border-radius:8px;margin-bottom:14px;background:var(--kb-card-bg,var(--background-secondary));"></div>
-    <div id="k-color-swatches" style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-bottom:14px;">${swatchesHtml}</div>
-    <div id="k-color-actions" style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">${buttonHtml("Apply", true)}${buttonHtml("Cancel", false)}</div>
-    <div style="margin-top:10px;"><button id="k-color-delete" type="button" style="${deleteBtnStyle}">Delete</button></div>`;
-  const preview = dialog.querySelector("#k-color-preview");
+    <div style="flex-shrink:0;">
+      <h3 style="margin:0 0 12px;font-size:1.1em;overflow-wrap:anywhere;">${title || "Card"}</h3>
+      <div id="k-color-swatches" style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center;">${swatchesHtml}</div>
+    </div>
+    ${subtaskSectionHtml}
+    <div id="k-color-actions" style="flex-shrink:0;margin-top:14px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap;align-items:center;">${buttonHtml("Apply", true)}${buttonHtml("Cancel", false)}<button id="k-color-delete" type="button" style="${deleteBtnStyle}">Delete</button></div>`;
+  const subtaskColEl = dialog.querySelector("#k-subtask-col");
+  const subtaskSection = dialog.querySelector("#k-subtask-section");
+  const subtaskToggle = dialog.querySelector("#k-subtask-toggle");
+  const subtaskArrow = dialog.querySelector("#k-subtask-arrow");
+  const subtaskSortBtn = dialog.querySelector("#k-subtask-sort");
+  const deleteBtn = dialog.querySelector("#k-color-delete");
+  let subtasksExpanded = false;
+  const updateDeleteVisibility = (currentOrder) => {
+    const orderChanged = currentOrder.length !== subtasks.length || currentOrder.some((line, i) => line !== subtasks[i]?.line);
+    deleteBtn.style.display = subtasksExpanded || orderChanged ? "none" : "";
+  };
+  const dragCtl = subtaskColEl ? wireSubtaskDrag(subtaskColEl, subtasks, onEditSubtask, onDeleteSubtask, updateDeleteVisibility) : null;
+  const checkedByLine = new Map(subtasks.map((s) => [s.line, s.checked]));
+  let deletedGoLast = false;
+  subtaskSortBtn?.addEventListener("click", () => {
+    if (!dragCtl)
+      return;
+    const current = dragCtl.getOrder();
+    const open = current.filter((line) => !checkedByLine.get(line));
+    const done = current.filter((line) => checkedByLine.get(line));
+    dragCtl.setOrder([...open, ...done]);
+    deletedGoLast = true;
+  });
+  const applySubtaskExpanded = () => {
+    if (!subtaskColEl || !subtaskSection || !subtaskArrow)
+      return;
+    subtaskColEl.style.display = subtasksExpanded ? "flex" : "none";
+    if (subtaskSortBtn)
+      subtaskSortBtn.style.display = subtasksExpanded ? "block" : "none";
+    subtaskSection.style.flex = subtasksExpanded ? "1 1 auto" : "0 0 auto";
+    subtaskArrow.textContent = subtasksExpanded ? "\u25B2" : "\u25BC";
+    dialog.style.height = subtasksExpanded ? "90vh" : "";
+    dialog.style.display = subtasksExpanded ? "flex" : "";
+    dialog.style.flexDirection = subtasksExpanded ? "column" : "";
+    dialog.style.overflow = subtasksExpanded ? "hidden" : "";
+    if (subtasksExpanded)
+      dragCtl?.refreshClamping();
+    updateDeleteVisibility(dragCtl?.getOrder() ?? subtasks.map((s) => s.line));
+  };
+  applySubtaskExpanded();
+  subtaskToggle?.addEventListener("click", () => {
+    subtasksExpanded = !subtasksExpanded;
+    applySubtaskExpanded();
+  });
+  const dialogWindow = dialog.ownerDocument.defaultView;
+  const onWindowResize = () => {
+    if (subtasksExpanded)
+      dragCtl?.refreshClamping();
+  };
+  dialogWindow?.addEventListener("resize", onWindowResize);
   const swatchWrap = dialog.querySelector("#k-color-swatches");
   const [applyBtn, cancelBtn] = dialog.querySelectorAll("#k-color-actions button");
-  const deleteBtn = dialog.querySelector("#k-color-delete");
   const currentHex = () => selectedHue === -2 ? null : selectedHue === -1 ? CARD_COLOR_GRAY : hslToHex(selectedHue, CARD_COLOR_SATURATION, CARD_COLOR_LIGHTNESS);
-  const updatePreview = () => {
-    const hex = currentHex();
-    if (hex === null) {
-      preview.style.border = "1px solid var(--background-modifier-border)";
-      preview.style.background = "var(--kb-card-bg,var(--background-secondary))";
-      return;
-    }
-    const { h, s, l } = hexToHsl(hex);
-    preview.style.border = `6px solid ${hslToHex(h, s, l / 2)}`;
-    preview.style.background = hex;
-  };
-  updatePreview();
   swatchWrap.addEventListener("click", (e) => {
     const btn = e.target.closest(".kb-color-swatch");
     if (!btn)
@@ -2269,20 +2672,28 @@ function showCardColorDialog(existingColor, onApply, onDelete) {
     swatchWrap.querySelectorAll(".kb-color-swatch").forEach((b) => {
       b.style.cssText = swatchBtnStyle(parseInt(b.dataset.hue, 10), parseInt(b.dataset.hue, 10) === selectedHue);
     });
-    updatePreview();
   });
-  applyBtn.onclick = () => {
+  const closeAndCleanup = () => {
+    dragCtl?.destroy();
+    dialogWindow?.removeEventListener("resize", onWindowResize);
     close();
-    onApply(currentHex());
   };
-  cancelBtn.onclick = close;
+  applyBtn.onclick = () => {
+    const finalOrder = dragCtl?.getOrder() ?? null;
+    closeAndCleanup();
+    onApply(currentHex());
+    if (finalOrder && (deletedGoLast || finalOrder.some((line, i) => line !== subtasks[i].line))) {
+      onReorder(finalOrder, deletedGoLast);
+    }
+  };
+  cancelBtn.onclick = closeAndCleanup;
   deleteBtn.onclick = () => {
-    close();
+    closeAndCleanup();
     onDelete();
   };
   dialog.addEventListener("keydown", (e) => {
     if (e.key === "Escape")
-      close();
+      closeAndCleanup();
   });
 }
 async function addSubtaskToCard(app, filePath, afterLine, cardLine, text) {
@@ -2346,6 +2757,17 @@ function buildParentPreviewHTML(parentRawText, config, vaultName) {
   }
   raw = raw.replace(/\s{2,}/g, " ").trim();
   return formatInlineEmphasis(linksToHtml(raw, vaultName));
+}
+function cleanSubtaskText(subText, config) {
+  const hasCheckbox = /^- \[[ xX]\] /.test(subText || "");
+  const formatted = (subText || "").replace(/\s*%%[\s\S]*?%%\s*/g, " ").replace(/\s*✅\d{4}-\d{2}-\d{2}/, "").trim().split(/\s+/).filter((w) => !(w.startsWith("#") && config.normKanban.includes(normalizeTag(w)))).join(" ").trim();
+  const raw = formatted.replace(/^- \[[ xX]\] /, "").replace(/^[-*+]\s+/, "").trim();
+  return { hasCheckbox, formatted, raw };
+}
+function renderSubtaskPreviewHTML(sub, config) {
+  const { hasCheckbox, formatted } = cleanSubtaskText(sub.text, config);
+  const subText = formatCardDateAnnotation(formatTriggerAnnotations(formatted, config.normRecurrent, false), true);
+  return renderCheckbox(subText, { isSub: false, showCheckbox: hasCheckbox });
 }
 function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
   let display = item.item.text;
@@ -3247,18 +3669,35 @@ function attachListeners(boardEl, config, app, refresh) {
     const filePath = card.dataset.file;
     const lineNum = parseInt(card.dataset.line, 10);
     const existing = card.dataset.color || null;
+    const vaultName = app.vault.getName();
+    const title = buildParentPreviewHTML(card.dataset.raw || "", config, vaultName);
+    let subs = [];
+    try {
+      subs = JSON.parse(card.dataset.subs || "[]");
+    } catch {
+    }
+    const visibleSubtasks = subs.filter((s) => !extractTags(s.text || "").some(isDeletedTag)).map((s) => {
+      const { raw } = cleanSubtaskText(s.text, config);
+      return {
+        line: s.line,
+        labelHtml: renderSubtaskPreviewHTML(s, config),
+        checked: /^- \[[xX]\] /.test(s.text || ""),
+        raw
+      };
+    });
     showCardColorDialog(
       existing,
+      title,
+      visibleSubtasks,
       async (hex) => {
         await updateCardColor(app, filePath, lineNum, hex);
         requestAnimationFrame(() => setTimeout(refresh, 50));
       },
+      async (newOrder, deletedGoLast) => {
+        await reorderSubtasks(app, filePath, subs, newOrder, deletedGoLast);
+        requestAnimationFrame(() => setTimeout(refresh, 50));
+      },
       async () => {
-        let subs = [];
-        try {
-          subs = JSON.parse(card.dataset.subs || "[]");
-        } catch {
-        }
         const lastLine = parseInt(card.dataset.lastSubLine || `${lineNum}`, 10);
         const changed = await deleteCardOrSubtask(
           app,
@@ -3273,6 +3712,32 @@ function attachListeners(boardEl, config, app, refresh) {
         );
         if (changed)
           requestAnimationFrame(() => setTimeout(refresh, 50));
+      },
+      // Same immediate-save semantics as the board's own inline subtask
+      // editor (onSubDblClick): commits right away, independent of this
+      // dialog's Apply/Cancel gate for color/reorder.
+      async (subLine, newText) => {
+        await editCardText(app, filePath, subLine, newText);
+        requestAnimationFrame(() => setTimeout(refresh, 50));
+        try {
+          const { lines } = await readFileLines(app, filePath);
+          const rawLine = (lines[subLine - 1] || "").replace(/^\s+/, "");
+          return renderSubtaskPreviewHTML({ text: rawLine }, config);
+        } catch {
+          return null;
+        }
+      },
+      // Clearing a subtask's text always marks it deleted (never removes the
+      // line outright, unlike the board's own clear-to-delete flow) — a
+      // physical removal would shift every later subtask's line number out
+      // from under `subs`, corrupting the reorder-on-Apply write above,
+      // which depends on those line numbers staying valid for the whole
+      // dialog session.
+      async (subLine) => {
+        const ok = await markLineDeleted(app, filePath, subLine, config);
+        if (ok)
+          requestAnimationFrame(() => setTimeout(refresh, 50));
+        return ok;
       }
     );
   }
