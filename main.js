@@ -5008,24 +5008,22 @@ var KanbanView = class extends import_obsidian2.ItemView {
     }
   }
   // Small, idempotent link to the companion "Kanban Statistics" view —
-  // appended once after the board; later re-renders find it already there
-  // and leave it alone (buildBoard only reconciles #kanban-wrapper, so
-  // appending here keeps it below the board).
+  // appended once into the search bar (after the Clear button) so it sits
+  // in the same row as the filter box, and left alone on later renders
+  // since #kb-search-bar itself is only built once.
   ensureStatsLink(container) {
-    if (container.querySelector("#kb-nav-links"))
+    const searchBar = container.querySelector("#kb-search-bar");
+    if (!searchBar || searchBar.querySelector("#kb-nav-links"))
       return;
-    const bar = container.createEl("div", { attr: { id: "kb-nav-links" } });
-    bar.style.cssText = "text-align:right;padding:6px 6px 2px;";
-    const navLink = (text, onClick) => {
-      const link = bar.createEl("a", { text });
-      link.style.cssText = "font-size:.85em;color:var(--kb-link, var(--text-muted));text-decoration:underline dotted;cursor:pointer;margin-left:14px;";
-      link.addEventListener("click", (e) => {
-        e.preventDefault();
-        onClick();
-      });
-    };
-    navLink("\u{1F4CA} Statistics", () => this.plugin.activateStatsView());
-    container.appendChild(bar);
+    const link = searchBar.createEl("a", {
+      text: "Statistics",
+      attr: { id: "kb-nav-links" }
+    });
+    link.style.cssText = "font-size:.9em;color:var(--kb-text);text-decoration:underline dotted;cursor:pointer;white-space:nowrap;";
+    link.addEventListener("click", (e) => {
+      e.preventDefault();
+      this.plugin.activateStatsView();
+    });
   }
   renderError(container, message) {
     container.createEl("h3", { text: "Kanban Configuration Error" });
