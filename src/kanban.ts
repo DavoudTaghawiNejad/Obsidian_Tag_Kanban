@@ -3299,7 +3299,7 @@ function wireSubtaskDrag(
     requestAnimationFrame(() => requestAnimationFrame(() => {
       autoResize();
       input.focus();
-      input.select();
+      input.setSelectionRange(input.value.length, input.value.length);
     }));
   };
   col.addEventListener("dblclick", onRowDblClick);
@@ -5481,7 +5481,7 @@ export function attachListeners(
     requestAnimationFrame(() => requestAnimationFrame(() => {
       autoResize();
       input.focus();
-      input.select();
+      input.setSelectionRange(input.value.length, input.value.length);
     }));
   }
 
@@ -5570,7 +5570,7 @@ export function attachListeners(
     requestAnimationFrame(() => requestAnimationFrame(() => {
       autoResize();
       input.focus();
-      input.select();
+      input.setSelectionRange(input.value.length, input.value.length);
     }));
   }
 

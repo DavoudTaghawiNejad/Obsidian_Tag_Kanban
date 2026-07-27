@@ -2443,7 +2443,7 @@ function wireSubtaskDrag(col, subtasks, onEditSubtask, onDeleteSubtask, onOrderC
     requestAnimationFrame(() => requestAnimationFrame(() => {
       autoResize();
       input.focus();
-      input.select();
+      input.setSelectionRange(input.value.length, input.value.length);
     }));
   };
   col.addEventListener("dblclick", onRowDblClick);
@@ -4169,7 +4169,7 @@ function attachListeners(boardEl, config, app, refresh) {
     requestAnimationFrame(() => requestAnimationFrame(() => {
       autoResize();
       input.focus();
-      input.select();
+      input.setSelectionRange(input.value.length, input.value.length);
     }));
   }
   async function onSubDblClick(e) {
@@ -4254,7 +4254,7 @@ function attachListeners(boardEl, config, app, refresh) {
     requestAnimationFrame(() => requestAnimationFrame(() => {
       autoResize();
       input.focus();
-      input.select();
+      input.setSelectionRange(input.value.length, input.value.length);
     }));
   }
   async function onToggle(e) {
