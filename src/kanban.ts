@@ -24,6 +24,7 @@ export interface KanbanConfig {
   dueColumn: string;
   laterColumn: string;
   recurrentColumn: string;
+  maybeSomedayColumns: string[];
   newTaskInsert: string;
   normKanban: string[];
   normDone: string;
@@ -31,6 +32,7 @@ export interface KanbanConfig {
   normDue: string;
   normLater: string;
   normRecurrent: string;
+  normMaybeSomeday: string[];
   normProject: string[];
   normActive: string[];
   projectsDocument: string;
@@ -79,8 +81,9 @@ export interface KanbanConfig {
 
 // A column's specific type (Done/Due/Later/Recurrent/Start/Project), if it
 // matches one — precedence order below, first match wins. A column that
-// matches none of these is classified only by Active/Non-active (see
-// resolveColumnColorHex).
+// matches none of these is classified only by Active/Non-active/Maybe Someday
+// (see resolveColumnColorHex) — Maybe Someday has no Hue of its own; it's a
+// Lightness offset off Column background's Hue, same mechanism as Non-active.
 type SpecificColumnType =
   "doneColumn" | "dueColumn" | "laterColumn" | "recurrentColumn" | "startColumn" | "projectColumns";
 
@@ -110,12 +113,16 @@ function classifySpecificColumnType(
 // Resolves a column's color: its specific type's own color (Done/Due/Later/
 // Recurrent/Start/Project), if that type's Hue is set; otherwise Column
 // background's Hue. Active columns use it at the general Lightness
-// unmodified; Non-active columns shift by nonActiveLightnessDelta. Active/
-// Non-active never fall through further (no separate Hue of their own).
+// unmodified; Non-active columns shift by nonActiveLightnessDelta; Maybe
+// Someday columns shift by their own maybeSomedayLightnessDelta instead — a
+// single shared offset covering every Maybe Someday column, the same way
+// nonActiveLightnessDelta covers every non-active column. None of the three
+// fall through further (no separate Hue of their own).
 function resolveColumnColorHex(
   norm: string,
   settings: KanbanSettings,
   normProject: string[],
+  normMaybeSomeday: string[],
   normActive: string[],
   generalHex: (hue: number | null | undefined) => string,
   hueHex: (hue: number | null | undefined, light: number) => string,
@@ -126,6 +133,9 @@ function resolveColumnColorHex(
     const hue = settings[SPECIFIC_HUE_FIELD[specific]] as number | null;
     if (hue !== null && hue !== undefined) return generalHex(hue);
   }
+  if (normMaybeSomeday.includes(norm)) {
+    return hueHex(settings.hueColumnBg, clamp(baseL + (settings.maybeSomedayLightnessDelta ?? 0), 0, 100));
+  }
   const isActive = normActive.includes(norm);
   const light = isActive ? baseL : clamp(baseL + (settings.nonActiveLightnessDelta ?? 0), 0, 100);
   return hueHex(settings.hueColumnBg, light);
@@ -133,10 +143,15 @@ function resolveColumnColorHex(
 
 export function buildConfig(settings: KanbanSettings): KanbanConfig {
   const normKanban = settings.kanban.map(normalizeTag);
+  // There can be more than one Maybe Someday column (like Project columns).
+  const normMaybeSomeday = (settings.maybeSomedayColumns || []).map(normalizeTag);
+  // Maybe Someday can never be an Active column, regardless of what's typed into
+  // the Active columns setting — filtered here so every consumer of normActive
+  // (coloring, the unmanaged-work highlight) automatically respects it.
   const normActive = (settings.activeColumns && settings.activeColumns.length
     ? settings.activeColumns
     : ["#next", "#important", "#today"]
-  ).map(normalizeTag);
+  ).map(normalizeTag).filter((t) => !normMaybeSomeday.includes(t));
   const normProject = (settings.projectColumns || []).map(normalizeTag);
 
   // Saturation and Lightness are shared by every color choice except text
@@ -191,6 +206,8 @@ export function buildConfig(settings: KanbanSettings): KanbanConfig {
     normLater: normalizeTag(settings.laterColumn),
     recurrentColumn: settings.recurrentColumn || "#recurrent",
     normRecurrent: normalizeTag(settings.recurrentColumn || "#recurrent"),
+    maybeSomedayColumns: settings.maybeSomedayColumns || [],
+    normMaybeSomeday,
     normProject,
     normActive,
     projectsDocument: settings.projectsDocument || "",
@@ -198,7 +215,7 @@ export function buildConfig(settings: KanbanSettings): KanbanConfig {
     columnColors: Object.fromEntries(
       (settings.kanban || []).map((tag) => {
         const norm = normalizeTag(tag);
-        return [norm, resolveColumnColorHex(norm, settings, normProject, normActive, generalHex, hueHex, baseL)];
+        return [norm, resolveColumnColorHex(norm, settings, normProject, normMaybeSomeday, normActive, generalHex, hueHex, baseL)];
       })
     ),
     columnMaxCards: Object.fromEntries(
@@ -4324,16 +4341,24 @@ export async function moveCheckedCardsToDone(app: App, paths: string[], config: 
 // real checkbox item (see isCheckboxItem) — plain note bullets inserted by
 // formatNoteLines are left alone. #deleted nodes are skipped: every date-based
 // stat downstream already excludes them, so stamping one would be a wasted write.
+// Cards still sitting in any Maybe Someday column are skipped too (and, since
+// the check short-circuits before recursing, so are their subtasks) — such a
+// card's "creation" doesn't count until it's actually pulled off the shelf.
+// Once it's moved to any other column, this same backfill stamps it with
+// today's date on the very next board render; a card that already had a
+// created date before landing in Maybe Someday keeps that date untouched.
 export async function stampMissingCreatedDates(app: App, paths: string[], config: KanbanConfig): Promise<void> {
   const items = await collectItems(app, paths, config);
   const n = new Date();
   const todayStr = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
   const CREATED_RE = /%% @created:\d{4}-\d{2}-\d{2} %%/;
   const isDeleted = (node: any) => (node.tags ?? []).some((t: string) => normalizeTag(t) === "deleted");
+  const isMaybeSomeday = (node: any) =>
+    (node.tags ?? []).some((t: string) => config.normMaybeSomeday.includes(normalizeTag(t)));
 
   const byFile = new Map<string, number[]>();
   const visit = (filePath: string, node: any, isSubtask: boolean) => {
-    if (isDeleted(node)) return;
+    if (isDeleted(node) || isMaybeSomeday(node)) return;
     if ((!isSubtask || isCheckboxItem(node)) && !CREATED_RE.test(node.text)) {
       if (!byFile.has(filePath)) byFile.set(filePath, []);
       byFile.get(filePath)!.push(node.line);

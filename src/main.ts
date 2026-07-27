@@ -10,6 +10,7 @@ export interface KanbanSettings {
   dueColumn: string;
   laterColumn: string;
   recurrentColumn: string;
+  maybeSomedayColumns: string[];
   newTaskInsert: string;
   parentPages: string[];
   allVaultNotes: boolean;
@@ -80,10 +81,12 @@ export interface KanbanSettings {
   // Per-column-type colors. Which type a column belongs to is derived from
   // Done/Due/Later/Recurrent/Start column, Project columns, and Active
   // columns below; "Non-active" is the fallback for everything else.
-  // Individual columns don't get their own color. Active/Non-active columns
-  // don't get their own Hue either — they always use Column background's
-  // Hue. Active uses it at the general Lightness unmodified; Non-active
-  // shifts by nonActiveLightnessDelta.
+  // Individual columns don't get their own color. Active/Non-active/Maybe
+  // Someday columns don't get their own Hue either — they always use Column
+  // background's Hue. Active uses it at the general Lightness unmodified;
+  // Non-active shifts by nonActiveLightnessDelta; Maybe Someday shifts by its
+  // own maybeSomedayLightnessDelta instead (one shared value for every Maybe
+  // Someday column, however many there are).
   hueDoneColumn: number | null;
   hueDueColumn: number | null;
   hueLaterColumn: number | null;
@@ -91,6 +94,7 @@ export interface KanbanSettings {
   hueStartColumn: number | null;
   hueProjectColumns: number | null;
   nonActiveLightnessDelta: number;
+  maybeSomedayLightnessDelta: number;
   // Per-column max card count, index-aligned with `kanban`. 0 / undefined = no limit.
   columnMaxCards: number[];
   // Font sizes — empty string means "use theme/browser default". Mobile fields are
@@ -152,15 +156,17 @@ export const DEFAULT_COLORS = {
   hueStartColumn: 232,
   hueProjectColumns: null as number | null,
   nonActiveLightnessDelta: 0,
+  maybeSomedayLightnessDelta: 0,
 };
 
 export const DEFAULT_SETTINGS: KanbanSettings = {
-  kanban: ["#todo", "#inprogress", "#today", "#later", "#due", "#done", "#recurrent"],
+  kanban: ["#todo", "#inprogress", "#today", "#later", "#due", "#done", "#recurrent", "#maybesomeday"],
   doneColumn: "#done",
   startColumn: "#today",
   dueColumn: "#due",
   laterColumn: "#later",
   recurrentColumn: "#recurrent",
+  maybeSomedayColumns: ["#maybesomeday"],
   newTaskInsert: "Tasks",
   parentPages: [],
   allVaultNotes: true,
@@ -732,6 +738,39 @@ class KanbanSettingTab extends PluginSettingTab {
 
     typeGroup((box) => {
       new Setting(box)
+        .setName("Maybe Someday columns")
+        .setDesc(
+          "Comma-separated tags for one or more Maybe Someday columns. Cards here are never treated as Active " +
+          "(see 'Active columns' below), and don't get a creation date stamped until they're moved out to another " +
+          "column — a card that already had a creation date before landing here keeps it."
+        )
+        .addText((text) =>
+          text
+            .setPlaceholder("#maybesomeday")
+            .setValue((this.plugin.settings.maybeSomedayColumns || []).join(", "))
+            .onChange(async (value) => {
+              this.plugin.settings.maybeSomedayColumns = value
+                .split(",")
+                .map((t) => t.trim())
+                .filter(Boolean);
+              await this.plugin.saveSettings();
+            })
+        );
+      plainSlider(
+        box,
+        "Maybe Someday lightness offset",
+        "Maybe Someday columns have no Hue of their own — like Non-active columns, they use Column background's " +
+        "Hue, shifted by this offset instead (one shared value covering every Maybe Someday column). Added to the " +
+        "general Lightness. Negative darkens, positive lightens, 0 = same as Active.",
+        () => s.maybeSomedayLightnessDelta,
+        (v) => { s.maybeSomedayLightnessDelta = v; },
+        "kb-lightness",
+        [-15, 15]
+      );
+    });
+
+    typeGroup((box) => {
+      new Setting(box)
         .setName("Project columns")
         .setDesc(
           "Comma-separated tags for columns where adding a new card automatically offers to create a linked Obsidian note. " +
@@ -757,7 +796,8 @@ class KanbanSettingTab extends PluginSettingTab {
       new Setting(box)
         .setName("Active columns")
         .setDesc(
-          "Comma-separated tags for columns considered 'active' work. A project card is highlighted as unmanaged work only when none of its sub-tasks are in one of these columns, and not all of its sub-tasks are in the Later or Recurrent columns."
+          "Comma-separated tags for columns considered 'active' work. A project card is highlighted as unmanaged work only when none of its sub-tasks are in one of these columns, and not all of its sub-tasks are in the Later or Recurrent columns. " +
+          "The Maybe Someday column is always excluded here, even if listed — it can never be Active."
         )
         .addText((text) => {
           const applyActiveColumns = (value: string) => {

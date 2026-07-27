@@ -55,8 +55,8 @@ interface EventDates {
   // completion still be traced back to which top-level card it belongs to,
   // even when a name like "child" repeats across several different cards.
   ancestors: HoverParent[];
-  // Its own tags include Later/Recurrent/#MaybeSomeday — excluded from
-  // "New this week" (tile, chart, and hover) regardless of isOwnCard.
+  // Its own tags include Later/Recurrent/a Maybe Someday column — excluded
+  // from "New this week" (tile, chart, and hover) regardless of isOwnCard.
   excludedFromNew: boolean;
 }
 
@@ -357,11 +357,14 @@ function collectOpenAndEvents(
 ): { events: EventDates[]; openCards: OpenCardRow[] } {
   const events: EventDates[] = [];
 
-  // "New this week" excludes creation events for anything tagged into one
-  // of these three columns — a #recurrent card cycles by design, and
-  // #later/"maybe someday" cards are deliberately parked, so their creation
-  // isn't "new work" in the sense that tile/chart is for.
-  const NEW_EXCLUDED_TAGS = new Set([config.normLater, config.normRecurrent, "maybesomeday"]);
+  // "New this week" excludes creation events for anything tagged into Later,
+  // Recurrent, or any Maybe Someday column — a #recurrent card cycles by
+  // design, and #later/Maybe Someday cards are deliberately parked, so their
+  // creation isn't "new work" in the sense that tile/chart is for. (Maybe
+  // Someday cards typically have no creation stamp at all until they leave
+  // that column — see stampMissingCreatedDates — but a card that already had
+  // one before landing there is still excluded while it sits parked.)
+  const NEW_EXCLUDED_TAGS = new Set([config.normLater, config.normRecurrent, ...config.normMaybeSomeday]);
 
   const visitForEvents = (node: any, ancestors: HoverParent[]) => {
     if (isDeletedNode(node)) return;
@@ -457,11 +460,11 @@ function collectOpenAndEvents(
   for (const card of items) collectChildKeys(card.filePath, card.item.subs);
 
   // "Open" excludes Done (obviously) as well as Recurrent (cycles by design,
-  // not aging backlog), Later, and #MaybeSomeday (both deliberately parked,
-  // not neglected) — a card sitting in any of these isn't "open work" in the
-  // sense the Open tasks / Avg. age tiles and the Oldest open tasks table
-  // are for.
-  const OPEN_EXCLUDED_TAGS = new Set([config.normDone, config.normLater, config.normRecurrent, "maybesomeday"]);
+  // not aging backlog), Later, and every Maybe Someday column (deliberately
+  // parked, not neglected) — a card sitting in any of these isn't "open work"
+  // in the sense the Open tasks / Avg. age tiles and the Oldest open tasks
+  // table are for.
+  const OPEN_EXCLUDED_TAGS = new Set([config.normDone, config.normLater, config.normRecurrent, ...config.normMaybeSomeday]);
 
   const openCards: OpenCardRow[] = [];
   for (const card of items) {
@@ -1235,12 +1238,12 @@ export class KanbanStatisticsView extends ItemView {
       tile(
         "Open tasks",
         String(totalOpen),
-        "Cards not in Done, Later, Recurrent, or tagged #MaybeSomeday — including subtasks that have been spun out into their own kanban column, counted the same as any other card."
+        "Cards not in Done, Later, Recurrent, or any Maybe Someday column — including subtasks that have been spun out into their own kanban column, counted the same as any other card."
       );
       tile(
         "New this week",
         String(newThisWeek),
-        "Cards or subtasks whose creation stamp falls in the last 7 days (today and the 6 days before it) — except ones tagged Later, Recurrent, or #MaybeSomeday."
+        "Cards or subtasks whose creation stamp falls in the last 7 days (today and the 6 days before it) — except ones tagged Later, Recurrent, or any Maybe Someday column."
       );
       tile("Done this week", String(doneThisWeek), "Cards or subtasks whose ✅ done-date stamp falls in the last 7 days (today and the 6 days before it).");
       tile("Avg. age of open (days)", String(avgAgeDays), "Average of (today − creation date) across open cards (same definition as the Open tasks tile) with a recorded creation date. Cards with no recorded date aren't counted.");
