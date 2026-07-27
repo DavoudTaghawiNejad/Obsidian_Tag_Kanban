@@ -10,7 +10,7 @@
  *   new Notice(...)      → same (global in plugin context)
  */
 
-import { AbstractInputSuggest, App, Notice, Platform, prepareFuzzySearch, renderResults, SearchResult, TFile, TFolder } from "obsidian";
+import { AbstractInputSuggest, App, Notice, Platform, prepareFuzzySearch, renderResults, Scope, SearchResult, TFile, TFolder } from "obsidian";
 import { KanbanSettings } from "./main";
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
@@ -1797,7 +1797,7 @@ async function deleteCardOrSubtask(
     return true;
   }
 
-  const choice = await showDeleteChoiceDialog();
+  const choice = await showDeleteChoiceDialog(app);
   if (choice === "mark") {
     await markDeleted();
     return true;
@@ -1882,7 +1882,7 @@ async function promoteSubToChild(
       normParent === config.normRecurrent &&
       !(hasRecurrentAnnotation(parsed.text, config.normRecurrent) && hasValidTriggers(parsed.text, config.normRecurrent))
     ) {
-      showRecurrentTriggerDialog(async (trigger) => {
+      showRecurrentTriggerDialog(app, async (trigger) => {
         await finish(trigger);
         requestAnimationFrame(() => setTimeout(refresh, 50));
       }, extractTriggerAnnotations(parsed.text, config.normRecurrent), extractRepeatSpec(parsed.text));
@@ -2343,7 +2343,7 @@ async function assignInitialOrders(
 
 let _dialogDoc: Document = document;
 
-function makeOverlay(id: string) {
+function makeOverlay(id: string, app: App) {
   const doc = _dialogDoc;
   doc.getElementById(id)?.remove();
   const overlay = doc.createElement("div");
@@ -2360,8 +2360,31 @@ function makeOverlay(id: string) {
   dialog.style.cssText =
     "background:var(--background-primary);color:var(--kb-dialog-text,var(--text-normal));padding:20px;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,.15);min-width:300px;max-width:400px;max-height:90vh;overflow-y:auto;text-align:center;";
   overlay.appendChild(dialog);
-  const close = () => overlay.remove();
-  return { overlay, dialog, close };
+
+  // This overlay is appended straight to <body>, outside any workspace
+  // leaf's own DOM — so it never gets a fair shot at a plain "keydown"
+  // listener for Escape: Obsidian's own global hotkey Scope intercepts
+  // Escape before it can bubble to a listener here, regardless of what
+  // element inside this dialog currently has focus. Obsidian's own Modal
+  // class works around exactly this by pushing its own Scope while open, so
+  // its registered handler runs first; we do the same here rather than
+  // relying on DOM bubbling, which is what actually let Escape leak through
+  // to Obsidian's default handling (closing/switching the active tab).
+  const scope = new Scope();
+  let onEscape: () => void = () => close();
+  scope.register([], "Escape", () => { onEscape(); return false; });
+  app.keymap.pushScope(scope);
+
+  const close = () => {
+    app.keymap.popScope(scope);
+    overlay.remove();
+  };
+  return {
+    overlay,
+    dialog,
+    close,
+    setEscapeHandler: (fn: () => void) => { onEscape = fn; },
+  };
 }
 
 function inputStyle() {
@@ -2504,24 +2527,25 @@ function afterLeadingHeading(lines: string[], insertAt: number): number {
   return lines[insertAt]?.match(/^#\s/) ? insertAt + 1 : insertAt;
 }
 
-function showConfirmDialog(message: string): Promise<boolean> {
+function showConfirmDialog(app: App, message: string): Promise<boolean> {
   return new Promise((resolve) => {
-    const { dialog, close } = makeOverlay("kanban-confirm-dialog");
+    const { dialog, close, setEscapeHandler } = makeOverlay("kanban-confirm-dialog", app);
     dialog.innerHTML = `
       <p style="margin:0 0 16px;font-size:.95em;">${message}</p>
       <div style="display:flex;gap:10px;justify-content:center;">${buttonHtml("Yes", true)}${buttonHtml("No", false)}</div>`;
     const [yesBtn, noBtn] = dialog.querySelectorAll("button");
     yesBtn.onclick = () => { close(); resolve(true); };
     noBtn.onclick = () => { close(); resolve(false); };
+    setEscapeHandler(() => { close(); resolve(false); });
   });
 }
 
 // Offered whenever a card or subtask is deleted (see deleteCardOrSubtask) —
 // deleteCardOrSubtask skips this entirely for a card that has subtasks,
 // since permanently removing one would silently discard all of them.
-function showDeleteChoiceDialog(): Promise<"mark" | "remove" | null> {
+function showDeleteChoiceDialog(app: App): Promise<"mark" | "remove" | null> {
   return new Promise((resolve) => {
-    const { dialog, close } = makeOverlay("kanban-delete-choice-dialog");
+    const { dialog, close, setEscapeHandler } = makeOverlay("kanban-delete-choice-dialog", app);
     dialog.innerHTML = `
       <p style="margin:0 0 16px;font-size:.95em;">Delete this task?</p>
       <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">${buttonHtml("Mark as deleted", true)}${buttonHtml("Delete permanently", false)}${buttonHtml("Cancel", false)}</div>`;
@@ -2529,7 +2553,7 @@ function showDeleteChoiceDialog(): Promise<"mark" | "remove" | null> {
     markBtn.onclick = () => { close(); resolve("mark"); };
     removeBtn.onclick = () => { close(); resolve("remove"); };
     cancelBtn.onclick = () => { close(); resolve(null); };
-    dialog.addEventListener("keydown", (e) => { if (e.key === "Escape") { close(); resolve(null); } });
+    setEscapeHandler(() => { close(); resolve(null); });
   });
 }
 
@@ -2603,7 +2627,7 @@ class DocSuggest extends AbstractInputSuggest<TFile> {
 // doc a card would land in anyway), with the native file-suggest popover
 // gated to open only on explicit request (arrow keys, Tab, or the browse
 // button) rather than on every keystroke or on focus.
-function wireDocNameField(app: App, dialog: HTMLElement, defaultDocName: string, onEnter: () => void): () => string {
+function wireDocNameField(app: App, dialog: HTMLElement, defaultDocName: string, onEnter: () => void, close: () => void, setEscapeHandler: (fn: () => void) => void): () => string {
   const docNameInput = dialog.querySelector("#k-doc-name") as HTMLInputElement;
   const browseBtn = dialog.querySelector("#k-doc-browse") as HTMLButtonElement;
   const spacer = dialog.querySelector("#k-doc-spacer") as HTMLElement;
@@ -2670,9 +2694,6 @@ function wireDocNameField(app: App, dialog: HTMLElement, defaultDocName: string,
         docNameInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
         forwardingEnter = false;
       }
-    } else if (e.key === "Escape") {
-      docSuggest.enabled = false;
-      docSuggest.close();
     } else if (e.key === "Enter" && !navigated && !forwardingEnter) {
       // An unnavigated Enter is ours to resolve (exact match or new document,
       // handled downstream in addNewItem), not the popover's default pick.
@@ -2685,11 +2706,25 @@ function wireDocNameField(app: App, dialog: HTMLElement, defaultDocName: string,
     }
   }, true);
 
+  // Same contract as every other field in these dialogs: Escape closes the
+  // dialog like Cancel. A first Escape while the suggest popover happens to
+  // be open just dismisses that popover instead, matching standard combobox
+  // behavior; a second Escape then falls through to closing — checked fresh
+  // against docSuggest.enabled each time this fires, not just once here.
+  setEscapeHandler(() => {
+    if (docSuggest.enabled) {
+      docSuggest.enabled = false;
+      docSuggest.close();
+    } else {
+      close();
+    }
+  });
+
   return () => docNameInput.value.trim();
 }
 
 function showInputDialog(title: string, app: App, defaultDocName: string, onSubmit: (v: string, notes: string, docName: string) => void) {
-  const { dialog, close } = makeOverlay("kanban-input-dialog");
+  const { dialog, close, setEscapeHandler } = makeOverlay("kanban-input-dialog", app);
   dialog.innerHTML = `<h3 style="margin:0 0 10px;font-size:1.1em;">${title}</h3>
     <input id="k-text" type="text" placeholder="Enter new item text..." style="${inputStyle()}" autofocus>
     <details id="k-notes-details" style="text-align:left;margin-bottom:10px;">
@@ -2705,7 +2740,7 @@ function showInputDialog(title: string, app: App, defaultDocName: string, onSubm
   const notesInput = dialog.querySelector("#k-notes") as HTMLTextAreaElement;
   const checklistBtn = dialog.querySelector("#k-notes-checklist") as HTMLButtonElement;
   let submit: () => void;
-  const getDocName = wireDocNameField(app, dialog, defaultDocName, () => submit());
+  const getDocName = wireDocNameField(app, dialog, defaultDocName, () => submit(), close, setEscapeHandler);
   submit = () => {
     const v = input.value.trim();
     const notes = notesInput.value;
@@ -2718,10 +2753,6 @@ function showInputDialog(title: string, app: App, defaultDocName: string, onSubm
   checklistBtn.onclick = () => insertChecklistPrefix(notesInput);
   input.onkeydown = (e) => {
     if (e.key === "Enter") submit();
-    if (e.key === "Escape") close();
-  };
-  notesInput.onkeydown = (e) => {
-    if (e.key === "Escape") close();
   };
   input.focus();
 }
@@ -2737,7 +2768,7 @@ function showDateDialog(
   opts: { withText?: boolean; defaultDocName?: string } = {}
 ) {
   const { withText, defaultDocName } = opts;
-  const { dialog, close } = makeOverlay(withText ? "kanban-later-add-dialog" : "kanban-date-dialog");
+  const { dialog, close, setEscapeHandler } = makeOverlay(withText ? "kanban-later-add-dialog" : "kanban-date-dialog", app);
   const presetBtnStyle = (active: boolean) =>
     `padding:4px 10px;border:none;border-radius:12px;cursor:pointer;font-size:.75em;` +
     (active
@@ -2767,7 +2798,7 @@ function showDateDialog(
   const checklistBtn = withText ? (dialog.querySelector("#k-notes-checklist") as HTMLButtonElement) : null;
   const dateInput = dialog.querySelector("#k-date") as HTMLInputElement;
   let submit: (useDate: boolean) => void;
-  const getDocName = withText ? wireDocNameField(app, dialog, defaultDocName ?? "", () => submit(true)) : null;
+  const getDocName = withText ? wireDocNameField(app, dialog, defaultDocName ?? "", () => submit(true), close, setEscapeHandler) : null;
 
   if (checklistBtn && notesInput) {
     checklistBtn.onclick = () => insertChecklistPrefix(notesInput);
@@ -2798,23 +2829,20 @@ function showDateDialog(
   [textInput, dateInput].forEach((el) => {
     el?.addEventListener("keydown", (e) => {
       if (e.key === "Enter") submit(true);
-      if (e.key === "Escape") close();
     });
-  });
-  notesInput?.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") close();
   });
   (textInput ?? dateInput).focus();
 }
 
 function showRecurrentTriggerDialog(
+  app: App,
   onSubmit: (trigger: string) => void,
   existingTriggers: string[] = [],
   existingRepeatSpec: RepeatSpec | null = null,
   opts: { allowNoTrigger?: boolean } = {}
 ) {
   const { allowNoTrigger = true } = opts;
-  const { dialog, close } = makeOverlay("kanban-recurrent-trigger-dialog");
+  const { dialog, close } = makeOverlay("kanban-recurrent-trigger-dialog", app);
 
   const WD_KEYS   = ['sun','mon','tue','wed','thu','fri','sat'];
   const WD_LABELS = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
@@ -3025,12 +3053,11 @@ function showRecurrentTriggerDialog(
   cancelBtn.onclick = close;
   dialog.addEventListener("keydown", (e) => {
     if (e.key === "Enter") submit();
-    if (e.key === "Escape") close();
   });
 }
 
-function showSubtaskDialog(onSubmit: (text: string) => void) {
-  const { dialog, close } = makeOverlay("kanban-subtask-dialog");
+function showSubtaskDialog(app: App, onSubmit: (text: string) => void) {
+  const { dialog, close } = makeOverlay("kanban-subtask-dialog", app);
   const prefill = CHECKLIST_MARK;
   dialog.innerHTML = `<h3 style="margin:0 0 10px;font-size:1.1em;">Add subtask</h3>
     <input id="k-task" type="text" placeholder="Enter subtask text..." style="${inputStyle()}" value="${prefill}">
@@ -3061,10 +3088,8 @@ function showSubtaskDialog(onSubmit: (text: string) => void) {
   cancelBtn.onclick = close;
   checklistBtn.onclick = () => insertChecklistPrefix(subsInput);
   taskInput.onkeydown = (e) => {
-    if (e.key === "Escape") close();
     if (e.key === "Enter") { e.preventDefault(); submit(); }
   };
-  subsInput.onkeydown = (e) => { if (e.key === "Escape") close(); };
   taskInput.focus();
   taskInput.setSelectionRange(taskInput.value.length, taskInput.value.length);
 }
@@ -3102,7 +3127,12 @@ function wireSubtaskDrag(
   // Fired with the current line order every time it changes (drag-drop,
   // setOrder, or a row being removed) — including once, synchronously,
   // during this initial setup.
-  onOrderChange: (currentOrder: number[]) => void
+  onOrderChange: (currentOrder: number[]) => void,
+  // Lets an in-progress row edit temporarily claim Escape for itself (cancel
+  // just this edit) instead of the dialog's own Escape handler (which would
+  // otherwise close/cancel the whole dialog) — see onRowDblClick below.
+  setEscapeHandler: (fn: () => void) => void,
+  dialogEscapeDefault: () => void
 ): { getOrder(): number[]; setOrder(newOrder: number[]): void; refreshClamping(): void; destroy(): void } {
   const doc = col.ownerDocument;
   const DRAG_DELAY = 200, MOVE_THRESHOLD = 6;
@@ -3235,6 +3265,9 @@ function wireSubtaskDrag(
     const finishEdit = async (save: boolean) => {
       if (finished || !label.contains(input)) return;
       finished = true;
+      // Hands Escape back to the dialog's own Cancel-equivalent action, now
+      // that this row edit (which claimed it below) is done.
+      setEscapeHandler(dialogEscapeDefault);
       label.style.pointerEvents = "none";
       const newText = input.value.trim();
       if (save && !newText) {
@@ -3251,15 +3284,14 @@ function wireSubtaskDrag(
       }
     };
 
+    // Claims Escape for the duration of this edit (cancel just this row)
+    // instead of the dialog's own Escape handler, which would otherwise
+    // close/cancel the whole dialog — see makeOverlay's Scope-based Escape
+    // handling for why a DOM-level stopPropagation() alone can't do this.
+    setEscapeHandler(() => finishEdit(false));
+
     input.addEventListener("keydown", async (ev) => {
       if (ev.key === "Enter") { ev.preventDefault(); await finishEdit(true); }
-      if (ev.key === "Escape") {
-        // Without this, Escape would also bubble up to the dialog's own
-        // Escape-to-close listener and dismiss the whole dialog instead of
-        // just cancelling this one edit.
-        ev.stopPropagation();
-        await finishEdit(false);
-      }
     });
     input.addEventListener("input", autoResize);
     input.addEventListener("blur", () => finishEdit(true));
@@ -3431,6 +3463,7 @@ function wireSubtaskDrag(
 }
 
 function showCardColorDialog(
+  app: App,
   existingColor: string | null,
   title: string,
   subtasks: { line: number; labelHtml: string; checked: boolean; hasCheckbox: boolean; raw: string }[],
@@ -3445,7 +3478,7 @@ function showCardColorDialog(
   onEditSubtask: (line: number, newText: string) => Promise<string | null>,
   onDeleteSubtask: (line: number) => Promise<boolean>
 ) {
-  const { dialog, close } = makeOverlay("kanban-card-color-dialog");
+  const { dialog, close, setEscapeHandler } = makeOverlay("kanban-card-color-dialog", app);
   dialog.style.maxWidth = "720px"; // 1.5x the original 480px
 
   const validExisting = existingColor && /^#[0-9a-fA-F]{6}$/.test(existingColor)
@@ -3522,7 +3555,7 @@ function showCardColorDialog(
   };
 
   const dragCtl = subtaskColEl
-    ? wireSubtaskDrag(subtaskColEl, subtasks, onEditSubtask, onDeleteSubtask, updateDeleteVisibility)
+    ? wireSubtaskDrag(subtaskColEl, subtasks, onEditSubtask, onDeleteSubtask, updateDeleteVisibility, setEscapeHandler, () => closeAndCleanup())
     : null;
   const infoByLine = new Map(subtasks.map((s) => [s.line, { hasCheckbox: s.hasCheckbox, checked: s.checked }]));
 
@@ -3610,7 +3643,7 @@ function showCardColorDialog(
   };
   cancelBtn.onclick = closeAndCleanup;
   deleteBtn.onclick = () => { closeAndCleanup(); onDelete(); };
-  dialog.addEventListener("keydown", (e) => { if (e.key === "Escape") closeAndCleanup(); });
+  setEscapeHandler(closeAndCleanup);
 }
 
 // Text is expected to already carry its own "-"/"- [ ]" formatting (from
@@ -4962,6 +4995,7 @@ export function attachListeners(
         };
       });
     showCardColorDialog(
+      app,
       existing,
       title,
       visibleSubtasks,
@@ -5071,7 +5105,7 @@ export function attachListeners(
 
     if (config.normProject.includes(targetNorm) && card.subs.length === 0 && !card.isPromoted) {
       const plainTitle = card.rawText.replace(/#[\w-]+/g, "").replace(/\s+/g, " ").trim();
-      const confirmed = await showConfirmDialog(`Create a project document for "${plainTitle}"?`);
+      const confirmed = await showConfirmDialog(app, `Create a project document for "${plainTitle}"?`);
       if (confirmed) {
         await moveCardToNewDoc(app, card.filePath, card.lineNum, plainTitle, targetTag, config);
         requestAnimationFrame(() => setTimeout(refresh, 50));
@@ -5102,7 +5136,7 @@ export function attachListeners(
       // already holding a properly-triggered recurring subtask — so moving it
       // around the board (drag, reorder, click-to-advance) never re-prompts.
       if (!hasValidTriggers(lineTxt, config.normRecurrent) && !hasChildWithTrigger(card.subs, config.normRecurrent)) {
-        showRecurrentTriggerDialog(async (trigger) => {
+        showRecurrentTriggerDialog(app, async (trigger) => {
           await moveToColumn(app, card.filePath, card.lineNum, card.originalTags, targetTag, false, config, null, newCalc.digits, newState, trigger, wasLater);
           await uncheckSubtasks(app, card.filePath, card.subs);
           requestAnimationFrame(() => setTimeout(refresh, 50));
@@ -5227,14 +5261,14 @@ export function attachListeners(
         requestAnimationFrame(() => setTimeout(refresh, 50));
     };
 
-    showSubtaskDialog(async (text) => {
+    showSubtaskDialog(app, async (text) => {
       if (isLater) {
         const defDate = getDefaultDate().toISOString().split("T")[0];
         showDateDialog("Set date for subtask", defDate, app, async (dateStr) => {
           await doAdd(dateStr ? appendToFirstLine(text, dateStr) : text);
         });
       } else if (isRecurrent) {
-        showRecurrentTriggerDialog(async (triggerStr) => {
+        showRecurrentTriggerDialog(app, async (triggerStr) => {
           const n = new Date();
           const skipStr = `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;
           const triggerPart = triggerStr ? ` ${triggerStr}` : '';
@@ -5313,7 +5347,7 @@ export function attachListeners(
     if (!card) return;
     const rawText = card.dataset.raw || "";
     const existing = extractTriggerAnnotations(rawText, config.normRecurrent);
-    showRecurrentTriggerDialog(async (newTriggerStr) => {
+    showRecurrentTriggerDialog(app, async (newTriggerStr) => {
       await updateCardTriggers(app, card.dataset.file!, parseInt(card.dataset.line!, 10), config.normRecurrent, newTriggerStr);
       requestAnimationFrame(() => setTimeout(refresh, 50));
     }, existing, extractRepeatSpec(rawText));
@@ -5417,7 +5451,13 @@ export function attachListeners(
         e.preventDefault();
         await finishEdit(true);
       }
-      if (e.key === "Escape") await finishEdit(false);
+      if (e.key === "Escape") {
+        // Not stopping propagation here would let the keydown bubble past the
+        // card/column/board out to Obsidian's own workspace handling — which
+        // is exactly what caused Escape to switch to a neighboring tab.
+        e.stopPropagation();
+        await finishEdit(false);
+      }
     });
     input.addEventListener("input", autoResize);
     input.addEventListener("blur", () => finishEdit(true));
@@ -5500,7 +5540,13 @@ export function attachListeners(
         e.preventDefault();
         await finishEdit(true);
       }
-      if (e.key === "Escape") await finishEdit(false);
+      if (e.key === "Escape") {
+        // Not stopping propagation here would let the keydown bubble past the
+        // card/column/board out to Obsidian's own workspace handling — which
+        // is exactly what caused Escape to switch to a neighboring tab.
+        e.stopPropagation();
+        await finishEdit(false);
+      }
     });
     input.addEventListener("input", autoResize);
     input.addEventListener("blur", () => finishEdit(true));
@@ -5660,7 +5706,7 @@ export function attachListeners(
       closeColPicker();
       clearSelection();
       touchCard = null;
-      const confirmed = await showConfirmDialog("Delete this card?");
+      const confirmed = await showConfirmDialog(app, "Delete this card?");
       if (!confirmed) return;
       const filePath = card.dataset.file!;
       const lineNum = parseInt(card.dataset.line!, 10);
@@ -6032,7 +6078,7 @@ export function attachListeners(
       }, { withText: true, defaultDocName });
     } else if (config.normRecurrent && norm === config.normRecurrent) {
       showInputDialog(title, app, defaultDocName, (text: string, notes: string, docName: string) => {
-        showRecurrentTriggerDialog(async (triggerStr) => {
+        showRecurrentTriggerDialog(app, async (triggerStr) => {
           const n = new Date();
           const skipStr = `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;
           // "No trigger" stays a plain container (no "@recurrent") — see

@@ -1298,7 +1298,7 @@ async function deleteCardOrSubtask(app, filePath, lineNum, lastLine, config, isC
     await markDeleted();
     return true;
   }
-  const choice = await showDeleteChoiceDialog();
+  const choice = await showDeleteChoiceDialog(app);
   if (choice === "mark") {
     await markDeleted();
     return true;
@@ -1348,7 +1348,7 @@ async function promoteSubToChild(app, filePath, subLineNum, parentTag, parentDig
       new import_obsidian.Notice(`Tagged subtask with ${parentTag.replace(/^#/, "").toUpperCase()}.`);
     };
     if (normParent === config.normRecurrent && !(hasRecurrentAnnotation(parsed.text, config.normRecurrent) && hasValidTriggers(parsed.text, config.normRecurrent))) {
-      showRecurrentTriggerDialog(async (trigger) => {
+      showRecurrentTriggerDialog(app, async (trigger) => {
         await finish(trigger);
         requestAnimationFrame(() => setTimeout(refresh, 50));
       }, extractTriggerAnnotations(parsed.text, config.normRecurrent), extractRepeatSpec(parsed.text));
@@ -1660,7 +1660,7 @@ async function assignInitialOrders(app, columns, _config) {
   }
 }
 var _dialogDoc = document;
-function makeOverlay(id) {
+function makeOverlay(id, app) {
   const doc = _dialogDoc;
   doc.getElementById(id)?.remove();
   const overlay = doc.createElement("div");
@@ -1670,8 +1670,25 @@ function makeOverlay(id) {
   const dialog = doc.createElement("div");
   dialog.style.cssText = "background:var(--background-primary);color:var(--kb-dialog-text,var(--text-normal));padding:20px;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,.15);min-width:300px;max-width:400px;max-height:90vh;overflow-y:auto;text-align:center;";
   overlay.appendChild(dialog);
-  const close = () => overlay.remove();
-  return { overlay, dialog, close };
+  const scope = new import_obsidian.Scope();
+  let onEscape = () => close();
+  scope.register([], "Escape", () => {
+    onEscape();
+    return false;
+  });
+  app.keymap.pushScope(scope);
+  const close = () => {
+    app.keymap.popScope(scope);
+    overlay.remove();
+  };
+  return {
+    overlay,
+    dialog,
+    close,
+    setEscapeHandler: (fn) => {
+      onEscape = fn;
+    }
+  };
 }
 function inputStyle() {
   return "width:100%;padding:8px;margin-bottom:10px;border:1px solid var(--background-modifier-border);border-radius:4px;box-sizing:border-box;background:var(--background-secondary);color:var(--text-normal);";
@@ -1776,9 +1793,9 @@ function sanitizeDocTitle(text) {
 function afterLeadingHeading(lines, insertAt) {
   return lines[insertAt]?.match(/^#\s/) ? insertAt + 1 : insertAt;
 }
-function showConfirmDialog(message) {
+function showConfirmDialog(app, message) {
   return new Promise((resolve) => {
-    const { dialog, close } = makeOverlay("kanban-confirm-dialog");
+    const { dialog, close, setEscapeHandler } = makeOverlay("kanban-confirm-dialog", app);
     dialog.innerHTML = `
       <p style="margin:0 0 16px;font-size:.95em;">${message}</p>
       <div style="display:flex;gap:10px;justify-content:center;">${buttonHtml("Yes", true)}${buttonHtml("No", false)}</div>`;
@@ -1791,11 +1808,15 @@ function showConfirmDialog(message) {
       close();
       resolve(false);
     };
+    setEscapeHandler(() => {
+      close();
+      resolve(false);
+    });
   });
 }
-function showDeleteChoiceDialog() {
+function showDeleteChoiceDialog(app) {
   return new Promise((resolve) => {
-    const { dialog, close } = makeOverlay("kanban-delete-choice-dialog");
+    const { dialog, close, setEscapeHandler } = makeOverlay("kanban-delete-choice-dialog", app);
     dialog.innerHTML = `
       <p style="margin:0 0 16px;font-size:.95em;">Delete this task?</p>
       <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">${buttonHtml("Mark as deleted", true)}${buttonHtml("Delete permanently", false)}${buttonHtml("Cancel", false)}</div>`;
@@ -1812,11 +1833,9 @@ function showDeleteChoiceDialog() {
       close();
       resolve(null);
     };
-    dialog.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") {
-        close();
-        resolve(null);
-      }
+    setEscapeHandler(() => {
+      close();
+      resolve(null);
     });
   });
 }
@@ -1882,7 +1901,7 @@ var DocSuggest = class extends import_obsidian.AbstractInputSuggest {
     this.inputEl.dispatchEvent(new Event("input"));
   }
 };
-function wireDocNameField(app, dialog, defaultDocName, onEnter) {
+function wireDocNameField(app, dialog, defaultDocName, onEnter, close, setEscapeHandler) {
   const docNameInput = dialog.querySelector("#k-doc-name");
   const browseBtn = dialog.querySelector("#k-doc-browse");
   const spacer = dialog.querySelector("#k-doc-spacer");
@@ -1927,9 +1946,6 @@ function wireDocNameField(app, dialog, defaultDocName, onEnter) {
         docNameInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
         forwardingEnter = false;
       }
-    } else if (e.key === "Escape") {
-      docSuggest.enabled = false;
-      docSuggest.close();
     } else if (e.key === "Enter" && !navigated && !forwardingEnter) {
       e.preventDefault();
       e.stopPropagation();
@@ -1939,10 +1955,18 @@ function wireDocNameField(app, dialog, defaultDocName, onEnter) {
       onEnter();
     }
   }, true);
+  setEscapeHandler(() => {
+    if (docSuggest.enabled) {
+      docSuggest.enabled = false;
+      docSuggest.close();
+    } else {
+      close();
+    }
+  });
   return () => docNameInput.value.trim();
 }
 function showInputDialog(title, app, defaultDocName, onSubmit) {
-  const { dialog, close } = makeOverlay("kanban-input-dialog");
+  const { dialog, close, setEscapeHandler } = makeOverlay("kanban-input-dialog", app);
   dialog.innerHTML = `<h3 style="margin:0 0 10px;font-size:1.1em;">${title}</h3>
     <input id="k-text" type="text" placeholder="Enter new item text..." style="${inputStyle()}" autofocus>
     <details id="k-notes-details" style="text-align:left;margin-bottom:10px;">
@@ -1957,7 +1981,7 @@ function showInputDialog(title, app, defaultDocName, onSubmit) {
   const notesInput = dialog.querySelector("#k-notes");
   const checklistBtn = dialog.querySelector("#k-notes-checklist");
   let submit;
-  const getDocName = wireDocNameField(app, dialog, defaultDocName, () => submit());
+  const getDocName = wireDocNameField(app, dialog, defaultDocName, () => submit(), close, setEscapeHandler);
   submit = () => {
     const v = input.value.trim();
     const notes = notesInput.value;
@@ -1972,18 +1996,12 @@ function showInputDialog(title, app, defaultDocName, onSubmit) {
   input.onkeydown = (e) => {
     if (e.key === "Enter")
       submit();
-    if (e.key === "Escape")
-      close();
-  };
-  notesInput.onkeydown = (e) => {
-    if (e.key === "Escape")
-      close();
   };
   input.focus();
 }
 function showDateDialog(title, defaultDate, app, onSubmit, opts = {}) {
   const { withText, defaultDocName } = opts;
-  const { dialog, close } = makeOverlay(withText ? "kanban-later-add-dialog" : "kanban-date-dialog");
+  const { dialog, close, setEscapeHandler } = makeOverlay(withText ? "kanban-later-add-dialog" : "kanban-date-dialog", app);
   const presetBtnStyle = (active) => `padding:4px 10px;border:none;border-radius:12px;cursor:pointer;font-size:.75em;` + (active ? `background:var(--kb-dialog-text, var(--text-normal));color:#fff;` : `background:var(--background-modifier-border);color:var(--text-normal);`);
   let selectedPreset = DATE_PRESETS.find(([, , fn]) => fn().toISOString().split("T")[0] === defaultDate)?.[0] ?? null;
   const presetBtnsHtml = DATE_PRESETS.map(
@@ -2006,7 +2024,7 @@ function showDateDialog(title, defaultDate, app, onSubmit, opts = {}) {
   const checklistBtn = withText ? dialog.querySelector("#k-notes-checklist") : null;
   const dateInput = dialog.querySelector("#k-date");
   let submit;
-  const getDocName = withText ? wireDocNameField(app, dialog, defaultDocName ?? "", () => submit(true)) : null;
+  const getDocName = withText ? wireDocNameField(app, dialog, defaultDocName ?? "", () => submit(true), close, setEscapeHandler) : null;
   if (checklistBtn && notesInput) {
     checklistBtn.onclick = () => insertChecklistPrefix(notesInput);
   }
@@ -2038,19 +2056,13 @@ function showDateDialog(title, defaultDate, app, onSubmit, opts = {}) {
     el?.addEventListener("keydown", (e) => {
       if (e.key === "Enter")
         submit(true);
-      if (e.key === "Escape")
-        close();
     });
-  });
-  notesInput?.addEventListener("keydown", (e) => {
-    if (e.key === "Escape")
-      close();
   });
   (textInput ?? dateInput).focus();
 }
-function showRecurrentTriggerDialog(onSubmit, existingTriggers = [], existingRepeatSpec = null, opts = {}) {
+function showRecurrentTriggerDialog(app, onSubmit, existingTriggers = [], existingRepeatSpec = null, opts = {}) {
   const { allowNoTrigger = true } = opts;
-  const { dialog, close } = makeOverlay("kanban-recurrent-trigger-dialog");
+  const { dialog, close } = makeOverlay("kanban-recurrent-trigger-dialog", app);
   const WD_KEYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
   const WD_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   const MO_KEYS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
@@ -2237,12 +2249,10 @@ function showRecurrentTriggerDialog(onSubmit, existingTriggers = [], existingRep
   dialog.addEventListener("keydown", (e) => {
     if (e.key === "Enter")
       submit();
-    if (e.key === "Escape")
-      close();
   });
 }
-function showSubtaskDialog(onSubmit) {
-  const { dialog, close } = makeOverlay("kanban-subtask-dialog");
+function showSubtaskDialog(app, onSubmit) {
+  const { dialog, close } = makeOverlay("kanban-subtask-dialog", app);
   const prefill = CHECKLIST_MARK;
   dialog.innerHTML = `<h3 style="margin:0 0 10px;font-size:1.1em;">Add subtask</h3>
     <input id="k-task" type="text" placeholder="Enter subtask text..." style="${inputStyle()}" value="${prefill}">
@@ -2269,16 +2279,10 @@ function showSubtaskDialog(onSubmit) {
   cancelBtn.onclick = close;
   checklistBtn.onclick = () => insertChecklistPrefix(subsInput);
   taskInput.onkeydown = (e) => {
-    if (e.key === "Escape")
-      close();
     if (e.key === "Enter") {
       e.preventDefault();
       submit();
     }
-  };
-  subsInput.onkeydown = (e) => {
-    if (e.key === "Escape")
-      close();
   };
   taskInput.focus();
   taskInput.setSelectionRange(taskInput.value.length, taskInput.value.length);
@@ -2297,7 +2301,7 @@ var CARD_COLOR_GRAY = "#888888";
 var CARD_COLOR_SATURATION = 65;
 var CARD_COLOR_LIGHTNESS = 55;
 var CARD_COLOR_NONE_SWATCH_BG = "repeating-linear-gradient(45deg, var(--background-modifier-border), var(--background-modifier-border) 3px, transparent 3px, transparent 7px)";
-function wireSubtaskDrag(col, subtasks, onEditSubtask, onDeleteSubtask, onOrderChange) {
+function wireSubtaskDrag(col, subtasks, onEditSubtask, onDeleteSubtask, onOrderChange, setEscapeHandler, dialogEscapeDefault) {
   const doc = col.ownerDocument;
   const DRAG_DELAY = 200, MOVE_THRESHOLD = 6;
   let order = subtasks.map((s) => s.line);
@@ -2408,6 +2412,7 @@ function wireSubtaskDrag(col, subtasks, onEditSubtask, onDeleteSubtask, onOrderC
       if (finished || !label.contains(input))
         return;
       finished = true;
+      setEscapeHandler(dialogEscapeDefault);
       label.style.pointerEvents = "none";
       const newText = input.value.trim();
       if (save && !newText) {
@@ -2425,14 +2430,11 @@ function wireSubtaskDrag(col, subtasks, onEditSubtask, onDeleteSubtask, onOrderC
         label.innerHTML = savedHTML;
       }
     };
+    setEscapeHandler(() => finishEdit(false));
     input.addEventListener("keydown", async (ev) => {
       if (ev.key === "Enter") {
         ev.preventDefault();
         await finishEdit(true);
-      }
-      if (ev.key === "Escape") {
-        ev.stopPropagation();
-        await finishEdit(false);
       }
     });
     input.addEventListener("input", autoResize);
@@ -2624,8 +2626,8 @@ function wireSubtaskDrag(col, subtasks, onEditSubtask, onDeleteSubtask, onOrderC
     }
   };
 }
-function showCardColorDialog(existingColor, title, subtasks, onApply, onReorder, onDelete, onEditSubtask, onDeleteSubtask) {
-  const { dialog, close } = makeOverlay("kanban-card-color-dialog");
+function showCardColorDialog(app, existingColor, title, subtasks, onApply, onReorder, onDelete, onEditSubtask, onDeleteSubtask) {
+  const { dialog, close, setEscapeHandler } = makeOverlay("kanban-card-color-dialog", app);
   dialog.style.maxWidth = "720px";
   const validExisting = existingColor && /^#[0-9a-fA-F]{6}$/.test(existingColor) ? existingColor : null;
   const existingHsl = validExisting ? hexToHsl(validExisting) : null;
@@ -2661,7 +2663,7 @@ function showCardColorDialog(existingColor, title, subtasks, onApply, onReorder,
     const orderChanged = currentOrder.length !== subtasks.length || currentOrder.some((line, i) => line !== subtasks[i]?.line);
     deleteBtn.style.display = subtasksExpanded || orderChanged ? "none" : "";
   };
-  const dragCtl = subtaskColEl ? wireSubtaskDrag(subtaskColEl, subtasks, onEditSubtask, onDeleteSubtask, updateDeleteVisibility) : null;
+  const dragCtl = subtaskColEl ? wireSubtaskDrag(subtaskColEl, subtasks, onEditSubtask, onDeleteSubtask, updateDeleteVisibility, setEscapeHandler, () => closeAndCleanup()) : null;
   const infoByLine = new Map(subtasks.map((s) => [s.line, { hasCheckbox: s.hasCheckbox, checked: s.checked }]));
   let deletedGoLast = false;
   subtaskSortBtn?.addEventListener("click", () => {
@@ -2734,10 +2736,7 @@ function showCardColorDialog(existingColor, title, subtasks, onApply, onReorder,
     closeAndCleanup();
     onDelete();
   };
-  dialog.addEventListener("keydown", (e) => {
-    if (e.key === "Escape")
-      closeAndCleanup();
-  });
+  setEscapeHandler(closeAndCleanup);
 }
 async function addSubtaskToCard(app, filePath, afterLine, cardLine, text) {
   try {
@@ -3730,6 +3729,7 @@ function attachListeners(boardEl, config, app, refresh) {
       };
     });
     showCardColorDialog(
+      app,
       existing,
       title,
       visibleSubtasks,
@@ -3835,7 +3835,7 @@ function attachListeners(boardEl, config, app, refresh) {
       return;
     if (config.normProject.includes(targetNorm) && card.subs.length === 0 && !card.isPromoted) {
       const plainTitle = card.rawText.replace(/#[\w-]+/g, "").replace(/\s+/g, " ").trim();
-      const confirmed = await showConfirmDialog(`Create a project document for "${plainTitle}"?`);
+      const confirmed = await showConfirmDialog(app, `Create a project document for "${plainTitle}"?`);
       if (confirmed) {
         await moveCardToNewDoc(app, card.filePath, card.lineNum, plainTitle, targetTag, config);
         requestAnimationFrame(() => setTimeout(refresh, 50));
@@ -3855,7 +3855,7 @@ function attachListeners(boardEl, config, app, refresh) {
       const { lines } = await readFileLines(app, card.filePath);
       const lineTxt = lines[card.lineNum - 1] || "";
       if (!hasValidTriggers(lineTxt, config.normRecurrent) && !hasChildWithTrigger(card.subs, config.normRecurrent)) {
-        showRecurrentTriggerDialog(async (trigger) => {
+        showRecurrentTriggerDialog(app, async (trigger) => {
           await moveToColumn(app, card.filePath, card.lineNum, card.originalTags, targetTag, false, config, null, newCalc.digits, newState, trigger, wasLater);
           await uncheckSubtasks(app, card.filePath, card.subs);
           requestAnimationFrame(() => setTimeout(refresh, 50));
@@ -3966,14 +3966,14 @@ function attachListeners(boardEl, config, app, refresh) {
       if (await addSubtaskToCard(app, filePath, afterLine, cardLine, text))
         requestAnimationFrame(() => setTimeout(refresh, 50));
     };
-    showSubtaskDialog(async (text) => {
+    showSubtaskDialog(app, async (text) => {
       if (isLater) {
         const defDate = getDefaultDate().toISOString().split("T")[0];
         showDateDialog("Set date for subtask", defDate, app, async (dateStr) => {
           await doAdd(dateStr ? appendToFirstLine(text, dateStr) : text);
         });
       } else if (isRecurrent) {
-        showRecurrentTriggerDialog(async (triggerStr) => {
+        showRecurrentTriggerDialog(app, async (triggerStr) => {
           const n = new Date();
           const skipStr = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
           const triggerPart = triggerStr ? ` ${triggerStr}` : "";
@@ -4052,7 +4052,7 @@ function attachListeners(boardEl, config, app, refresh) {
       return;
     const rawText = card.dataset.raw || "";
     const existing = extractTriggerAnnotations(rawText, config.normRecurrent);
-    showRecurrentTriggerDialog(async (newTriggerStr) => {
+    showRecurrentTriggerDialog(app, async (newTriggerStr) => {
       await updateCardTriggers(app, card.dataset.file, parseInt(card.dataset.line, 10), config.normRecurrent, newTriggerStr);
       requestAnimationFrame(() => setTimeout(refresh, 50));
     }, existing, extractRepeatSpec(rawText));
@@ -4150,8 +4150,10 @@ function attachListeners(boardEl, config, app, refresh) {
         e.preventDefault();
         await finishEdit(true);
       }
-      if (e.key === "Escape")
+      if (e.key === "Escape") {
+        e.stopPropagation();
         await finishEdit(false);
+      }
     });
     input.addEventListener("input", autoResize);
     input.addEventListener("blur", () => finishEdit(true));
@@ -4233,8 +4235,10 @@ function attachListeners(boardEl, config, app, refresh) {
         e2.preventDefault();
         await finishEdit(true);
       }
-      if (e2.key === "Escape")
+      if (e2.key === "Escape") {
+        e2.stopPropagation();
         await finishEdit(false);
+      }
     });
     input.addEventListener("input", autoResize);
     input.addEventListener("blur", () => finishEdit(true));
@@ -4366,7 +4370,7 @@ function attachListeners(boardEl, config, app, refresh) {
       closeColPicker();
       clearSelection();
       touchCard = null;
-      const confirmed = await showConfirmDialog("Delete this card?");
+      const confirmed = await showConfirmDialog(app, "Delete this card?");
       if (!confirmed)
         return;
       const filePath = card.dataset.file;
@@ -4735,7 +4739,7 @@ function attachListeners(boardEl, config, app, refresh) {
       }, { withText: true, defaultDocName });
     } else if (config.normRecurrent && norm === config.normRecurrent) {
       showInputDialog(title, app, defaultDocName, (text, notes, docName) => {
-        showRecurrentTriggerDialog(async (triggerStr) => {
+        showRecurrentTriggerDialog(app, async (triggerStr) => {
           const n = new Date();
           const skipStr = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
           const recurrentPart = triggerStr ? ` @${config.normRecurrent} ${triggerStr}` : "";
