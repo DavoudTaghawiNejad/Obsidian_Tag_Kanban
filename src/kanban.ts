@@ -3897,28 +3897,30 @@ function createCardHTML(
     `<span aria-hidden="true" style="float:right;width:${width}px;height:${TITLE_LINE_H}em;"></span>`;
 
   // A card's chosen highlight color always wins over the structural
-  // border/background rules below. The card fill uses the full color; the
-  // frame uses a half-lightness (darker) shade of the same color; and the
-  // title/meta text switches to white using the same threshold as column
-  // titles, so it stays readable against the fill. Computed here (before
-  // titleStyle/badge) so those explicit per-element colors — which would
-  // otherwise block inheritance from the card wrapper below — pick it up too.
-  // Falls back to the nearest ancestor's color (item.inheritedColor, set in
-  // parseFileEntries) when this card has none of its own — only relevant
-  // for a promoted sub-task getting its own top-level card here; the
-  // nested/unpromoted display in renderSub never applies a color at all.
+  // border rules below, but only as a frame — the fill stays the card's
+  // normal background and text stays the card's normal text color, so a
+  // colored card doesn't take over its surroundings (unlike the fill+frame
+  // combo this used to apply). Computed here (before titleStyle/badge) so
+  // those explicit per-element colors — which would otherwise block
+  // inheritance from the card wrapper below — pick it up too. When the
+  // card's own column has a background of the same color family
+  // (config.columnColors), a plain frame would blend into it and
+  // disappear, so it gets a thin white outline ring around it (a double
+  // frame) to stay visible. Falls back to the nearest ancestor's color
+  // (item.inheritedColor, set in parseFileEntries) when this card has none
+  // of its own — only relevant for a promoted sub-task getting its own
+  // top-level card here; the nested/unpromoted display in renderSub never
+  // applies a color at all.
   const cardColor = extractCardColor(item.item.text) || item.inheritedColor || null;
-  let frameColor = "";
-  let textColor = "var(--kb-text)";
+  const textColor = "var(--kb-text)";
+  let colorStyle = "";
   if (cardColor) {
-    const { h, s, l } = hexToHsl(cardColor);
-    frameColor = hslToHex(h, s, l / 2);
-    const configuredDarkText = (config.colorText && config.colorText.trim()) ? config.colorText.trim() : "#1a1a1a";
-    textColor = columnTitleTextColor(cardColor, configuredDarkText, config.colorColumnTitleDark, config.colorTextContrastThreshold);
+    const columnBg = config.columnColors[currentNorm] || "";
+    const needsSeparator = columnBg && sameColorFamily(cardColor, columnBg);
+    colorStyle = needsSeparator
+      ? `border:6px solid ${cardColor}!important;outline:3px solid #fff!important;`
+      : `border:6px solid ${cardColor}!important;`;
   }
-  const colorStyle = cardColor
-    ? `border:6px solid ${frameColor}!important;background:${cardColor}!important;color:${textColor}!important;`
-    : "";
 
   const titleStyle = `padding:6px 0;font-weight:${TITLE_FONT_WEIGHT};color:${textColor};text-align:left;line-height:${TITLE_LINE_H};${
     config.fontSizeCardTitle ? `font-size:${config.fontSizeCardTitle};` : ""
@@ -4104,6 +4106,20 @@ export function hexToHsl(hex: string): { h: number; s: number; l: number } {
     h *= 60;
   }
   return { h, s: s * 100, l: l * 100 };
+}
+
+// True when two colors read as "the same color" to a viewer — same hue
+// family (within 25°), or both effectively gray (low saturation). Used to
+// detect when a card's frame color would blend into its column's own
+// background, so createCardHTML knows to add a white separator ring.
+function sameColorFamily(hexA: string, hexB: string): boolean {
+  const a = hexToHsl(hexA);
+  const b = hexToHsl(hexB);
+  const grayA = a.s < 12;
+  const grayB = b.s < 12;
+  if (grayA || grayB) return grayA === grayB;
+  const d = Math.abs(a.h - b.h) % 360;
+  return (d > 180 ? 360 - d : d) <= 25;
 }
 
 export function buildColorCSS(config: KanbanConfig): string {

@@ -2889,15 +2889,13 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
   const TITLE_LINE_H = 1.5;
   const iconSpacer = (width) => `<span aria-hidden="true" style="float:right;width:${width}px;height:${TITLE_LINE_H}em;"></span>`;
   const cardColor = extractCardColor(item.item.text) || item.inheritedColor || null;
-  let frameColor = "";
-  let textColor = "var(--kb-text)";
+  const textColor = "var(--kb-text)";
+  let colorStyle = "";
   if (cardColor) {
-    const { h, s, l } = hexToHsl(cardColor);
-    frameColor = hslToHex(h, s, l / 2);
-    const configuredDarkText = config.colorText && config.colorText.trim() ? config.colorText.trim() : "#1a1a1a";
-    textColor = columnTitleTextColor(cardColor, configuredDarkText, config.colorColumnTitleDark, config.colorTextContrastThreshold);
+    const columnBg = config.columnColors[currentNorm] || "";
+    const needsSeparator = columnBg && sameColorFamily(cardColor, columnBg);
+    colorStyle = needsSeparator ? `border:6px solid ${cardColor}!important;outline:3px solid #fff!important;` : `border:6px solid ${cardColor}!important;`;
   }
-  const colorStyle = cardColor ? `border:6px solid ${frameColor}!important;background:${cardColor}!important;color:${textColor}!important;` : "";
   const titleStyle = `padding:6px 0;font-weight:${TITLE_FONT_WEIGHT};color:${textColor};text-align:left;line-height:${TITLE_LINE_H};${config.fontSizeCardTitle ? `font-size:${config.fontSizeCardTitle};` : ""}`;
   const bodyHTML = hasSubs ? `<div style="position:relative;">
          <div class="card-title" style="${titleStyle}cursor:pointer;"
@@ -3039,6 +3037,16 @@ function hexToHsl(hex) {
     h *= 60;
   }
   return { h, s: s * 100, l: l * 100 };
+}
+function sameColorFamily(hexA, hexB) {
+  const a = hexToHsl(hexA);
+  const b = hexToHsl(hexB);
+  const grayA = a.s < 12;
+  const grayB = b.s < 12;
+  if (grayA || grayB)
+    return grayA === grayB;
+  const d = Math.abs(a.h - b.h) % 360;
+  return (d > 180 ? 360 - d : d) <= 25;
 }
 function buildColorCSS(config) {
   const cv = (val, fb) => val && val.trim() ? val.trim() : fb;
