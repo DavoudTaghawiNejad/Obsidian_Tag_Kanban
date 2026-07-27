@@ -915,6 +915,12 @@ async function updateCardTriggers(app, filePath, lineNum, normRecurrent, newTrig
   lines[lineNum - 1] = setSkipDate(lines[lineNum - 1], skipStr);
   await writeFileLines(app, tFile, lines);
 }
+function parseLineMarker(line) {
+  const m = line.match(/^(-\s*\[[ xX]\]|[-*+])\s*(.*)$/);
+  if (!m)
+    return { hasCheckbox: false, text: line };
+  return { hasCheckbox: /\[[ xX]\]/.test(m[1]), text: m[2] };
+}
 async function editCardText(app, filePath, lineNum, newText) {
   try {
     const { tFile, lines } = await readFileLines(app, filePath);
@@ -933,7 +939,14 @@ async function editCardText(app, filePath, lineNum, newText) {
     const orderComment = orderMatch ? orderMatch[0] : "";
     const colorMatch = original.match(/%% @color:#[0-9a-fA-F]{6} %%/);
     const colorComment = colorMatch ? colorMatch[0] : "";
-    const parts = [indent + marker + newText.trim()];
+    const rawLines = newText.replace(/\r\n/g, "\n").split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+    const firstText = rawLines.length ? rawLines[0] : newText.trim();
+    const childIndent = indent + "	";
+    const childLines = rawLines.slice(1).map((l) => {
+      const { hasCheckbox, text } = parseLineMarker(l);
+      return `${childIndent}${hasCheckbox ? "- [ ] " : "- "}${text}`;
+    });
+    const parts = [indent + marker + firstText];
     if (tags)
       parts.push(tags);
     if (createdComment)
@@ -942,7 +955,7 @@ async function editCardText(app, filePath, lineNum, newText) {
       parts.push(orderComment);
     if (colorComment)
       parts.push(colorComment);
-    lines[lineNum - 1] = parts.join(" ");
+    lines.splice(lineNum - 1, 1, parts.join(" "), ...childLines);
     await writeFileLines(app, tFile, lines);
     return true;
   } catch (e) {
@@ -1690,6 +1703,21 @@ function makeOverlay(id, app) {
     }
   };
 }
+function withNewlineOnModEnter(app, input, autoResize) {
+  const scope = new import_obsidian.Scope();
+  scope.register(["Mod"], "Enter", () => {
+    const value = input.value;
+    const start = input.selectionStart ?? value.length;
+    const end = input.selectionEnd ?? value.length;
+    input.value = value.slice(0, start) + "\n" + value.slice(end);
+    const pos = start + 1;
+    input.setSelectionRange(pos, pos);
+    autoResize();
+    return false;
+  });
+  app.keymap.pushScope(scope);
+  return () => app.keymap.popScope(scope);
+}
 function inputStyle() {
   return "width:100%;padding:8px;margin-bottom:10px;border:1px solid var(--background-modifier-border);border-radius:4px;box-sizing:border-box;background:var(--background-secondary);color:var(--text-normal);";
 }
@@ -2301,7 +2329,7 @@ var CARD_COLOR_GRAY = "#888888";
 var CARD_COLOR_SATURATION = 65;
 var CARD_COLOR_LIGHTNESS = 55;
 var CARD_COLOR_NONE_SWATCH_BG = "repeating-linear-gradient(45deg, var(--background-modifier-border), var(--background-modifier-border) 3px, transparent 3px, transparent 7px)";
-function wireSubtaskDrag(col, subtasks, onEditSubtask, onDeleteSubtask, onOrderChange, setEscapeHandler, dialogEscapeDefault) {
+function wireSubtaskDrag(app, col, subtasks, onEditSubtask, onDeleteSubtask, onOrderChange, setEscapeHandler, dialogEscapeDefault) {
   const doc = col.ownerDocument;
   const DRAG_DELAY = 200, MOVE_THRESHOLD = 6;
   let order = subtasks.map((s) => s.line);
@@ -2407,11 +2435,13 @@ function wireSubtaskDrag(col, subtasks, onEditSubtask, onDeleteSubtask, onOrderC
     label.innerHTML = "";
     label.style.pointerEvents = "auto";
     label.appendChild(input);
+    const popModEnterScope = withNewlineOnModEnter(app, input, autoResize);
     let finished = false;
     const finishEdit = async (save) => {
       if (finished || !label.contains(input))
         return;
       finished = true;
+      popModEnterScope();
       setEscapeHandler(dialogEscapeDefault);
       label.style.pointerEvents = "none";
       const newText = input.value.trim();
@@ -2432,7 +2462,7 @@ function wireSubtaskDrag(col, subtasks, onEditSubtask, onDeleteSubtask, onOrderC
     };
     setEscapeHandler(() => finishEdit(false));
     input.addEventListener("keydown", async (ev) => {
-      if (ev.key === "Enter") {
+      if (ev.key === "Enter" && !ev.ctrlKey && !ev.metaKey) {
         ev.preventDefault();
         await finishEdit(true);
       }
@@ -2663,7 +2693,7 @@ function showCardColorDialog(app, existingColor, title, subtasks, onApply, onReo
     const orderChanged = currentOrder.length !== subtasks.length || currentOrder.some((line, i) => line !== subtasks[i]?.line);
     deleteBtn.style.display = subtasksExpanded || orderChanged ? "none" : "";
   };
-  const dragCtl = subtaskColEl ? wireSubtaskDrag(subtaskColEl, subtasks, onEditSubtask, onDeleteSubtask, updateDeleteVisibility, setEscapeHandler, () => closeAndCleanup()) : null;
+  const dragCtl = subtaskColEl ? wireSubtaskDrag(app, subtaskColEl, subtasks, onEditSubtask, onDeleteSubtask, updateDeleteVisibility, setEscapeHandler, () => closeAndCleanup()) : null;
   const infoByLine = new Map(subtasks.map((s) => [s.line, { hasCheckbox: s.hasCheckbox, checked: s.checked }]));
   let deletedGoLast = false;
   subtaskSortBtn?.addEventListener("click", () => {
@@ -4112,11 +4142,13 @@ function attachListeners(boardEl, config, app, refresh) {
     if (arrow)
       titleDiv.appendChild(arrow);
     titleDiv.onclick = null;
+    const popModEnterScope = withNewlineOnModEnter(app, input, autoResize);
     let finished = false;
     const finishEdit = async (save) => {
       if (finished || !titleDiv.contains(input))
         return;
       finished = true;
+      popModEnterScope();
       const newText = input.value.trim();
       if (card.querySelector("details")) {
         titleDiv.onclick = function() {
@@ -4154,7 +4186,7 @@ function attachListeners(boardEl, config, app, refresh) {
       }
     };
     input.addEventListener("keydown", async (e) => {
-      if (e.key === "Enter") {
+      if (e.key === "Enter" && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
         await finishEdit(true);
       }
@@ -4207,11 +4239,13 @@ function attachListeners(boardEl, config, app, refresh) {
     };
     subRow.innerHTML = "";
     subRow.appendChild(input);
+    const popModEnterScope = withNewlineOnModEnter(app, input, autoResize);
     let finished = false;
     const finishEdit = async (save) => {
       if (finished || !subRow.contains(input))
         return;
       finished = true;
+      popModEnterScope();
       const newText = input.value.trim();
       if (save && !newText) {
         const lastLine = parseInt(subRow.dataset.subLastLine || `${lineNum}`, 10);
@@ -4239,7 +4273,7 @@ function attachListeners(boardEl, config, app, refresh) {
       }
     };
     input.addEventListener("keydown", async (e2) => {
-      if (e2.key === "Enter") {
+      if (e2.key === "Enter" && !e2.ctrlKey && !e2.metaKey) {
         e2.preventDefault();
         await finishEdit(true);
       }

@@ -1243,6 +1243,16 @@ async function updateCardTriggers(
   await writeFileLines(app, tFile, lines);
 }
 
+// A line typed after a Ctrl+Enter newline (see onSubDblClick / onRowDblClick /
+// startTitleEdit) may lead with its own "- [ ]"/"- [x]"/"-"/"*"/"+" marker to
+// pick task-vs-bullet for the child line it becomes; plain text with no
+// marker just defaults to a bullet.
+function parseLineMarker(line: string): { hasCheckbox: boolean; text: string } {
+  const m = line.match(/^(-\s*\[[ xX]\]|[-*+])\s*(.*)$/);
+  if (!m) return { hasCheckbox: false, text: line };
+  return { hasCheckbox: /\[[ xX]\]/.test(m[1]), text: m[2] };
+}
+
 async function editCardText(
   app: App,
   filePath: string,
@@ -1267,12 +1277,27 @@ async function editCardText(
     const colorMatch = original.match(/%% @color:#[0-9a-fA-F]{6} %%/);
     const colorComment = colorMatch ? colorMatch[0] : "";
 
-    const parts = [indent + marker + newText.trim()];
+    // Ctrl+Enter while inline-editing inserts a literal newline instead of
+    // committing, so this line's text can spawn new child subtasks right
+    // under it: the first line replaces this line's own text as before, and
+    // every further line becomes its own nested line one indent level
+    // deeper — see parseLineMarker for how each one picks task vs bullet.
+    const rawLines = newText.replace(/\r\n/g, "\n").split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0);
+    const firstText = rawLines.length ? rawLines[0] : newText.trim();
+    const childIndent = indent + "\t";
+    const childLines = rawLines.slice(1).map((l) => {
+      const { hasCheckbox, text } = parseLineMarker(l);
+      return `${childIndent}${hasCheckbox ? "- [ ] " : "- "}${text}`;
+    });
+
+    const parts = [indent + marker + firstText];
     if (tags) parts.push(tags);
     if (createdComment) parts.push(createdComment);
     if (orderComment) parts.push(orderComment);
     if (colorComment) parts.push(colorComment);
-    lines[lineNum - 1] = parts.join(" ");
+    lines.splice(lineNum - 1, 1, parts.join(" "), ...childLines);
 
     await writeFileLines(app, tFile, lines);
     return true;
@@ -2387,6 +2412,33 @@ function makeOverlay(id: string, app: App) {
   };
 }
 
+// Ctrl+Enter (Cmd+Enter on Mac) is Obsidian's own "Follow link under cursor"
+// hotkey, resolved through app.keymap's Scope stack before a keydown ever
+// reaches a plain DOM listener here — the same reason the Scope above exists
+// to reclaim Escape for this file's own dialogs. Pushing a Scope that shadows
+// Mod+Enter for the lifetime of an inline text edit lets that combo insert a
+// newline instead of following a link; callers must pop it (call the
+// returned function) once editing ends, on every exit path.
+function withNewlineOnModEnter(
+  app: App,
+  input: HTMLTextAreaElement,
+  autoResize: () => void
+): () => void {
+  const scope = new Scope();
+  scope.register(["Mod"], "Enter", () => {
+    const value = input.value;
+    const start = input.selectionStart ?? value.length;
+    const end = input.selectionEnd ?? value.length;
+    input.value = value.slice(0, start) + "\n" + value.slice(end);
+    const pos = start + 1;
+    input.setSelectionRange(pos, pos);
+    autoResize();
+    return false;
+  });
+  app.keymap.pushScope(scope);
+  return () => app.keymap.popScope(scope);
+}
+
 function inputStyle() {
   return "width:100%;padding:8px;margin-bottom:10px;border:1px solid var(--background-modifier-border);border-radius:4px;box-sizing:border-box;background:var(--background-secondary);color:var(--text-normal);";
 }
@@ -3118,6 +3170,7 @@ const CARD_COLOR_NONE_SWATCH_BG =
 // touches this list's own DOM/local state; nothing is written to disk until
 // the caller reads getOrder() (on Apply).
 function wireSubtaskDrag(
+  app: App,
   col: HTMLElement,
   subtasks: { line: number; labelHtml: string; raw: string }[],
   // Same immediate-save semantics as the board's own subtask editor — see
@@ -3261,10 +3314,12 @@ function wireSubtaskDrag(
     label.style.pointerEvents = "auto";
     label.appendChild(input);
 
+    const popModEnterScope = withNewlineOnModEnter(app, input, autoResize);
     let finished = false;
     const finishEdit = async (save: boolean) => {
       if (finished || !label.contains(input)) return;
       finished = true;
+      popModEnterScope();
       // Hands Escape back to the dialog's own Cancel-equivalent action, now
       // that this row edit (which claimed it below) is done.
       setEscapeHandler(dialogEscapeDefault);
@@ -3291,7 +3346,7 @@ function wireSubtaskDrag(
     setEscapeHandler(() => finishEdit(false));
 
     input.addEventListener("keydown", async (ev) => {
-      if (ev.key === "Enter") { ev.preventDefault(); await finishEdit(true); }
+      if (ev.key === "Enter" && !ev.ctrlKey && !ev.metaKey) { ev.preventDefault(); await finishEdit(true); }
     });
     input.addEventListener("input", autoResize);
     input.addEventListener("blur", () => finishEdit(true));
@@ -3555,7 +3610,7 @@ function showCardColorDialog(
   };
 
   const dragCtl = subtaskColEl
-    ? wireSubtaskDrag(subtaskColEl, subtasks, onEditSubtask, onDeleteSubtask, updateDeleteVisibility, setEscapeHandler, () => closeAndCleanup())
+    ? wireSubtaskDrag(app, subtaskColEl, subtasks, onEditSubtask, onDeleteSubtask, updateDeleteVisibility, setEscapeHandler, () => closeAndCleanup())
     : null;
   const infoByLine = new Map(subtasks.map((s) => [s.line, { hasCheckbox: s.hasCheckbox, checked: s.checked }]));
 
@@ -5425,10 +5480,12 @@ export function attachListeners(
     // pass archived/moved content. titleDiv.contains(input) alone doesn't
     // catch this, since input stays a DOM child of titleDiv even once
     // titleDiv itself has been detached from the document.
+    const popModEnterScope = withNewlineOnModEnter(app, input, autoResize);
     let finished = false;
     const finishEdit = async (save: boolean) => {
       if (finished || !titleDiv.contains(input)) return;
       finished = true;
+      popModEnterScope();
       const newText = input.value.trim();
       if (card.querySelector("details")) {
         titleDiv.onclick = function () {
@@ -5463,7 +5520,7 @@ export function attachListeners(
     };
 
     input.addEventListener("keydown", async (e) => {
-      if (e.key === "Enter") {
+      if (e.key === "Enter" && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
         await finishEdit(true);
       }
@@ -5525,10 +5582,12 @@ export function attachListeners(
     // See the matching guard in startTitleEdit's finishEdit: refresh() detaches
     // this still-focused input, which fires another "blur" and would otherwise
     // re-enter here a second time.
+    const popModEnterScope = withNewlineOnModEnter(app, input, autoResize);
     let finished = false;
     const finishEdit = async (save: boolean) => {
       if (finished || !subRow.contains(input)) return;
       finished = true;
+      popModEnterScope();
       const newText = input.value.trim();
       if (save && !newText) {
         // Clearing a subtask's text asks whether to mark it #deleted (it then
@@ -5552,7 +5611,7 @@ export function attachListeners(
     };
 
     input.addEventListener("keydown", async (e) => {
-      if (e.key === "Enter") {
+      if (e.key === "Enter" && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
         await finishEdit(true);
       }
