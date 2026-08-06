@@ -1706,6 +1706,30 @@ async function moveCardToNewDoc(
 
 const ARCHIVE_CALLOUT_HEADER = "> [!note]- Archived";
 
+// Shared by archiveToSection and archiveDoneSubtasks below: locates a
+// title-only copy of a card already sitting in the Archived callout (left
+// there by "Archive done" on the Order-subtasks panel), so a later full
+// archive can replace it in place instead of adding a duplicate entry for
+// the same card. Matches on indent + bare text (TaskLine.text, i.e. ignoring
+// tags/checkbox/dates) since ticking the real card changes those but not its
+// text; indent is checked too so a subtask that happens to share the card's
+// title text is never mistaken for the card's own placeholder line.
+function findArchivedTitleLine(
+  lines: string[],
+  calloutIdx: number,
+  plainTitle: string,
+  indent: string
+): number {
+  if (calloutIdx < 0 || !plainTitle) return -1;
+  for (let i = calloutIdx + 1; i < lines.length; i++) {
+    const l = lines[i];
+    if (!l.startsWith("> ")) continue;
+    const parsed = parseTaskLine(l.slice(2));
+    if (parsed.indent === indent && parsed.text.trim() === plainTitle) return i;
+  }
+  return -1;
+}
+
 async function archiveToSection(
   app: App,
   filePath: string,
@@ -1790,11 +1814,22 @@ async function archiveToSection(
       // Move the whole card + its descendants into a collapsible "Archived"
       // callout at the end of the document, creating it if needed. The "-"
       // after the callout type makes it foldable and collapsed by default.
+      const mainParsedForMatch = parseTaskLine(lines[mainIdx]);
       const blockLines = lines.slice(mainIdx, endIdx + 1).map((l) => `> ${l}`);
       lines.splice(mainIdx, endIdx - mainIdx + 1);
 
       const calloutIdx = lines.findIndex((l) => l.trim() === ARCHIVE_CALLOUT_HEADER);
-      if (calloutIdx >= 0) {
+      const existingTitleIdx = calloutIdx >= 0
+        ? findArchivedTitleLine(lines, calloutIdx, mainParsedForMatch.text.trim(), mainParsedForMatch.indent)
+        : -1;
+
+      if (existingTitleIdx >= 0) {
+        // "Archive done" already left a title-only placeholder here (with its
+        // already-finished subtasks moved beneath it) — replace that single
+        // line with the real card + remaining subtree, landing them right
+        // where the placeholder was instead of duplicating the card.
+        lines.splice(existingTitleIdx, 1, ...blockLines);
+      } else if (calloutIdx >= 0) {
         lines.splice(calloutIdx + 1, 0, ...blockLines);
       } else {
         while (lines.length && lines[lines.length - 1].trim() === "") lines.pop();
@@ -1806,6 +1841,106 @@ async function archiveToSection(
     return true;
   } catch (e: any) {
     console.error("archiveToSection failed:", e);
+    return false;
+  }
+}
+
+// "Archive done" (Order-subtasks panel of the card dialog): unlike
+// archiveToSection above, the card itself is NOT archived — it stays active
+// on the board. This only peels off top-level subtasks that are themselves
+// checked and have no open (or malformed/plain-bullet) descendant anywhere
+// in their own subtree, moving each such subtree verbatim into the Archived
+// callout, underneath a title-only copy of the card. That copy is created
+// the first time this runs and reused on every later click (see
+// findArchivedTitleLine) — so calling this repeatedly as more subtasks
+// finish just appends each new batch, right after the title, without ever
+// duplicating the card. When the card is eventually fully archived via the
+// normal Archive button, archiveToSection finds this same copy and replaces
+// it in place with the real card (see the existingTitleIdx branch above).
+async function archiveDoneSubtasks(
+  app: App,
+  filePath: string,
+  cardLineNum: number,
+  subs: any[],
+  config: KanbanConfig
+): Promise<{ moved: number; titleAdded: boolean } | false> {
+  try {
+    const { tFile, lines } = await readFileLines(app, filePath);
+    const cardIdx = cardLineNum - 1;
+    if (cardIdx < 0 || cardIdx >= lines.length) return false;
+
+    const cardParsed = parseTaskLine(lines[cardIdx]);
+    const plainTitle = cardParsed.text.trim();
+    if (!plainTitle) return false;
+
+    // Same tag/order normalization archiveToSection's archiveLine applies to
+    // every line it moves into the archive (recurrence handling is
+    // deliberately left out here — a subtask being carved out into the
+    // archive is finished for good, not cycling back like a recurring card).
+    const stripMeta = (raw: string): string => {
+      const p = parseTaskLine(raw);
+      p.tags = p.tags.filter((t) => !config.normKanban.includes(normalizeTag(t)));
+      p.orderDigits = null;
+      p.orderState = null;
+      return serializeTaskLine(p);
+    };
+
+    // Candidates: top-level subtasks that are themselves checked, not
+    // deleted, and whose whole subtree has no open descendant — a subtask
+    // nested under a still-open sibling stays put until that sibling
+    // finishes too (see the "Recursion scope" decision for archive-done).
+    const chunks: { startIdx: number; endIdx: number }[] = [];
+    for (let i = 0; i < subs.length; i++) {
+      const s = subs[i];
+      const isDeleted = extractTags(s.text || "").some(isDeletedTag);
+      if (isDeleted || !isCheckboxItem(s) || !isCheckedItem(s) || hasUnchecked(s.subs || [])) continue;
+      const start = s.line;
+      const end = i < subs.length - 1
+        ? subs[i + 1].line - 1
+        : (maxSubLine(s.subs) || s.line);
+      chunks.push({ startIdx: start - 1, endIdx: end - 1 });
+    }
+
+    const calloutIdxBefore = lines.findIndex((l) => l.trim() === ARCHIVE_CALLOUT_HEADER);
+    const alreadyCopied = findArchivedTitleLine(lines, calloutIdxBefore, plainTitle, cardParsed.indent) >= 0;
+    if (!chunks.length && alreadyCopied) return { moved: 0, titleAdded: false };
+
+    // Capture + transform the moved text before touching the array, then
+    // remove chunks bottom-to-top so earlier chunks' indices stay valid.
+    const movedLines: string[] = chunks.flatMap((c) =>
+      lines.slice(c.startIdx, c.endIdx + 1).map((l) => `> ${stripMeta(l)}`)
+    );
+    for (let i = chunks.length - 1; i >= 0; i--) {
+      lines.splice(chunks[i].startIdx, chunks[i].endIdx - chunks[i].startIdx + 1);
+    }
+
+    // Re-locate (indices shifted by the removals above) — or create — the
+    // callout and this card's title-only entry within it. cardIdx itself is
+    // untouched by those removals: every candidate line lives after the
+    // card in the file, so nothing at or before cardIdx ever shifts.
+    const calloutIdx = lines.findIndex((l) => l.trim() === ARCHIVE_CALLOUT_HEADER);
+    let titleIdx = findArchivedTitleLine(lines, calloutIdx, plainTitle, cardParsed.indent);
+    let titleAdded = false;
+
+    if (titleIdx < 0) {
+      const titleLine = `> ${stripMeta(lines[cardIdx])}`;
+      if (calloutIdx >= 0) {
+        lines.splice(calloutIdx + 1, 0, titleLine);
+        titleIdx = calloutIdx + 1;
+      } else {
+        while (lines.length && lines[lines.length - 1].trim() === "") lines.pop();
+        lines.push("", ARCHIVE_CALLOUT_HEADER, titleLine);
+        titleIdx = lines.length - 1;
+      }
+      titleAdded = true;
+    }
+
+    if (movedLines.length) lines.splice(titleIdx + 1, 0, ...movedLines);
+
+    await writeFileLines(app, tFile, lines);
+    return { moved: chunks.length, titleAdded };
+  } catch (e: any) {
+    console.error("archiveDoneSubtasks failed:", e);
     return false;
   }
 }
@@ -3548,7 +3683,12 @@ function showCardColorDialog(
   // numbers the dialog captured at open time always stay valid for the
   // eventual reorder-on-Apply write.
   onEditSubtask: (line: number, newText: string) => Promise<string | null>,
-  onDeleteSubtask: (line: number) => Promise<boolean>
+  onDeleteSubtask: (line: number) => Promise<boolean>,
+  // Same immediate-save semantics as onDelete below: fires right away and
+  // closes the dialog (moved/removed subtask lines make every line number
+  // this dialog captured at open time stale, so continuing to drag-reorder
+  // afterward wouldn't be safe).
+  onArchiveDoneSubtasks: () => void
 ) {
   const { dialog, close, setEscapeHandler } = makeOverlay("kanban-card-color-dialog", app);
   dialog.style.maxWidth = "720px"; // 1.5x the original 480px
@@ -3590,7 +3730,10 @@ function showCardColorDialog(
         <span id="k-subtask-arrow" style="font-size:1.1em;line-height:1;color:var(--kb-accent);">▼</span>
         <span>Order subtasks</span>
       </div>
-      <button id="k-subtask-sort" type="button" style="${sortBtnStyle}" title="Move all done subtasks below the open ones">Open → Done</button>
+      <div id="k-subtask-btnrow" style="display:flex;gap:8px;flex-wrap:wrap;flex-shrink:0;">
+        <button id="k-subtask-sort" type="button" style="${sortBtnStyle}" title="Move all done subtasks below the open ones">Open → Done</button>
+        <button id="k-subtask-archive-done" type="button" style="${sortBtnStyle}" title="Copy this card's title to the archive (if not already there), then move its fully-done subtasks underneath it">Archive done</button>
+      </div>
       <div id="k-subtask-col" style="flex:1;min-height:0;overflow-y:auto;padding:8px;border:1px solid var(--background-modifier-border);border-radius:8px;background:var(--background-secondary);display:flex;flex-direction:column;"></div>
     </div>` : "";
 
@@ -3607,6 +3750,8 @@ function showCardColorDialog(
   const subtaskToggle = dialog.querySelector<HTMLElement>("#k-subtask-toggle");
   const subtaskArrow = dialog.querySelector<HTMLElement>("#k-subtask-arrow");
   const subtaskSortBtn = dialog.querySelector<HTMLButtonElement>("#k-subtask-sort");
+  const subtaskArchiveDoneBtn = dialog.querySelector<HTMLButtonElement>("#k-subtask-archive-done");
+  const subtaskBtnRow = dialog.querySelector<HTMLElement>("#k-subtask-btnrow");
   const deleteBtn = dialog.querySelector("#k-color-delete") as HTMLButtonElement;
 
   // Full-height, flex-column dialog layout only while the subtask section is
@@ -3653,10 +3798,15 @@ function showCardColorDialog(
     deletedGoLast = true;
   });
 
+  subtaskArchiveDoneBtn?.addEventListener("click", () => {
+    closeAndCleanup();
+    onArchiveDoneSubtasks();
+  });
+
   const applySubtaskExpanded = () => {
     if (!subtaskColEl || !subtaskSection || !subtaskArrow) return;
     subtaskColEl.style.display = subtasksExpanded ? "flex" : "none";
-    if (subtaskSortBtn) subtaskSortBtn.style.display = subtasksExpanded ? "block" : "none";
+    if (subtaskBtnRow) subtaskBtnRow.style.display = subtasksExpanded ? "flex" : "none";
     subtaskSection.style.flex = subtasksExpanded ? "1 1 auto" : "0 0 auto";
     subtaskArrow.textContent = subtasksExpanded ? "▲" : "▼";
     dialog.style.height = subtasksExpanded ? "90vh" : "";
@@ -5133,6 +5283,17 @@ export function attachListeners(
         const ok = await markLineDeleted(app, filePath, subLine, config);
         if (ok) requestAnimationFrame(() => setTimeout(refresh, 50));
         return ok;
+      },
+      () => {
+        archiveDoneSubtasks(app, filePath, lineNum, subs, config).then((result) => {
+          if (!result) return;
+          const parts: string[] = [];
+          if (result.titleAdded) parts.push("Added card to archive.");
+          if (result.moved) parts.push(`Archived ${result.moved} done subtask${result.moved === 1 ? "" : "s"}.`);
+          if (!parts.length) parts.push("Nothing to archive.");
+          new Notice(parts.join(" "));
+          requestAnimationFrame(() => setTimeout(refresh, 50));
+        });
       }
     );
   }
