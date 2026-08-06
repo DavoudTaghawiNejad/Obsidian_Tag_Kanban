@@ -3773,6 +3773,7 @@ function attachListeners(boardEl, config, app, refresh) {
     if (!toEl?.closest(".kanban-card"))
       clearHighlights();
   }
+  const isNarrowNow = () => boardEl.dataset.narrow === "1";
   const normalizeHaystack = (s) => s.toLowerCase().replace(/[*_`]/g, "").replace(/\s+/g, "");
   const normalizeQuery = (s) => s.toLowerCase().replace(/\s+/g, "");
   const wildcardToRegExp = (query) => {
@@ -3802,6 +3803,26 @@ function attachListeners(boardEl, config, app, refresh) {
     }
     return topParent;
   };
+  const restoreNarrowActiveColumn = () => {
+    if (!isNarrowNow())
+      return;
+    const activeNorm = boardEl.querySelector(
+      '[data-col-norm][data-col-active="1"]'
+    )?.dataset.colNorm;
+    boardEl.querySelectorAll("[data-col-container]").forEach((colDiv) => {
+      colDiv.style.display = colDiv.dataset.colContainer === activeNorm ? "block" : "none";
+    });
+  };
+  const showNarrowColumnsWithMatches = () => {
+    if (!isNarrowNow())
+      return;
+    boardEl.querySelectorAll("[data-col-container]").forEach((colDiv) => {
+      const anyVisible = Array.from(colDiv.querySelectorAll(".kanban-card")).some(
+        (c) => c.style.display !== "none"
+      );
+      colDiv.style.display = anyVisible ? "block" : "none";
+    });
+  };
   const applyFilter = () => {
     const searchInput = boardEl.querySelector("#kb-search-input");
     const query = normalizeQuery(searchInput?.value ?? "");
@@ -3810,6 +3831,7 @@ function attachListeners(boardEl, config, app, refresh) {
       allCards.forEach((c) => {
         c.style.display = "";
       });
+      restoreNarrowActiveColumn();
       return;
     }
     const regex = wildcardToRegExp(query);
@@ -3828,6 +3850,7 @@ function attachListeners(boardEl, config, app, refresh) {
       const show = matches.get(card) || familyMatches.has(rootOf.get(card));
       card.style.display = show ? "" : "none";
     }
+    showNarrowColumnsWithMatches();
   };
   const searchInputEl = boardEl.querySelector("#kb-search-input");
   const searchClearEl = boardEl.querySelector("#kb-search-clear");
@@ -4431,10 +4454,6 @@ function attachListeners(boardEl, config, app, refresh) {
   let panStartY = 0;
   let panScrollStart = 0;
   let panScrollTopStart = 0;
-  const isNarrowNow = () => {
-    const w = document.getElementById("kanban-wrapper");
-    return w ? w.dataset.narrow === "1" : false;
-  };
   const closeColPicker = () => {
     colPickerOverlay?.remove();
     colPickerOverlay = null;

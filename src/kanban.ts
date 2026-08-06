@@ -5129,6 +5129,11 @@ export function attachListeners(
     if (!toEl?.closest(".kanban-card")) clearHighlights();
   }
 
+  // boardEl *is* #kanban-wrapper (see KanbanView.renderBoard) — read its
+  // dataset directly rather than re-querying by id through the global
+  // `document`, which resolves to the wrong window for a popped-out board.
+  const isNarrowNow = () => boardEl.dataset.narrow === "1";
+
   // ── Search / filter ──
   // Strips markdown emphasis markers and all whitespace from card text so
   // "text hig" and "texthig" both match "...**higlightedguy**..." — words
@@ -5175,6 +5180,35 @@ export function attachListeners(
     return topParent;
   };
 
+  // Narrow (single-column/phone) layout normally shows only the active tab's
+  // column, hiding the rest via colDiv display:none — great for browsing, but
+  // it would hide filter matches sitting in every other column. While a query
+  // is active every column that still has a visible card is shown instead, so
+  // results appear as one long list divided by their own column headers (each
+  // keeping its own background color, since that's a CSS rule keyed off
+  // data-col-container — untouched here) stacked in board order (columns are
+  // already in that order in the DOM; only display: toggles). Cleared back to
+  // the single active tab once the query empties out.
+  const restoreNarrowActiveColumn = () => {
+    if (!isNarrowNow()) return;
+    const activeNorm = boardEl.querySelector<HTMLElement>(
+      '[data-col-norm][data-col-active="1"]'
+    )?.dataset.colNorm;
+    boardEl.querySelectorAll<HTMLElement>("[data-col-container]").forEach((colDiv) => {
+      colDiv.style.display = colDiv.dataset.colContainer === activeNorm ? "block" : "none";
+    });
+  };
+
+  const showNarrowColumnsWithMatches = () => {
+    if (!isNarrowNow()) return;
+    boardEl.querySelectorAll<HTMLElement>("[data-col-container]").forEach((colDiv) => {
+      const anyVisible = Array.from(colDiv.querySelectorAll<HTMLElement>(".kanban-card")).some(
+        (c) => c.style.display !== "none"
+      );
+      colDiv.style.display = anyVisible ? "block" : "none";
+    });
+  };
+
   // Cards that don't match the query are hidden, unless another card in the
   // same family (see familyRootOf) does match — then the whole family stays
   // visible, so context (parent/siblings) around a hit is never cut off.
@@ -5185,6 +5219,7 @@ export function attachListeners(
 
     if (!query) {
       allCards.forEach((c) => { c.style.display = ""; });
+      restoreNarrowActiveColumn();
       return;
     }
 
@@ -5204,6 +5239,8 @@ export function attachListeners(
       const show = matches.get(card) || familyMatches.has(rootOf.get(card)!);
       card.style.display = show ? "" : "none";
     }
+
+    showNarrowColumnsWithMatches();
   };
 
   const searchInputEl = boardEl.querySelector<HTMLInputElement>("#kb-search-input");
@@ -5854,11 +5891,6 @@ export function attachListeners(
   let panStartY = 0;
   let panScrollStart = 0;
   let panScrollTopStart = 0;
-
-  const isNarrowNow = () => {
-    const w = document.getElementById("kanban-wrapper");
-    return w ? w.dataset.narrow === "1" : false;
-  };
 
   const closeColPicker = () => {
     colPickerOverlay?.remove();
