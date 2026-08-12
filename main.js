@@ -3701,7 +3701,7 @@ function attachListeners(boardEl, config, app, refresh) {
         nearest = slot;
       }
     });
-    document.querySelectorAll(".insert-slot").forEach(
+    ownerDoc().querySelectorAll(".insert-slot").forEach(
       (s) => s.style.borderTopColor = "transparent"
     );
     if (nearest) {
@@ -5040,6 +5040,7 @@ function attachListeners(boardEl, config, app, refresh) {
     boardEl.removeEventListener("click", onSubCheckClick);
     boardEl.removeEventListener("click", onDateLabelClick);
     boardEl.removeEventListener("click", onTriggerLabelClick);
+    boardEl.removeEventListener("click", onParentLinkClick);
     boardEl.removeEventListener("click", onCardClick);
     boardEl.removeEventListener("click", onAddSubClick);
     boardEl.removeEventListener("click", onPromoteClick);
@@ -5132,8 +5133,10 @@ var KanbanView = class extends import_obsidian2.ItemView {
     }, next.getTime() - now.getTime());
   }
   scheduleRefresh(delay) {
-    if (this.isRefreshing)
+    if (this.isRefreshing) {
+      this.refreshPending = true;
       return;
+    }
     if (this.debounceTimer)
       clearTimeout(this.debounceTimer);
     this.debounceTimer = setTimeout(() => this.renderBoard(), delay);

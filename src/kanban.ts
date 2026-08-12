@@ -5050,7 +5050,7 @@ export function attachListeners(
         nearest = slot;
       }
     });
-    document.querySelectorAll<HTMLElement>(".insert-slot").forEach(
+    ownerDoc().querySelectorAll<HTMLElement>(".insert-slot").forEach(
       (s) => (s.style.borderTopColor = "transparent")
     );
     if (nearest) {
@@ -6526,6 +6526,7 @@ export function attachListeners(
     boardEl.removeEventListener("click", onSubCheckClick);
     boardEl.removeEventListener("click", onDateLabelClick);
     boardEl.removeEventListener("click", onTriggerLabelClick);
+    boardEl.removeEventListener("click", onParentLinkClick);
     boardEl.removeEventListener("click", onCardClick);
     boardEl.removeEventListener("click", onAddSubClick);
     boardEl.removeEventListener("click", onPromoteClick);

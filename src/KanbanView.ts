@@ -92,7 +92,13 @@ export class KanbanView extends ItemView {
   }
 
   private scheduleRefresh(delay: number) {
-    if (this.isRefreshing) return;
+    // A render already in flight will pick this up itself (see renderBoard's
+    // own refreshPending queue) — returning here without setting that flag
+    // would otherwise drop this request on the floor entirely.
+    if (this.isRefreshing) {
+      this.refreshPending = true;
+      return;
+    }
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
     this.debounceTimer = setTimeout(() => this.renderBoard(), delay);
   }
