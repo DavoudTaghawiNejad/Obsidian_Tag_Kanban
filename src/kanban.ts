@@ -1748,6 +1748,14 @@ async function archiveToSection(
     // Deleting a recurring card must skip this entirely (keepRecurring=false) —
     // otherwise a card whose preserved title still says "@recurrent" would
     // just get re-armed for its next occurrence instead of actually archiving.
+    // Gated on _isTopLevel too: a promoted card (a subtask rendered as its own
+    // board card because it carries its own kanban tag) is archived one at a
+    // time with _isTopLevel=false and an empty subLines, so its own line is
+    // both "main" and the whole block here — without this gate, a subtask that
+    // happens to carry its own leftover "@recurrent" annotation would get
+    // re-armed with the #recurrent tag by this same-line check and resurface
+    // as its own phantom card in Recurrent, instead of just having its kanban
+    // tag stripped like any other archived subtask.
     let hasRecurrentInBlock = false;
 
     function archiveLine(idx: number, tickBox: boolean) {
@@ -1756,7 +1764,7 @@ async function archiveToSection(
       parsed.tags = parsed.tags.filter((t) => !config.normKanban.includes(normalizeTag(t)));
       parsed.orderDigits = null;
       parsed.orderState = null;
-      if (keepRecurring && config.normRecurrent && hasRecurrentAnnotation(lines[idx], config.normRecurrent)) {
+      if (_isTopLevel && keepRecurring && config.normRecurrent && hasRecurrentAnnotation(lines[idx], config.normRecurrent)) {
         hasRecurrentInBlock = true;
         // Interval-based recurrence: push the next-fire date out by the repeat interval,
         // counted from the day the card was actually completed (not from whenever it
@@ -4399,7 +4407,14 @@ async function tagUntaggedRecurrentCards(app: App, paths: string[], config: Kanb
     if (!tFile) continue;
     const lines = (await getCachedFileLines(app, filePath)).slice();
     let changed = false;
-    for (let i = 0; i < lines.length; i++) {
+    // Everything from the Archived callout onward is dead content (see
+    // archiveToSection/archiveDoneSubtasks) — a card's own "@recurrent" text
+    // surviving into its archived title-only placeholder, or into an archived
+    // subtask that was itself a triggered recurring subcard, must not get
+    // re-tagged #recurrent, or it resurfaces as a phantom card in Recurrent.
+    const calloutIdx = lines.findIndex((l) => l.trim() === ARCHIVE_CALLOUT_HEADER);
+    const scanLimit = calloutIdx >= 0 ? calloutIdx : lines.length;
+    for (let i = 0; i < scanLimit; i++) {
       if (!annotationRe.test(lines[i])) continue;
       const tags = extractTags(lines[i]);
       if (tags.some((t: string) => config.normKanban.includes(normalizeTag(t)))) continue;

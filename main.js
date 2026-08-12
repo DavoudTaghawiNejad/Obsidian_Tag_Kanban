@@ -1263,7 +1263,7 @@ async function archiveToSection(app, filePath, mainLineNum, subLines, config, _i
       parsed.tags = parsed.tags.filter((t) => !config.normKanban.includes(normalizeTag(t)));
       parsed.orderDigits = null;
       parsed.orderState = null;
-      if (keepRecurring && config.normRecurrent && hasRecurrentAnnotation(lines[idx], config.normRecurrent)) {
+      if (_isTopLevel && keepRecurring && config.normRecurrent && hasRecurrentAnnotation(lines[idx], config.normRecurrent)) {
         hasRecurrentInBlock = true;
         const repeatSpec = extractRepeatSpec(lines[idx]);
         const completedOn = parsed.doneDate ? new Date(parsed.doneDate + "T00:00:00") : new Date();
@@ -3223,7 +3223,9 @@ async function tagUntaggedRecurrentCards(app, paths, config) {
       continue;
     const lines = (await getCachedFileLines(app, filePath)).slice();
     let changed = false;
-    for (let i = 0; i < lines.length; i++) {
+    const calloutIdx = lines.findIndex((l) => l.trim() === ARCHIVE_CALLOUT_HEADER);
+    const scanLimit = calloutIdx >= 0 ? calloutIdx : lines.length;
+    for (let i = 0; i < scanLimit; i++) {
       if (!annotationRe.test(lines[i]))
         continue;
       const tags = extractTags(lines[i]);
