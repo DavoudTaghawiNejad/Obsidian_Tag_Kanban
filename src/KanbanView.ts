@@ -7,7 +7,7 @@ import {
   attachListeners,
   isNarrowLayout,
   noteBoardLeft,
-  restoreLastExpandedIfRecent,
+  expireLastExpandedIfStale,
 } from "./kanban";
 
 export const VIEW_TYPE_KANBAN = "kanban-board-view";
@@ -24,7 +24,7 @@ export class KanbanView extends ItemView {
   // Tracks whether this leaf was the active one as of the last
   // active-leaf-change, so the transition away from it (not just any
   // unrelated leaf change elsewhere) can be stamped exactly once — see
-  // noteBoardLeft/restoreLastExpandedIfRecent.
+  // noteBoardLeft/expireLastExpandedIfStale.
   private wasActive = false;
 
   constructor(leaf: WorkspaceLeaf, plugin: KanbanPlugin) {
@@ -50,7 +50,7 @@ export class KanbanView extends ItemView {
       this.app.workspace.on("active-leaf-change", (leaf) => {
         const isActive = leaf === this.leaf;
         if (isActive) {
-          restoreLastExpandedIfRecent();
+          expireLastExpandedIfStale(this.plugin.settings.keepLastExpandedMinutes * 60 * 1000);
           this.scheduleRefresh(100);
           this.scrollPastSearchBar();
         } else if (this.wasActive) {

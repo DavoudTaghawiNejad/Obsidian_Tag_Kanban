@@ -17,6 +17,10 @@ export interface KanbanSettings {
   projectColumns: string[];
   activeColumns: string[];
   projectsDocument: string;
+  // Minutes a manually-opened card stays expanded after the board stops
+  // being the active leaf, so a brief tab-away doesn't collapse whatever the
+  // user was reading. 0 disables it (cards always come back collapsed).
+  keepLastExpandedMinutes: number;
   // ── Colors ─────────────────────────────────────────────────────────────
   // Every color choice is its own independent Hue (0-360). Saturation and
   // Lightness are shared/central (colorSaturation, colorLightness) for
@@ -173,6 +177,7 @@ export const DEFAULT_SETTINGS: KanbanSettings = {
   projectColumns: [],
   activeColumns: ["#next", "#important", "#today"],
   projectsDocument: "",
+  keepLastExpandedMinutes: 5,
   ...DEFAULT_COLORS,
   columnMaxCards: [],
   fontDate: "",
@@ -863,6 +868,24 @@ class KanbanSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           });
         this.bindDefaultOnEmpty(text, DEFAULT_SETTINGS.newTaskInsert, applyNewTaskInsert);
+      });
+
+    new Setting(containerEl)
+      .setName("Keep last-expanded card open")
+      .setDesc(
+        "Minutes a manually-opened card stays expanded after the board stops being the active tab/pane, so briefly switching away and back doesn't collapse whatever you were reading. 0 disables this — cards always come back collapsed."
+      )
+      .addText((text) => {
+        text.inputEl.type = "number";
+        text.inputEl.min = "0";
+        text.inputEl.style.width = "5em";
+        text
+          .setValue(String(this.plugin.settings.keepLastExpandedMinutes))
+          .onChange(async (value) => {
+            const n = parseInt(value.trim(), 10);
+            this.plugin.settings.keepLastExpandedMinutes = Number.isFinite(n) && n >= 0 ? n : DEFAULT_SETTINGS.keepLastExpandedMinutes;
+            await this.plugin.saveSettings();
+          });
       });
 
     new Setting(containerEl)

@@ -1116,25 +1116,27 @@ function forceExpandKey(filePath: string, line: number): string {
 }
 
 // The single card the user last opened by hand (session-only, tracked by the
-// boardEl "toggle" listener below), kept force-expanded for a few minutes
-// after the board view stops being the active leaf — see noteBoardLeft/
-// restoreLastExpandedIfRecent, called from KanbanView's active-leaf-change
-// handler. Past that window it's left to render collapsed as normal.
+// boardEl "toggle" listener below). Unlike pendingForceExpand this isn't a
+// one-shot flag — collectItems checks it on every render, so it keeps
+// rendering expanded across however many renders happen in a row (e.g. a
+// resize check landing right alongside the leaf-activation render) instead
+// of only surviving the first one and then snapping shut on the next.
+// Cleared by the toggle listener on manual collapse, and by
+// expireLastExpandedIfStale once the away time exceeds the grace window
+// (settings.keepLastExpandedMinutes) — see noteBoardLeft, called from
+// KanbanView's active-leaf-change handler.
 let currentlyExpandedKey: string | null = null;
 let leftBoardAt: number | null = null;
-const KEEP_LAST_EXPANDED_MS = 5 * 60 * 1000;
 
 export function noteBoardLeft(): void {
   leftBoardAt = Date.now();
 }
 
-export function restoreLastExpandedIfRecent(): void {
-  if (
-    currentlyExpandedKey &&
-    leftBoardAt !== null &&
-    Date.now() - leftBoardAt < KEEP_LAST_EXPANDED_MS
-  ) {
-    pendingForceExpand.add(currentlyExpandedKey);
+// graceMs <= 0 disables the grace window outright — the "away too long"
+// check below is then true as soon as any time at all has elapsed.
+export function expireLastExpandedIfStale(graceMs: number): void {
+  if (leftBoardAt !== null && Date.now() - leftBoardAt >= graceMs) {
+    currentlyExpandedKey = null;
   }
 }
 
@@ -2488,12 +2490,15 @@ export async function collectItems(
   for (const filePath of targetFilePaths) {
     const fileItems = await getCachedFileEntries(app, filePath, config);
     for (const e of fileItems) {
-      // Peeked, not consumed — getCachedFileEntries' result may be shared
-      // across several collectItems calls within one buildBoard pass, and
-      // only that pass's final item list should actually consume the flag
-      // (see the loop in buildBoard right after items settles).
+      const key = forceExpandKey(filePath, e.item.line);
+      // pendingForceExpand is peeked, not consumed here — getCachedFileEntries'
+      // result may be shared across several collectItems calls within one
+      // buildBoard pass, and only that pass's final item list should actually
+      // consume the flag (see the loop in buildBoard right after items
+      // settles). currentlyExpandedKey isn't one-shot at all — see its
+      // comment above.
       const state: "expanded" | "collapsed" =
-        pendingForceExpand.has(forceExpandKey(filePath, e.item.line)) ? "expanded" : "collapsed";
+        (pendingForceExpand.has(key) || currentlyExpandedKey === key) ? "expanded" : "collapsed";
       allItems.push({ ...e, state, discoveryIndex: discoveryIdx++ });
     }
   }
@@ -4222,7 +4227,7 @@ function createCardHTML(
          <div class="card-title" style="${titleStyle}cursor:pointer;"
               onclick="this.closest('.kanban-card').querySelector('details').toggleAttribute('open')">
            ${iconSpacer(18)}${mainContent}
-           <span style="position:absolute;top:6px;right:2px;font-size:1.1em;line-height:1;color:var(--kb-accent);user-select:none;">${isExpanded ? "▲" : "▼"}</span>
+           <span class="kb-expand-arrow" style="position:absolute;top:6px;right:2px;font-size:1.1em;line-height:1;color:var(--kb-accent);user-select:none;">${isExpanded ? "▲" : "▼"}</span>
          </div>
          <details ${isExpanded ? "open" : ""} style="margin:4px 0 0 0;">
            <summary style="display:none;"></summary>
@@ -5946,7 +5951,7 @@ export function attachListeners(
 
   // ── Details toggle → remember the last card opened by hand ──
   // No file write and no other bookkeeping — just enough for
-  // restoreLastExpandedIfRecent to re-open this same card if the user comes
+  // expireLastExpandedIfStale to re-open this same card if the user comes
   // back to the board within a few minutes of navigating away from it.
   function onToggle(e: Event) {
     const details = e.target as HTMLDetailsElement;
@@ -6138,8 +6143,11 @@ export function attachListeners(
 
   const collapseCardEl = (el: HTMLElement) => {
     el.querySelector("details")?.removeAttribute("open");
-    const titleSpan = el.querySelector<HTMLElement>(".card-title span");
-    if (titleSpan) titleSpan.textContent = "▼";
+    // ".card-title span" would grab whichever span comes first in the title —
+    // a date or recurrence-trigger badge (also plain <span>s) if the card's
+    // text has one, clobbering that label instead of flipping the arrow.
+    const arrow = el.querySelector<HTMLElement>(".kb-expand-arrow");
+    if (arrow) arrow.textContent = "▼";
   };
 
   const makeGhost = (card: HTMLElement) => {
@@ -6515,7 +6523,9 @@ export function attachListeners(
         continue;
       }
 
-      pendingForceExpand.delete(forceExpandKey(card.dataset.file!, lineNum));
+      const archiveKey = forceExpandKey(card.dataset.file!, lineNum);
+      pendingForceExpand.delete(archiveKey);
+      if (currentlyExpandedKey === archiveKey) currentlyExpandedKey = null;
       const ok = await archiveToSection(
         app,
         card.dataset.file!,

@@ -802,13 +802,12 @@ function forceExpandKey(filePath, line) {
 }
 var currentlyExpandedKey = null;
 var leftBoardAt = null;
-var KEEP_LAST_EXPANDED_MS = 5 * 60 * 1e3;
 function noteBoardLeft() {
   leftBoardAt = Date.now();
 }
-function restoreLastExpandedIfRecent() {
-  if (currentlyExpandedKey && leftBoardAt !== null && Date.now() - leftBoardAt < KEEP_LAST_EXPANDED_MS) {
-    pendingForceExpand.add(currentlyExpandedKey);
+function expireLastExpandedIfStale(graceMs) {
+  if (leftBoardAt !== null && Date.now() - leftBoardAt >= graceMs) {
+    currentlyExpandedKey = null;
   }
 }
 async function getCachedFileLines(app, filePath) {
@@ -1700,7 +1699,8 @@ async function collectItems(app, targetFilePaths, config) {
   for (const filePath of targetFilePaths) {
     const fileItems = await getCachedFileEntries(app, filePath, config);
     for (const e of fileItems) {
-      const state = pendingForceExpand.has(forceExpandKey(filePath, e.item.line)) ? "expanded" : "collapsed";
+      const key = forceExpandKey(filePath, e.item.line);
+      const state = pendingForceExpand.has(key) || currentlyExpandedKey === key ? "expanded" : "collapsed";
       allItems.push({ ...e, state, discoveryIndex: discoveryIdx++ });
     }
   }
@@ -3038,7 +3038,7 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
          <div class="card-title" style="${titleStyle}cursor:pointer;"
               onclick="this.closest('.kanban-card').querySelector('details').toggleAttribute('open')">
            ${iconSpacer(18)}${mainContent}
-           <span style="position:absolute;top:6px;right:2px;font-size:1.1em;line-height:1;color:var(--kb-accent);user-select:none;">${isExpanded ? "\u25B2" : "\u25BC"}</span>
+           <span class="kb-expand-arrow" style="position:absolute;top:6px;right:2px;font-size:1.1em;line-height:1;color:var(--kb-accent);user-select:none;">${isExpanded ? "\u25B2" : "\u25BC"}</span>
          </div>
          <details ${isExpanded ? "open" : ""} style="margin:4px 0 0 0;">
            <summary style="display:none;"></summary>
@@ -4592,9 +4592,9 @@ function attachListeners(boardEl, config, app, refresh) {
   };
   const collapseCardEl = (el) => {
     el.querySelector("details")?.removeAttribute("open");
-    const titleSpan = el.querySelector(".card-title span");
-    if (titleSpan)
-      titleSpan.textContent = "\u25BC";
+    const arrow = el.querySelector(".kb-expand-arrow");
+    if (arrow)
+      arrow.textContent = "\u25BC";
   };
   const makeGhost = (card) => {
     const rect = card.getBoundingClientRect();
@@ -4951,7 +4951,10 @@ function attachListeners(boardEl, config, app, refresh) {
         opened++;
         continue;
       }
-      pendingForceExpand.delete(forceExpandKey(card.dataset.file, lineNum));
+      const archiveKey = forceExpandKey(card.dataset.file, lineNum);
+      pendingForceExpand.delete(archiveKey);
+      if (currentlyExpandedKey === archiveKey)
+        currentlyExpandedKey = null;
       const ok = await archiveToSection(
         app,
         card.dataset.file,
@@ -5069,7 +5072,7 @@ var KanbanView = class extends import_obsidian2.ItemView {
     // Tracks whether this leaf was the active one as of the last
     // active-leaf-change, so the transition away from it (not just any
     // unrelated leaf change elsewhere) can be stamped exactly once — see
-    // noteBoardLeft/restoreLastExpandedIfRecent.
+    // noteBoardLeft/expireLastExpandedIfStale.
     this.wasActive = false;
     this.plugin = plugin;
   }
@@ -5087,7 +5090,7 @@ var KanbanView = class extends import_obsidian2.ItemView {
       this.app.workspace.on("active-leaf-change", (leaf) => {
         const isActive = leaf === this.leaf;
         if (isActive) {
-          restoreLastExpandedIfRecent();
+          expireLastExpandedIfStale(this.plugin.settings.keepLastExpandedMinutes * 60 * 1e3);
           this.scheduleRefresh(100);
           this.scrollPastSearchBar();
         } else if (this.wasActive) {
@@ -6355,6 +6358,7 @@ var DEFAULT_SETTINGS = {
   projectColumns: [],
   activeColumns: ["#next", "#important", "#today"],
   projectsDocument: "",
+  keepLastExpandedMinutes: 5,
   ...DEFAULT_COLORS,
   columnMaxCards: [],
   fontDate: "",
@@ -6870,6 +6874,18 @@ var KanbanSettingTab = class extends import_obsidian4.PluginSettingTab {
           await this.plugin.saveSettings();
         });
         this.bindDefaultOnEmpty(text, DEFAULT_SETTINGS.newTaskInsert, applyNewTaskInsert);
+      });
+      new import_obsidian4.Setting(containerEl).setName("Keep last-expanded card open").setDesc(
+        "Minutes a manually-opened card stays expanded after the board stops being the active tab/pane, so briefly switching away and back doesn't collapse whatever you were reading. 0 disables this \u2014 cards always come back collapsed."
+      ).addText((text) => {
+        text.inputEl.type = "number";
+        text.inputEl.min = "0";
+        text.inputEl.style.width = "5em";
+        text.setValue(String(this.plugin.settings.keepLastExpandedMinutes)).onChange(async (value) => {
+          const n = parseInt(value.trim(), 10);
+          this.plugin.settings.keepLastExpandedMinutes = Number.isFinite(n) && n >= 0 ? n : DEFAULT_SETTINGS.keepLastExpandedMinutes;
+          await this.plugin.saveSettings();
+        });
       });
       new import_obsidian4.Setting(containerEl).setName("Scan all vault notes").setDesc(
         "When enabled, every note in the vault is scanned for kanban-tagged tasks. When disabled, only notes linked from Parent pages are scanned."
