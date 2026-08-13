@@ -98,11 +98,31 @@ export class KanbanView extends ItemView {
     this.contentEl.scrollTop = offset;
   }
 
+  // Inverse of scrollPastSearchBar — reveals and focuses the filter box.
+  // Reachable via the board Scope's Mod+F binding below and via the plugin's
+  // "Focus search" command (see main.ts, kept mainly for the Command
+  // Palette and mobile, where there's no physical Mod+F to press).
+  focusSearchBar() {
+    this.contentEl.scrollTop = 0;
+    this.contentEl.querySelector<HTMLInputElement>("#kb-search-input")?.focus();
+  }
+
   private pushBoardScope() {
     if (this.boardScope) return;
     const scope = new Scope();
     scope.register([], "Escape", () => {
       this.handleBoardEscape();
+      return false;
+    });
+    // Registered directly on the Scope rather than left to a Command's
+    // declared default hotkey — Obsidian doesn't reliably auto-bind a
+    // default that conflicts with an existing one (Mod+F almost certainly
+    // already belongs to Obsidian's own in-editor search), so a plain
+    // addCommand({hotkeys: [...]}) silently did nothing here. The Scope
+    // takes priority while it's on top of the stack, the same way it
+    // already does for Escape above.
+    scope.register(["Mod"], "F", () => {
+      this.focusSearchBar();
       return false;
     });
     this.boardScope = scope;

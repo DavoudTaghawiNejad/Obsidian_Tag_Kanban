@@ -224,6 +224,23 @@ export default class KanbanPlugin extends Plugin {
       callback: () => this.activateStatsView(),
     });
 
+    // No declared default hotkey: Obsidian doesn't reliably auto-bind one
+    // that conflicts with an existing command (Mod+F almost certainly
+    // already belongs to Obsidian's own in-editor search), so the actual
+    // Mod+F trigger lives on the board's own Scope instead (see
+    // KanbanView.pushBoardScope). This command exists for the Command
+    // Palette and mobile, where there's no physical Mod+F to press.
+    this.addCommand({
+      id: "kanban-focus-search",
+      name: "Focus search",
+      checkCallback: (checking) => {
+        const view = this.app.workspace.getActiveViewOfType(KanbanView);
+        if (!view) return false;
+        if (!checking) view.focusSearchBar();
+        return true;
+      },
+    });
+
     // Protocol handler: obsidian://open-kanban opens the board from text links
     this.registerObsidianProtocolHandler("open-kanban", () =>
       this.activateView()

@@ -5138,12 +5138,24 @@ var KanbanView = class extends import_obsidian2.ItemView {
     const offset = scroll.getBoundingClientRect().top - this.contentEl.getBoundingClientRect().top + this.contentEl.scrollTop;
     this.contentEl.scrollTop = offset;
   }
+  // Inverse of scrollPastSearchBar — reveals and focuses the filter box.
+  // Reachable via the board Scope's Mod+F binding below and via the plugin's
+  // "Focus search" command (see main.ts, kept mainly for the Command
+  // Palette and mobile, where there's no physical Mod+F to press).
+  focusSearchBar() {
+    this.contentEl.scrollTop = 0;
+    this.contentEl.querySelector("#kb-search-input")?.focus();
+  }
   pushBoardScope() {
     if (this.boardScope)
       return;
     const scope = new import_obsidian2.Scope();
     scope.register([], "Escape", () => {
       this.handleBoardEscape();
+      return false;
+    });
+    scope.register(["Mod"], "F", () => {
+      this.focusSearchBar();
       return false;
     });
     this.boardScope = scope;
@@ -6453,6 +6465,18 @@ var KanbanPlugin = class extends import_obsidian4.Plugin {
       id: "open-kanban-statistics",
       name: "Open Kanban Statistics",
       callback: () => this.activateStatsView()
+    });
+    this.addCommand({
+      id: "kanban-focus-search",
+      name: "Focus search",
+      checkCallback: (checking) => {
+        const view = this.app.workspace.getActiveViewOfType(KanbanView);
+        if (!view)
+          return false;
+        if (!checking)
+          view.focusSearchBar();
+        return true;
+      }
     });
     this.registerObsidianProtocolHandler(
       "open-kanban",
