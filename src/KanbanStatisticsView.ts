@@ -44,8 +44,10 @@ interface EventDates {
   // out" into its own column — as opposed to a plain checkbox subtask with
   // no column of its own. Drives which items are worth listing individually
   // in the Done/Deleted hover (a plain subtask being ticked off isn't an
-  // independently interesting event, even though it's still counted), and,
-  // for Newly opened, which checked-off items are stale noise.
+  // independently interesting event, even though it's still counted), and
+  // gates "New this week"/"Newly opened" entirely — only cards count there,
+  // same granularity as the Open tasks tile (a plain subtask's own creation
+  // stamp never does, card or no card).
   isOwnCard: boolean;
   checked: boolean;
   // Every ancestor from the top-level card down to (not including) this
@@ -56,7 +58,10 @@ interface EventDates {
   // even when a name like "child" repeats across several different cards.
   ancestors: HoverParent[];
   // Its own tags include Later/Recurrent/a Maybe Someday column — excluded
-  // from "New this week" (tile, chart, and hover) regardless of isOwnCard.
+  // from "New this week" (tile, chart, and hover). Deliberately does NOT
+  // include Done: a card created and finished in the same week is still
+  // legitimately "new" that week, even though Open tasks (a different,
+  // current-state metric) never counts it.
   excludedFromNew: boolean;
 }
 
@@ -357,14 +362,21 @@ function collectOpenAndEvents(
 ): { events: EventDates[]; openCards: OpenCardRow[] } {
   const events: EventDates[] = [];
 
-  // "New this week" excludes creation events for anything tagged into Later,
-  // Recurrent, or any Maybe Someday column — a #recurrent card cycles by
-  // design, and #later/Maybe Someday cards are deliberately parked, so their
-  // creation isn't "new work" in the sense that tile/chart is for. (Maybe
-  // Someday cards typically have no creation stamp at all until they leave
-  // that column — see stampMissingCreatedDates — but a card that already had
-  // one before landing there is still excluded while it sits parked.)
-  const NEW_EXCLUDED_TAGS = new Set([config.normLater, config.normRecurrent, ...config.normMaybeSomeday]);
+  // "Open tasks" is a snapshot of current state (openCards below): Done is
+  // excluded there because a finished card obviously isn't open work.
+  // "New this week"/"Newly opened" (excludedFromNew below) is a flow metric —
+  // did a card's creation event fall in this window — and Done does NOT
+  // belong in its exclusion set: a card created and finished within the same
+  // week is legitimately both "new" and "done" that week, even though it
+  // never appears in the Open tasks snapshot. Recurrent (cycles by design,
+  // not aging backlog), Later, and every Maybe Someday column (deliberately
+  // parked, not neglected) are excluded from both, since a card parked there
+  // isn't "new work" or "open work" in either sense. (Maybe Someday cards
+  // typically have no creation stamp at all until they leave that column —
+  // see stampMissingCreatedDates — but a card that already had one before
+  // landing there is still excluded while it sits parked.)
+  const PARKED_EXCLUDED_TAGS = new Set([config.normLater, config.normRecurrent, ...config.normMaybeSomeday]);
+  const OPEN_EXCLUDED_TAGS = new Set([config.normDone, ...PARKED_EXCLUDED_TAGS]);
 
   const visitForEvents = (node: any, ancestors: HoverParent[]) => {
     if (isDeletedNode(node)) return;
@@ -378,7 +390,7 @@ function collectOpenAndEvents(
       isOwnCard: norms.some((t: string) => config.normKanban.includes(t)),
       checked,
       ancestors,
-      excludedFromNew: norms.some((t: string) => NEW_EXCLUDED_TAGS.has(t)),
+      excludedFromNew: norms.some((t: string) => PARKED_EXCLUDED_TAGS.has(t)),
     });
     for (const sub of node.subs ?? []) visitForEvents(sub, [...ancestors, { title, checked }]);
   };
@@ -458,13 +470,6 @@ function collectOpenAndEvents(
     }
   };
   for (const card of items) collectChildKeys(card.filePath, card.item.subs);
-
-  // "Open" excludes Done (obviously) as well as Recurrent (cycles by design,
-  // not aging backlog), Later, and every Maybe Someday column (deliberately
-  // parked, not neglected) — a card sitting in any of these isn't "open work"
-  // in the sense the Open tasks / Avg. age tiles and the Oldest open tasks
-  // table are for.
-  const OPEN_EXCLUDED_TAGS = new Set([config.normDone, config.normLater, config.normRecurrent, ...config.normMaybeSomeday]);
 
   const openCards: OpenCardRow[] = [];
   for (const card of items) {
@@ -1213,7 +1218,9 @@ export class KanbanStatisticsView extends ItemView {
       const inLast7 = (d: Date) => d.getTime() >= weekStart.getTime() && d.getTime() <= today.getTime();
 
       const totalOpen = openCards.length;
-      const newThisWeek = events.filter((e) => e.createdDate && inLast7(e.createdDate) && !e.excludedFromNew).length;
+      // isOwnCard required: matches Open tasks' granularity (cards only, not
+      // every subtask's own creation stamp) so the two tiles stay comparable.
+      const newThisWeek = events.filter((e) => e.createdDate && inLast7(e.createdDate) && !e.excludedFromNew && e.isOwnCard).length;
       const doneThisWeek = events.filter((e) => e.doneDate && inLast7(e.doneDate)).length;
       const agedCards = openCards.filter((c) => c.createdDate);
       const avgAgeDays = agedCards.length
@@ -1243,36 +1250,34 @@ export class KanbanStatisticsView extends ItemView {
       tile(
         "New this week",
         String(newThisWeek),
-        "Cards or subtasks whose creation stamp falls in the last 7 days (today and the 6 days before it) — except ones tagged Later, Recurrent, or any Maybe Someday column."
+        "Cards whose creation stamp falls in the last 7 days (today and the 6 days before it) — same card-only counting as Open tasks (a plain subtask's own creation stamp never counts on its own), except a card tagged Done still counts here even though Open tasks never counts it: a card created and finished the same week is legitimately both new and done that week. Only Later, Recurrent, and any Maybe Someday column are excluded."
       );
       tile("Done this week", String(doneThisWeek), "Cards or subtasks whose ✅ done-date stamp falls in the last 7 days (today and the 6 days before it).");
       tile("Avg. age of open (days)", String(avgAgeDays), "Average of (today − creation date) across open cards (same definition as the Open tasks tile) with a recorded creation date. Cards with no recorded date aren't counted.");
 
       const buckets = buildBuckets(this.rangeMode);
-      // "Newly opened" — same exclusion as the New this week tile, so the
-      // chart and tile never disagree about what counts as new work.
-      const createdDates = events.filter((e) => !e.excludedFromNew).map((e) => e.createdDate);
+      // "Newly opened" — same card-only granularity as the New this week tile
+      // (and Open tasks), and the same Later/Recurrent/Maybe Someday
+      // exclusion — but, like that tile, deliberately still counts a Done
+      // card whose creation event falls in the window (see excludedFromNew).
+      const createdDates = events.filter((e) => !e.excludedFromNew && e.isOwnCard).map((e) => e.createdDate);
       const doneDates = events.map((e) => e.doneDate);
       const deletedDates = deletedEvents.map((e) => e.date);
       const openedCounts = buckets.map((b) => countInBucket(createdDates, b));
       const doneCounts = buckets.map((b) => countInBucket(doneDates, b));
       const deletedCounts = buckets.map((b) => countInBucket(deletedDates, b));
 
-      // Per-bucket task/subtask entries behind each of the counts above, for
-      // the "Newly opened" / "Done / Deleted" charts' hover tooltip.
+      // Per-bucket card entries behind each of the counts above, for the
+      // "Newly opened" / "Done / Deleted" charts' hover tooltip.
       const createdEntries = events.filter(
-        (e): e is EventDates & { createdDate: Date } => e.createdDate !== null && !e.excludedFromNew
+        (e): e is EventDates & { createdDate: Date } => e.createdDate !== null && !e.excludedFromNew && e.isOwnCard
       );
       const doneEntries = events.filter((e): e is EventDates & { doneDate: Date } => e.doneDate !== null);
 
-      // Newly opened: hide a checked-off item only if it's not a card in its
-      // own right — a resolved plain subtask is stale noise once it's no
-      // longer part of what's actually open, but a still-open plain subtask
-      // (shown with its parent for context) or any card/spun-out subtask
-      // (checked or not) still belongs in the list.
-      const openedBucketEntries = buckets.map((b) =>
-        entriesInBucket(createdEntries, b, (e) => e.createdDate).filter((e) => e.isOwnCard || !e.checked)
-      );
+      // Newly opened only ever contains cards now (createdEntries above is
+      // already isOwnCard-only), so every entry belongs in the hover list —
+      // no separate "hide stale checked-off subtasks" filter needed here.
+      const openedBucketEntries = buckets.map((b) => entriesInBucket(createdEntries, b, (e) => e.createdDate));
       const openedTitles = openedBucketEntries.map((entries) => formatHoverList(entries));
       const openedListedCounts = openedBucketEntries.map((entries) => entries.length);
 

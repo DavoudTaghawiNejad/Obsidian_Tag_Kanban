@@ -1044,10 +1044,7 @@ async function moveToColumn(app, filePath, lineNum, originalTags, targetTag, isD
     parsed.tags.push(targetTag);
     if (config.normRecurrent && normalizeTag(targetTag) === config.normRecurrent) {
       applyRecurrentTrigger(parsed, config.normRecurrent, triggerAnnotation);
-      {
-        const n2 = new Date();
-        parsed.createdDate = `${n2.getFullYear()}-${String(n2.getMonth() + 1).padStart(2, "0")}-${String(n2.getDate()).padStart(2, "0")}`;
-      }
+      parsed.createdDate = null;
     }
     if (parsed.checked !== null)
       parsed.checked = isDone;
@@ -1081,7 +1078,7 @@ async function moveToColumn(app, filePath, lineNum, originalTags, targetTag, isD
     return false;
   }
 }
-async function uncheckSubtasks(app, filePath, subs) {
+async function uncheckSubtasks(app, filePath, subs, config) {
   if (!subs || !subs.length)
     return false;
   try {
@@ -1092,9 +1089,18 @@ async function uncheckSubtasks(app, filePath, subs) {
         const idx = sub.line - 1;
         if (idx >= 0 && idx < lines.length) {
           const parsed = parseTaskLine(lines[idx]);
+          const hadOwnKanbanTag = parsed.tags.some((t) => config.normKanban.includes(normalizeTag(t)));
+          let lineChanged = false;
           if (parsed.checked === true) {
             parsed.checked = false;
             parsed.doneDate = null;
+            lineChanged = true;
+          }
+          if (!hadOwnKanbanTag && parsed.createdDate) {
+            parsed.createdDate = null;
+            lineChanged = true;
+          }
+          if (lineChanged) {
             lines[idx] = serializeTaskLine(parsed);
             changed = true;
           }
@@ -1260,6 +1266,7 @@ async function archiveToSection(app, filePath, mainLineNum, subLines, config, _i
       if (idx < 0 || idx >= lines.length)
         return;
       const parsed = parseTaskLine(lines[idx]);
+      const hadOwnKanbanTag = parsed.tags.some((t) => config.normKanban.includes(normalizeTag(t)));
       parsed.tags = parsed.tags.filter((t) => !config.normKanban.includes(normalizeTag(t)));
       parsed.orderDigits = null;
       parsed.orderState = null;
@@ -1271,19 +1278,19 @@ async function archiveToSection(app, filePath, mainLineNum, subLines, config, _i
           parsed.checked = false;
         parsed.tags.push(config.recurrentColumn);
         parsed.date = repeatSpec ? formatDateAnnotation(addRepeatInterval(completedOn, repeatSpec)) : null;
-        {
-          const n = new Date();
-          parsed.createdDate = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
-        }
+        parsed.createdDate = null;
         lines[idx] = serializeTaskLine(parsed);
       } else if (tickBox && parsed.checked !== null) {
         parsed.checked = true;
         lines[idx] = serializeTaskLine(parsed);
-      } else if (!tickBox && hasRecurrentInBlock && parsed.checked === true) {
-        parsed.checked = false;
-        parsed.doneDate = null;
-        lines[idx] = serializeTaskLine(parsed);
       } else {
+        if (!tickBox && hasRecurrentInBlock && parsed.checked === true) {
+          parsed.checked = false;
+          parsed.doneDate = null;
+        }
+        if (!tickBox && hasRecurrentInBlock && !hadOwnKanbanTag) {
+          parsed.createdDate = null;
+        }
         lines[idx] = serializeTaskLine(parsed);
       }
     };
@@ -3289,9 +3296,10 @@ async function stampMissingCreatedDates(app, paths, config) {
   const CREATED_RE = /%% @created:\d{4}-\d{2}-\d{2} %%/;
   const isDeleted = (node) => (node.tags ?? []).some((t) => normalizeTag(t) === "deleted");
   const isMaybeSomeday = (node) => (node.tags ?? []).some((t) => config.normMaybeSomeday.includes(normalizeTag(t)));
+  const isRecurrent = (node) => !!config.normRecurrent && (node.tags ?? []).some((t) => normalizeTag(t) === config.normRecurrent);
   const byFile = /* @__PURE__ */ new Map();
   const visit = (filePath, node, isSubtask) => {
-    if (isDeleted(node) || isMaybeSomeday(node))
+    if (isDeleted(node) || isMaybeSomeday(node) || isRecurrent(node))
       return;
     if ((!isSubtask || isCheckboxItem(node)) && !CREATED_RE.test(node.text)) {
       if (!byFile.has(filePath))
@@ -4014,14 +4022,14 @@ function attachListeners(boardEl, config, app, refresh) {
       if (!hasValidTriggers(lineTxt, config.normRecurrent) && !hasChildWithTrigger(card.subs, config.normRecurrent)) {
         showRecurrentTriggerDialog(app, async (trigger) => {
           await moveToColumn(app, card.filePath, card.lineNum, card.originalTags, targetTag, false, config, null, newCalc.digits, newState, trigger, wasLater);
-          await uncheckSubtasks(app, card.filePath, card.subs);
+          await uncheckSubtasks(app, card.filePath, card.subs, config);
           requestAnimationFrame(() => setTimeout(refresh, 50));
         }, [], extractRepeatSpec(lineTxt));
         return;
       }
       const ok = await moveToColumn(app, card.filePath, card.lineNum, card.originalTags, targetTag, false, config, null, newCalc.digits, newState, null, wasLater);
       if (ok)
-        await uncheckSubtasks(app, card.filePath, card.subs);
+        await uncheckSubtasks(app, card.filePath, card.subs, config);
       if (ok)
         requestAnimationFrame(() => setTimeout(refresh, 50));
     } else if (targetNorm === config.normLater) {
@@ -5356,7 +5364,8 @@ function cleanTaskText(raw) {
 }
 function collectOpenAndEvents(items, config, vaultName) {
   const events = [];
-  const NEW_EXCLUDED_TAGS = /* @__PURE__ */ new Set([config.normLater, config.normRecurrent, ...config.normMaybeSomeday]);
+  const PARKED_EXCLUDED_TAGS = /* @__PURE__ */ new Set([config.normLater, config.normRecurrent, ...config.normMaybeSomeday]);
+  const OPEN_EXCLUDED_TAGS = /* @__PURE__ */ new Set([config.normDone, ...PARKED_EXCLUDED_TAGS]);
   const visitForEvents = (node, ancestors) => {
     if (isDeletedNode(node))
       return;
@@ -5370,7 +5379,7 @@ function collectOpenAndEvents(items, config, vaultName) {
       isOwnCard: norms.some((t) => config.normKanban.includes(t)),
       checked,
       ancestors,
-      excludedFromNew: norms.some((t) => NEW_EXCLUDED_TAGS.has(t))
+      excludedFromNew: norms.some((t) => PARKED_EXCLUDED_TAGS.has(t))
     });
     for (const sub of node.subs ?? [])
       visitForEvents(sub, [...ancestors, { title, checked }]);
@@ -5435,7 +5444,6 @@ function collectOpenAndEvents(items, config, vaultName) {
   };
   for (const card of items)
     collectChildKeys(card.filePath, card.item.subs);
-  const OPEN_EXCLUDED_TAGS = /* @__PURE__ */ new Set([config.normDone, config.normLater, config.normRecurrent, ...config.normMaybeSomeday]);
   const openCards = [];
   for (const card of items) {
     if (!childKeys.has(`${card.filePath}::${card.item.line}`)) {
@@ -5976,7 +5984,7 @@ var KanbanStatisticsView = class extends import_obsidian3.ItemView {
       const weekStart = getLast7DaysStart();
       const inLast7 = (d) => d.getTime() >= weekStart.getTime() && d.getTime() <= today.getTime();
       const totalOpen = openCards.length;
-      const newThisWeek = events.filter((e) => e.createdDate && inLast7(e.createdDate) && !e.excludedFromNew).length;
+      const newThisWeek = events.filter((e) => e.createdDate && inLast7(e.createdDate) && !e.excludedFromNew && e.isOwnCard).length;
       const doneThisWeek = events.filter((e) => e.doneDate && inLast7(e.doneDate)).length;
       const agedCards = openCards.filter((c) => c.createdDate);
       const avgAgeDays = agedCards.length ? Math.round(agedCards.reduce((sum, c) => sum + (today.getTime() - c.createdDate.getTime()) / 864e5, 0) / agedCards.length) : 0;
@@ -6004,24 +6012,22 @@ var KanbanStatisticsView = class extends import_obsidian3.ItemView {
       tile(
         "New this week",
         String(newThisWeek),
-        "Cards or subtasks whose creation stamp falls in the last 7 days (today and the 6 days before it) \u2014 except ones tagged Later, Recurrent, or any Maybe Someday column."
+        "Cards whose creation stamp falls in the last 7 days (today and the 6 days before it) \u2014 same card-only counting as Open tasks (a plain subtask's own creation stamp never counts on its own), except a card tagged Done still counts here even though Open tasks never counts it: a card created and finished the same week is legitimately both new and done that week. Only Later, Recurrent, and any Maybe Someday column are excluded."
       );
       tile("Done this week", String(doneThisWeek), "Cards or subtasks whose \u2705 done-date stamp falls in the last 7 days (today and the 6 days before it).");
       tile("Avg. age of open (days)", String(avgAgeDays), "Average of (today \u2212 creation date) across open cards (same definition as the Open tasks tile) with a recorded creation date. Cards with no recorded date aren't counted.");
       const buckets = buildBuckets(this.rangeMode);
-      const createdDates = events.filter((e) => !e.excludedFromNew).map((e) => e.createdDate);
+      const createdDates = events.filter((e) => !e.excludedFromNew && e.isOwnCard).map((e) => e.createdDate);
       const doneDates = events.map((e) => e.doneDate);
       const deletedDates = deletedEvents.map((e) => e.date);
       const openedCounts = buckets.map((b) => countInBucket(createdDates, b));
       const doneCounts = buckets.map((b) => countInBucket(doneDates, b));
       const deletedCounts = buckets.map((b) => countInBucket(deletedDates, b));
       const createdEntries = events.filter(
-        (e) => e.createdDate !== null && !e.excludedFromNew
+        (e) => e.createdDate !== null && !e.excludedFromNew && e.isOwnCard
       );
       const doneEntries = events.filter((e) => e.doneDate !== null);
-      const openedBucketEntries = buckets.map(
-        (b) => entriesInBucket(createdEntries, b, (e) => e.createdDate).filter((e) => e.isOwnCard || !e.checked)
-      );
+      const openedBucketEntries = buckets.map((b) => entriesInBucket(createdEntries, b, (e) => e.createdDate));
       const openedTitles = openedBucketEntries.map((entries) => formatHoverList(entries));
       const openedListedCounts = openedBucketEntries.map((entries) => entries.length);
       const doneBucketEntries = buckets.map((b) => entriesInBucket(doneEntries, b, (e) => e.doneDate));

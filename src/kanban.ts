@@ -1440,14 +1440,15 @@ async function moveToColumn(
 
     if (config.normRecurrent && normalizeTag(targetTag) === config.normRecurrent) {
       applyRecurrentTrigger(parsed, config.normRecurrent, triggerAnnotation);
-      // Created-date resets to today whenever a card lands in Recurrent — its
-      // "creation" is treated as the start of the current cycle (same reasoning
-      // as the equivalent reset in archiveToSection's keepRecurring path, the
+      // Created-date is stripped whenever a card lands in Recurrent — a card
+      // parked there isn't "open work" (see OPEN_EXCLUDED_TAGS/NEW_EXCLUDED_TAGS
+      // in KanbanStatisticsView.ts), so it shouldn't carry a creation date at
+      // all. stampMissingCreatedDates skips Recurrent cards for the same
+      // reason, so this stays cleared while parked; the next render backfills
+      // a fresh date once it actually fires back into Due (same reasoning as
+      // the equivalent strip in archiveToSection's keepRecurring path, the
       // other route back into this column).
-      {
-        const n = new Date();
-        parsed.createdDate = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
-      }
+      parsed.createdDate = null;
     }
 
     if (parsed.checked !== null) parsed.checked = isDone;
@@ -1499,9 +1500,14 @@ async function moveToColumn(
   }
 }
 
-// Uncheck any completed subtasks (recursively) so a recurring card that's manually
-// dragged back to the recurrent column starts its next occurrence fresh.
-async function uncheckSubtasks(app: App, filePath: string, subs: any[]): Promise<boolean> {
+// Uncheck any completed subtasks (recursively), and strip the created-date off
+// any of them that aren't their own card (no kanban tag of their own — a
+// "promoted" subtask with its own tag is a card in its own right and is left
+// untouched), so a recurring card that's manually dragged back to the
+// recurrent column starts its next occurrence fresh — the same reset
+// archiveToSection applies to a recurring card's subtasks when it cycles back
+// via completion+archive instead of a plain drag (see archiveLine there).
+async function uncheckSubtasks(app: App, filePath: string, subs: any[], config: KanbanConfig): Promise<boolean> {
   if (!subs || !subs.length) return false;
   try {
     const { tFile, lines } = await readFileLines(app, filePath);
@@ -1511,9 +1517,18 @@ async function uncheckSubtasks(app: App, filePath: string, subs: any[]): Promise
         const idx = sub.line - 1;
         if (idx >= 0 && idx < lines.length) {
           const parsed = parseTaskLine(lines[idx]);
+          const hadOwnKanbanTag = parsed.tags.some((t) => config.normKanban.includes(normalizeTag(t)));
+          let lineChanged = false;
           if (parsed.checked === true) {
             parsed.checked = false;
             parsed.doneDate = null;
+            lineChanged = true;
+          }
+          if (!hadOwnKanbanTag && parsed.createdDate) {
+            parsed.createdDate = null;
+            lineChanged = true;
+          }
+          if (lineChanged) {
             lines[idx] = serializeTaskLine(parsed);
             changed = true;
           }
@@ -1761,6 +1776,11 @@ async function archiveToSection(
     function archiveLine(idx: number, tickBox: boolean) {
       if (idx < 0 || idx >= lines.length) return;
       const parsed = parseTaskLine(lines[idx]);
+      // Captured before the filter below strips it: a subtask carrying its own
+      // kanban tag is a "promoted" card in its own right (rendered as its own
+      // board card), not a plain part of this one — see the createdDate strip
+      // further down, which must leave such subtasks untouched.
+      const hadOwnKanbanTag = parsed.tags.some((t) => config.normKanban.includes(normalizeTag(t)));
       parsed.tags = parsed.tags.filter((t) => !config.normKanban.includes(normalizeTag(t)));
       parsed.orderDigits = null;
       parsed.orderState = null;
@@ -1783,25 +1803,36 @@ async function archiveToSection(
         // today when the card fired into Due, and that stamp is what stops same-day
         // re-firing once it returns to Recurrent (see moveToColumn). Restamping it to
         // the archiving date would be wrong if archiving happens on a later day.
-        // Created-date is reset to today: a recurring card's "creation" is
-        // treated as the start of its current cycle, not its original
-        // one-time creation, so the Statistics view's "newly opened" trend
-        // reflects each new occurrence rather than counting it once forever.
-        {
-          const n = new Date();
-          parsed.createdDate = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
-        }
+        // Created-date is stripped: a card parked in Recurrent isn't "open
+        // work" (see OPEN_EXCLUDED_TAGS/NEW_EXCLUDED_TAGS in
+        // KanbanStatisticsView.ts), so it shouldn't carry a stale creation
+        // date — stampMissingCreatedDates skips Recurrent cards, so this
+        // stays cleared until the card actually fires back into Due, where
+        // the next render backfills a fresh date for the new cycle.
+        parsed.createdDate = null;
         lines[idx] = serializeTaskLine(parsed);
       } else if (tickBox && parsed.checked !== null) {
         parsed.checked = true;
         lines[idx] = serializeTaskLine(parsed);
-      } else if (!tickBox && hasRecurrentInBlock && parsed.checked === true) {
-        // A completed plain subtask (no @recurrent annotation of its own) resets to
-        // open when the recurring parent cycles back, so the next occurrence starts fresh.
-        parsed.checked = false;
-        parsed.doneDate = null;
-        lines[idx] = serializeTaskLine(parsed);
       } else {
+        // Subtask line (tickBox is always false for these calls, from recurse()
+        // below). A completed plain subtask (no @recurrent annotation of its
+        // own) resets to open when the recurring parent cycles back, so the
+        // next occurrence starts fresh.
+        if (!tickBox && hasRecurrentInBlock && parsed.checked === true) {
+          parsed.checked = false;
+          parsed.doneDate = null;
+        }
+        // Any subtask that isn't its own card (no kanban tag of its own —
+        // see hadOwnKanbanTag above) is parked wherever the recurring parent
+        // is, not open work in its own right, so its created-date is
+        // stripped right along with the parent's — whether or not it was
+        // just reset from checked above — so it isn't wrongly counted as
+        // "newly opened" while still parked in Recurrent. A promoted
+        // subtask (its own card) is left untouched here.
+        if (!tickBox && hasRecurrentInBlock && !hadOwnKanbanTag) {
+          parsed.createdDate = null;
+        }
         lines[idx] = serializeTaskLine(parsed);
       }
     }
@@ -4499,12 +4530,16 @@ export async function moveCheckedCardsToDone(app: App, paths: string[], config: 
 // real checkbox item (see isCheckboxItem) — plain note bullets inserted by
 // formatNoteLines are left alone. #deleted nodes are skipped: every date-based
 // stat downstream already excludes them, so stamping one would be a wasted write.
-// Cards still sitting in any Maybe Someday column are skipped too (and, since
-// the check short-circuits before recursing, so are their subtasks) — such a
-// card's "creation" doesn't count until it's actually pulled off the shelf.
-// Once it's moved to any other column, this same backfill stamps it with
-// today's date on the very next board render; a card that already had a
-// created date before landing in Maybe Someday keeps that date untouched.
+// Cards still sitting in any Maybe Someday column, or in Recurrent, are
+// skipped too (and, since the check short-circuits before recursing, so are
+// their subtasks) — a Maybe Someday card's "creation" doesn't count until
+// it's actually pulled off the shelf, and a Recurrent card's created-date is
+// deliberately stripped on entry (see moveToColumn/archiveToSection) since
+// it isn't "open work" while parked there. Once either is moved to another
+// column, this same backfill stamps it with today's date on the very next
+// board render; a card that already had a created date before landing in
+// Maybe Someday keeps that date untouched (Recurrent, unlike Maybe Someday,
+// actively clears it on entry rather than merely leaving it be).
 export async function stampMissingCreatedDates(app: App, paths: string[], config: KanbanConfig): Promise<void> {
   const items = await collectItems(app, paths, config);
   const n = new Date();
@@ -4513,10 +4548,12 @@ export async function stampMissingCreatedDates(app: App, paths: string[], config
   const isDeleted = (node: any) => (node.tags ?? []).some((t: string) => normalizeTag(t) === "deleted");
   const isMaybeSomeday = (node: any) =>
     (node.tags ?? []).some((t: string) => config.normMaybeSomeday.includes(normalizeTag(t)));
+  const isRecurrent = (node: any) =>
+    !!config.normRecurrent && (node.tags ?? []).some((t: string) => normalizeTag(t) === config.normRecurrent);
 
   const byFile = new Map<string, number[]>();
   const visit = (filePath: string, node: any, isSubtask: boolean) => {
-    if (isDeleted(node) || isMaybeSomeday(node)) return;
+    if (isDeleted(node) || isMaybeSomeday(node) || isRecurrent(node)) return;
     if ((!isSubtask || isCheckboxItem(node)) && !CREATED_RE.test(node.text)) {
       if (!byFile.has(filePath)) byFile.set(filePath, []);
       byFile.get(filePath)!.push(node.line);
@@ -5440,13 +5477,13 @@ export function attachListeners(
       if (!hasValidTriggers(lineTxt, config.normRecurrent) && !hasChildWithTrigger(card.subs, config.normRecurrent)) {
         showRecurrentTriggerDialog(app, async (trigger) => {
           await moveToColumn(app, card.filePath, card.lineNum, card.originalTags, targetTag, false, config, null, newCalc.digits, newState, trigger, wasLater);
-          await uncheckSubtasks(app, card.filePath, card.subs);
+          await uncheckSubtasks(app, card.filePath, card.subs, config);
           requestAnimationFrame(() => setTimeout(refresh, 50));
         }, [], extractRepeatSpec(lineTxt));
         return;
       }
       const ok = await moveToColumn(app, card.filePath, card.lineNum, card.originalTags, targetTag, false, config, null, newCalc.digits, newState, null, wasLater);
-      if (ok) await uncheckSubtasks(app, card.filePath, card.subs);
+      if (ok) await uncheckSubtasks(app, card.filePath, card.subs, config);
       if (ok) requestAnimationFrame(() => setTimeout(refresh, 50));
     } else if (targetNorm === config.normLater) {
       const { lines } = await readFileLines(app, card.filePath);
