@@ -299,23 +299,21 @@ const DELETED_TAG = "#deleted";
 const isDeletedTag = (t: string) => normalizeTag(t) === normalizeTag(DELETED_TAG);
 
 // ─── ORDER-COMMENT PARSING ────────────────────────────────────────────────────
-// Format: %% @<digits><c|x> %%   c = collapsed, x = expanded
+// Format: %% @<digits> %%
+// A trailing single letter (the old expanded/collapsed flag, e.g. "%% @123x %%")
+// is tolerated on read for files written before that flag was dropped, but is
+// never written back — the next write to a line rewrites it in the bare form.
 
 interface OrderInfo {
   digits: string;
-  state: "expanded" | "collapsed";
   len: number;
 }
 
 function parseOrderComment(text: string): OrderInfo | null {
-  const m = text.match(/%% @(\d+)(\w) %%/);
+  const m = text.match(/%% @(\d+)\w? %%/);
   if (!m) return null;
-  const stateChar = m[2].toLowerCase();
-  const state =
-    stateChar === "x" ? "expanded" : stateChar === "c" ? "collapsed" : null;
-  if (!state) return null;
   // An all-zero digit string means "no real order" (same as absent).
-  return /[1-9]/.test(m[1]) ? { digits: m[1], state, len: m[1].length } : null;
+  return /[1-9]/.test(m[1]) ? { digits: m[1], len: m[1].length } : null;
 }
 
 // ─── TASK LINE PARSE / SERIALIZE ─────────────────────────────────────────────
@@ -331,7 +329,6 @@ interface TaskLine {
   createdDate: string | null;                  // "%% @created:YYYY-MM-DD %%" comment
   deletedDate: string | null;                  // "%% @deleted:YYYY-MM-DD %%" comment
   orderDigits: string | null;
-  orderState: "expanded" | "collapsed" | null;
   skipDate: string | null;                     // "%% @skip:YYYY-MM-DD %%" comment
   color: string | null;                        // "%% @color:#RRGGBB %%" comment
 }
@@ -340,13 +337,12 @@ function parseTaskLine(raw: string): TaskLine {
   const indent = (raw.match(/^(\s*)/) || ["", ""])[1];
   let rest = raw.slice(indent.length);
 
-  // Order comment
+  // Order comment (a legacy trailing letter, e.g. "%% @123x %%", is tolerated
+  // on read but dropped on the next write — see parseOrderComment above).
   let orderDigits: string | null = null;
-  let orderState: "expanded" | "collapsed" | null = null;
-  const om = rest.match(/%% @(\d+)(\w) %%/);
+  const om = rest.match(/%% @(\d+)\w? %%/);
   if (om) {
     orderDigits = om[1];
-    orderState = om[2].toLowerCase() === "x" ? "expanded" : "collapsed";
   }
   // Skip date — preserve across parse/serialize round-trips
   let skipDate: string | null = null;
@@ -396,7 +392,7 @@ function parseTaskLine(raw: string): TaskLine {
   const tags = (rest.match(/(?<!\w)#\w+/g) || []);
   const text = rest.replace(/\s*(?<!\w)#\w+/g, "").trim();
 
-  return { indent, bullet, checked, text, tags, date, doneDate, createdDate, deletedDate, orderDigits, orderState, skipDate, color };
+  return { indent, bullet, checked, text, tags, date, doneDate, createdDate, deletedDate, orderDigits, skipDate, color };
 }
 
 function serializeTaskLine(t: TaskLine): string {
@@ -411,8 +407,8 @@ function serializeTaskLine(t: TaskLine): string {
   if (t.doneDate) parts.push(`✅${t.doneDate}`);
   if (t.createdDate) parts.push(`%% @created:${t.createdDate} %%`);
   if (t.deletedDate) parts.push(`%% @deleted:${t.deletedDate} %%`);
-  if (t.orderDigits && t.orderState !== null) {
-    parts.push(`%% @${t.orderDigits}${t.orderState === "expanded" ? "x" : "c"} %%`);
+  if (t.orderDigits) {
+    parts.push(`%% @${t.orderDigits} %%`);
   }
   if (t.skipDate) {
     parts.push(`%% @skip:${t.skipDate} %%`);
@@ -428,8 +424,7 @@ async function updateFileOrderComment(
   app: App,
   filePath: string,
   lineNum: number,
-  newDigits: string | null,
-  newState: "expanded" | "collapsed" | null = null
+  newDigits: string | null
 ): Promise<boolean> {
   try {
     const { tFile, lines } = await readFileLines(app, filePath);
@@ -439,13 +434,10 @@ async function updateFileOrderComment(
     const digits = newDigits ?? parsed.orderDigits;
     if (!digits) return false;
 
-    const state: "expanded" | "collapsed" = newState ?? parsed.orderState ?? "collapsed";
-
     // Skip write if already correct — avoids triggering a vault.modify refresh loop.
-    if (parsed.orderDigits === digits && parsed.orderState === state) return true;
+    if (parsed.orderDigits === digits) return true;
 
     parsed.orderDigits = digits;
-    parsed.orderState = state;
     lines[lineNum - 1] = serializeTaskLine(parsed);
     await app.vault.modify(tFile, lines.join("\n"));
     return true;
@@ -1113,6 +1105,16 @@ const fileLineCache = new Map<string, { mtime: number; lines: string[] }>();
 // to invalidate it — only file content does, same as fileLineCache above.
 const fileEntryCache = new Map<string, { mtime: number; entries: any[] }>();
 
+// Cards a system action (drop into Done with open subtasks, an archive
+// warning, a promoted subtask) wants rendered open on the very next board
+// build, without writing anything to the file — see collectItems/buildBoard.
+// Peeked (not removed) by collectItems, since it can run several times per
+// build; consumed once, by buildBoard, against the build's final item list.
+const pendingForceExpand = new Set<string>();
+function forceExpandKey(filePath: string, line: number): string {
+  return `${filePath}:${line}`;
+}
+
 async function getCachedFileLines(app: App, filePath: string): Promise<string[]> {
   const tFile = app.vault.getAbstractFileByPath(filePath) as TFile | null;
   if (!tFile) return [];
@@ -1411,7 +1413,6 @@ async function moveToColumn(
   config: KanbanConfig,
   dateStrToAppend: string | null = null,
   newDigits: string | null = null,
-  newState: "expanded" | "collapsed" | null = null,
   triggerAnnotation: string | null = null,
   clearDate: boolean = false
 ): Promise<boolean> {
@@ -1475,11 +1476,6 @@ async function moveToColumn(
 
     if (newDigits !== null) {
       parsed.orderDigits = newDigits;
-      parsed.orderState =
-        newState ??
-        ([config.normDone, config.normLater].includes(normalizeTag(targetTag))
-          ? "collapsed"
-          : "expanded");
     }
 
     lines[idx] = serializeTaskLine(parsed);
@@ -1693,7 +1689,6 @@ async function moveCardToNewDoc(
   // Leaving Later: its @date annotation was a trigger date, meaningless elsewhere.
   if (wasLater) parsed.date = null;
   parsed.orderDigits = null;
-  parsed.orderState = null;
   const newTaskLine = serializeTaskLine(parsed);
 
   // Create or update the project document
@@ -1790,7 +1785,6 @@ async function archiveToSection(
       const hadOwnKanbanTag = parsed.tags.some((t) => config.normKanban.includes(normalizeTag(t)));
       parsed.tags = parsed.tags.filter((t) => !config.normKanban.includes(normalizeTag(t)));
       parsed.orderDigits = null;
-      parsed.orderState = null;
       if (_isTopLevel && keepRecurring && config.normRecurrent && hasRecurrentAnnotation(lines[idx], config.normRecurrent)) {
         hasRecurrentInBlock = true;
         // Interval-based recurrence: push the next-fire date out by the repeat interval,
@@ -1927,7 +1921,6 @@ async function archiveDoneSubtasks(
       const p = parseTaskLine(raw);
       p.tags = p.tags.filter((t) => !config.normKanban.includes(normalizeTag(t)));
       p.orderDigits = null;
-      p.orderState = null;
       return serializeTaskLine(p);
     };
 
@@ -2070,8 +2063,10 @@ async function promoteSubToChild(
       newCalc = { digits: prevSibling.digits + "9", len: prevSibling.len + 1 };
     }
 
-    const newState: "expanded" | "collapsed" = [config.normDone, config.normLater].includes(normParent)
-      ? "collapsed" : "expanded";
+    // A newly-promoted card starts expanded so its own subtasks (if any) are
+    // immediately visible, unless it lands straight in Done/Later — a
+    // session-only flag, not written to the file (see pendingForceExpand).
+    const expandOnPromote = ![config.normDone, config.normLater].includes(normParent);
 
     // Write tag + order in a single file write
     const { tFile, lines } = await readFileLines(app, filePath);
@@ -2091,9 +2086,9 @@ async function promoteSubToChild(
         if (dm) parsed.date = dm[0];
       }
       parsed.orderDigits = newCalc.digits;
-      parsed.orderState = newState;
       lines[subLineNum - 1] = serializeTaskLine(parsed);
       await writeFileLines(app, tFile, lines);
+      if (expandOnPromote) pendingForceExpand.add(forceExpandKey(filePath, subLineNum));
       new Notice(`Tagged subtask with ${parentTag.replace(/^#/, "").toUpperCase()}.`);
     };
 
@@ -2330,7 +2325,6 @@ function parseFileEntries(lines: string[], filePath: string, config: KanbanConfi
           item: { text: hMatch[2].trim(), tags, line: i + 1 + start, subs: [] },
           source: { path: filePath },
           filePath,
-          state: parsed?.state ?? "collapsed",
           digits: parsed?.digits ?? null,
           len: parsed?.len ?? null,
           isPromoted: stack.length > 0,
@@ -2372,7 +2366,6 @@ function parseFileEntries(lines: string[], filePath: string, config: KanbanConfi
       item: { text: trim, tags: ownTags, line: i + 1 + start, subs: [] },
       source: { path: filePath },
       filePath,
-      state: parsed?.state ?? "collapsed",
       digits: parsed?.digits ?? null,
       len: parsed?.len ?? null,
       isPromoted: stack.length > 0 && ownTags.some((t: string) =>
@@ -2471,7 +2464,15 @@ export async function collectItems(
 
   for (const filePath of targetFilePaths) {
     const fileItems = await getCachedFileEntries(app, filePath, config);
-    for (const e of fileItems) allItems.push({ ...e, discoveryIndex: discoveryIdx++ });
+    for (const e of fileItems) {
+      // Peeked, not consumed — getCachedFileEntries' result may be shared
+      // across several collectItems calls within one buildBoard pass, and
+      // only that pass's final item list should actually consume the flag
+      // (see the loop in buildBoard right after items settles).
+      const state: "expanded" | "collapsed" =
+        pendingForceExpand.has(forceExpandKey(filePath, e.item.line)) ? "expanded" : "collapsed";
+      allItems.push({ ...e, state, discoveryIndex: discoveryIdx++ });
+    }
   }
 
   return allItems;
@@ -2552,10 +2553,9 @@ async function assignInitialOrders(
         app,
         unordered[i].filePath,
         unordered[i].item.line,
-        digits,
-        "collapsed"
+        digits
       );
-      Object.assign(unordered[i], { digits, len, state: "collapsed" });
+      Object.assign(unordered[i], { digits, len });
     }
 
     col.cards.sort(compareCardsByDigits);
@@ -4243,7 +4243,6 @@ function createCardHTML(
     data-last-sub-line="${lastSubLn}"
     data-raw="${rawText.replace(/"/g, "&quot;")}"
     data-digits="${item.digits || ""}"
-    data-state="${item.state}"
     data-tags='${JSON.stringify(item.item.tags).replace(/'/g, "&#39;")}'
     data-subs='${JSON.stringify(item.item.subs.map((s: any) => ({ line: s.line, text: s.text, subs: s.subs || [] }))).replace(/'/g, "&#39;")}'
     data-is-promoted="${item.isPromoted || false}"
@@ -4887,7 +4886,7 @@ export async function buildBoard(
   });
   if (laterToMove.length) {
     for (const item of laterToMove)
-      await moveToColumn(app, item.filePath, item.item.line, item.item.tags, config.dueColumn, false, config, null, null, null, null, true);
+      await moveToColumn(app, item.filePath, item.item.line, item.item.tags, config.dueColumn, false, config, null, null, null, true);
     items = await collectItems(app, paths, config);
   }
 
@@ -4929,7 +4928,7 @@ export async function buildBoard(
     });
     if (recurrentToMove.length) {
       for (const item of recurrentToMove)
-        await moveToColumn(app, item.filePath, item.item.line, item.item.tags, config.dueColumn, false, config, null, null, null, null, true);
+        await moveToColumn(app, item.filePath, item.item.line, item.item.tags, config.dueColumn, false, config, null, null, null, true);
       items = await collectItems(app, paths, config);
     }
     // Step C: add the due tag to subtasks of #recurrent cards whose trigger fires today
@@ -4944,6 +4943,11 @@ export async function buildBoard(
     // Step D: pop subtasks that will never fire (see popOrphanedRecurrentSubs) into Due
     if (await popOrphanedRecurrentSubs(app, items, config)) items = await collectItems(app, paths, config);
   }
+
+  // items is now settled for this build — consume any pending force-expand
+  // flags against this final list (collectItems only peeked them, since it
+  // may have run several times above while items was still being resolved).
+  for (const i of items) pendingForceExpand.delete(forceExpandKey(i.filePath, i.item.line));
 
   const columns = groupByColumns(items, config);
   await assignInitialOrders(app, columns, config);
@@ -5069,7 +5073,6 @@ export function attachListeners(
       filePath: c.dataset.file!,
       lineNum: parseInt(c.dataset.line!, 10),
       originalTags: JSON.parse(c.dataset.tags!),
-      state: c.dataset.state!,
       isPromoted: c.dataset.isPromoted === "true",
       subs: c.dataset.subs ? JSON.parse(c.dataset.subs) as any[] : [],
       rawText: c.dataset.raw || "",
@@ -5469,7 +5472,6 @@ export function attachListeners(
     }
 
     const isDone = targetNorm === config.normDone;
-    const newState: "expanded" | "collapsed" = "collapsed";
     const siblings = zone ? siblingDataFrom(zone) : [];
     const insertIdx = (zone && currentInsertIndex >= 0) ? currentInsertIndex : siblings.length;
     const isMulti = card.originalTags
@@ -5491,20 +5493,20 @@ export function attachListeners(
       // around the board (drag, reorder, click-to-advance) never re-prompts.
       if (!hasValidTriggers(lineTxt, config.normRecurrent) && !hasChildWithTrigger(card.subs, config.normRecurrent)) {
         showRecurrentTriggerDialog(app, async (trigger) => {
-          await moveToColumn(app, card.filePath, card.lineNum, card.originalTags, targetTag, false, config, null, newCalc.digits, newState, trigger, wasLater);
+          await moveToColumn(app, card.filePath, card.lineNum, card.originalTags, targetTag, false, config, null, newCalc.digits, trigger, wasLater);
           await uncheckSubtasks(app, card.filePath, card.subs, config);
           requestAnimationFrame(() => setTimeout(refresh, 50));
         }, [], extractRepeatSpec(lineTxt));
         return;
       }
-      const ok = await moveToColumn(app, card.filePath, card.lineNum, card.originalTags, targetTag, false, config, null, newCalc.digits, newState, null, wasLater);
+      const ok = await moveToColumn(app, card.filePath, card.lineNum, card.originalTags, targetTag, false, config, null, newCalc.digits, null, wasLater);
       if (ok) await uncheckSubtasks(app, card.filePath, card.subs, config);
       if (ok) requestAnimationFrame(() => setTimeout(refresh, 50));
     } else if (targetNorm === config.normLater) {
       const { lines } = await readFileLines(app, card.filePath);
       const lineTxt = lines[card.lineNum - 1] || "";
       const dateMatch = lineTxt
-        .replace(/%%[\s\S]*?@\s*\d+\s*[cx]\s*%%/g, "")
+        .replace(/%%[\s\S]*?@\s*\d+\s*[cx]?\s*%%/g, "")
         .trim()
         .match(/@(\d{4}-\d{2}-\d{2})/);
       const existing = dateMatch
@@ -5527,7 +5529,6 @@ export function attachListeners(
             config,
             dateStr,
             newCalc.digits,
-            newState,
             null,
             dateStr === null
           );
@@ -5538,6 +5539,8 @@ export function attachListeners(
       // A card moved to Done that still has open subtasks shouldn't land
       // collapsed — open it so the unchecked work is visible (it also gets
       // the Done-column "unmanaged work" highlight, see hasUnmanagedWork).
+      // The force-expand is a session-only flag, not written to the file —
+      // see pendingForceExpand.
       const openOnDone = isDone && hasUnchecked(card.subs);
       const ok = await moveToColumn(
         app,
@@ -5549,11 +5552,13 @@ export function attachListeners(
         config,
         null,
         newCalc.digits,
-        openOnDone ? "expanded" : newState,
         null,
         wasLater
       );
-      if (ok) requestAnimationFrame(() => setTimeout(refresh, 50));
+      if (ok) {
+        if (openOnDone) pendingForceExpand.add(forceExpandKey(card.filePath, card.lineNum));
+        requestAnimationFrame(() => setTimeout(refresh, 50));
+      }
     }
     currentInsertIndex = -1;
   }
@@ -5914,25 +5919,6 @@ export function attachListeners(
       input.focus();
       input.setSelectionRange(input.value.length, input.value.length);
     }));
-  }
-
-  // ── Details toggle → save state ──
-  async function onToggle(e: Event) {
-    const details = e.target as HTMLDetailsElement;
-    if (details.tagName !== "DETAILS") return;
-    const card = details.closest(".kanban-card") as HTMLElement | null;
-    if (!card) return;
-    const newState: "expanded" | "collapsed" = details.open
-      ? "expanded"
-      : "collapsed";
-    await updateFileOrderComment(
-      app,
-      card.dataset.file!,
-      parseInt(card.dataset.line!, 10),
-      card.dataset.digits || "00000",
-      newState
-    );
-    card.dataset.state = newState;
   }
 
   // ── Touch interaction ──
@@ -6477,25 +6463,23 @@ export function attachListeners(
       // A card with open (unchecked) subtasks shouldn't be archived silently —
       // expand it instead so the open work is visible. Once the user has
       // already opened it (acknowledging the open subtasks), archive anyway.
-      const alreadyOpen = card.dataset.state === "expanded";
+      // The force-expand is a session-only flag so it survives the refresh
+      // between this click and the next one, without writing to the file —
+      // see pendingForceExpand.
+      const alreadyOpen = card.querySelector("details")?.open === true;
+      const lineNum = parseInt(card.dataset.line!, 10);
       if (hasUnchecked(subs) && !alreadyOpen) {
-        await updateFileOrderComment(
-          app,
-          card.dataset.file!,
-          parseInt(card.dataset.line!, 10),
-          card.dataset.digits || "00000",
-          "expanded"
-        );
-        card.dataset.state = "expanded";
+        pendingForceExpand.add(forceExpandKey(card.dataset.file!, lineNum));
         card.querySelector("details")?.setAttribute("open", "");
         opened++;
         continue;
       }
 
+      pendingForceExpand.delete(forceExpandKey(card.dataset.file!, lineNum));
       const ok = await archiveToSection(
         app,
         card.dataset.file!,
-        parseInt(card.dataset.line!, 10),
+        lineNum,
         subs,
         config,
         card.dataset.isPromoted !== "true"
@@ -6552,7 +6536,6 @@ export function attachListeners(
   boardEl.addEventListener("click", onArchiveClick);
   boardEl.addEventListener("dblclick", onDblClick);
   boardEl.addEventListener("dblclick", onSubDblClick);
-  boardEl.addEventListener("toggle", onToggle, true);
   boardEl.addEventListener("touchstart", onTouchStart as unknown as EventListener, { passive: true });
   boardEl.addEventListener("touchmove", onTouchMove as unknown as EventListener, { passive: false });
   boardEl.addEventListener("touchend", onTouchEnd as unknown as EventListener, { passive: false });
@@ -6581,7 +6564,6 @@ export function attachListeners(
     boardEl.removeEventListener("click", onArchiveClick);
     boardEl.removeEventListener("dblclick", onDblClick);
     boardEl.removeEventListener("dblclick", onSubDblClick);
-    boardEl.removeEventListener("toggle", onToggle, true);
     boardEl.removeEventListener("touchstart", onTouchStart as unknown as EventListener);
     boardEl.removeEventListener("touchmove", onTouchMove as unknown as EventListener);
     boardEl.removeEventListener("touchend", onTouchEnd as unknown as EventListener);

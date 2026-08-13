@@ -178,24 +178,18 @@ function extractTags(text) {
 var DELETED_TAG = "#deleted";
 var isDeletedTag = (t) => normalizeTag(t) === normalizeTag(DELETED_TAG);
 function parseOrderComment(text) {
-  const m = text.match(/%% @(\d+)(\w) %%/);
+  const m = text.match(/%% @(\d+)\w? %%/);
   if (!m)
     return null;
-  const stateChar = m[2].toLowerCase();
-  const state = stateChar === "x" ? "expanded" : stateChar === "c" ? "collapsed" : null;
-  if (!state)
-    return null;
-  return /[1-9]/.test(m[1]) ? { digits: m[1], state, len: m[1].length } : null;
+  return /[1-9]/.test(m[1]) ? { digits: m[1], len: m[1].length } : null;
 }
 function parseTaskLine(raw) {
   const indent = (raw.match(/^(\s*)/) || ["", ""])[1];
   let rest = raw.slice(indent.length);
   let orderDigits = null;
-  let orderState = null;
-  const om = rest.match(/%% @(\d+)(\w) %%/);
+  const om = rest.match(/%% @(\d+)\w? %%/);
   if (om) {
     orderDigits = om[1];
-    orderState = om[2].toLowerCase() === "x" ? "expanded" : "collapsed";
   }
   let skipDate = null;
   const sm = rest.match(/%% @skip:(\d{4}-\d{2}-\d{2}) %%/);
@@ -240,7 +234,7 @@ function parseTaskLine(raw) {
   }
   const tags = rest.match(/(?<!\w)#\w+/g) || [];
   const text = rest.replace(/\s*(?<!\w)#\w+/g, "").trim();
-  return { indent, bullet, checked, text, tags, date, doneDate, createdDate, deletedDate, orderDigits, orderState, skipDate, color };
+  return { indent, bullet, checked, text, tags, date, doneDate, createdDate, deletedDate, orderDigits, skipDate, color };
 }
 function serializeTaskLine(t) {
   const parts = [];
@@ -258,8 +252,8 @@ function serializeTaskLine(t) {
     parts.push(`%% @created:${t.createdDate} %%`);
   if (t.deletedDate)
     parts.push(`%% @deleted:${t.deletedDate} %%`);
-  if (t.orderDigits && t.orderState !== null) {
-    parts.push(`%% @${t.orderDigits}${t.orderState === "expanded" ? "x" : "c"} %%`);
+  if (t.orderDigits) {
+    parts.push(`%% @${t.orderDigits} %%`);
   }
   if (t.skipDate) {
     parts.push(`%% @skip:${t.skipDate} %%`);
@@ -269,7 +263,7 @@ function serializeTaskLine(t) {
   }
   return t.indent + parts.join(" ");
 }
-async function updateFileOrderComment(app, filePath, lineNum, newDigits, newState = null) {
+async function updateFileOrderComment(app, filePath, lineNum, newDigits) {
   try {
     const { tFile, lines } = await readFileLines(app, filePath);
     if (lineNum < 1 || lineNum > lines.length)
@@ -278,11 +272,9 @@ async function updateFileOrderComment(app, filePath, lineNum, newDigits, newStat
     const digits = newDigits ?? parsed.orderDigits;
     if (!digits)
       return false;
-    const state = newState ?? parsed.orderState ?? "collapsed";
-    if (parsed.orderDigits === digits && parsed.orderState === state)
+    if (parsed.orderDigits === digits)
       return true;
     parsed.orderDigits = digits;
-    parsed.orderState = state;
     lines[lineNum - 1] = serializeTaskLine(parsed);
     await app.vault.modify(tFile, lines.join("\n"));
     return true;
@@ -804,6 +796,10 @@ function renderCheckbox(text, opts = {}) {
 }
 var fileLineCache = /* @__PURE__ */ new Map();
 var fileEntryCache = /* @__PURE__ */ new Map();
+var pendingForceExpand = /* @__PURE__ */ new Set();
+function forceExpandKey(filePath, line) {
+  return `${filePath}:${line}`;
+}
 async function getCachedFileLines(app, filePath) {
   const tFile = app.vault.getAbstractFileByPath(filePath);
   if (!tFile)
@@ -1024,7 +1020,7 @@ function applyRecurrentTrigger(parsed, normRecurrent, triggerAnnotation) {
       parsed.text += ` ${tok}`;
   }
 }
-async function moveToColumn(app, filePath, lineNum, originalTags, targetTag, isDone, config, dateStrToAppend = null, newDigits = null, newState = null, triggerAnnotation = null, clearDate = false) {
+async function moveToColumn(app, filePath, lineNum, originalTags, targetTag, isDone, config, dateStrToAppend = null, newDigits = null, triggerAnnotation = null, clearDate = false) {
   try {
     const { tFile, lines } = await readFileLines(app, filePath);
     const sortedOrig = originalTags.slice().sort().join(",");
@@ -1063,7 +1059,6 @@ async function moveToColumn(app, filePath, lineNum, originalTags, targetTag, isD
     }
     if (newDigits !== null) {
       parsed.orderDigits = newDigits;
-      parsed.orderState = newState ?? ([config.normDone, config.normLater].includes(normalizeTag(targetTag)) ? "collapsed" : "expanded");
     }
     lines[idx] = serializeTaskLine(parsed);
     const n = new Date();
@@ -1222,7 +1217,6 @@ async function moveCardToNewDoc(app, filePath, lineNum, plainTitle, targetTag, c
   if (wasLater)
     parsed.date = null;
   parsed.orderDigits = null;
-  parsed.orderState = null;
   const newTaskLine = serializeTaskLine(parsed);
   let projFile = app.vault.getAbstractFileByPath(docPath);
   const isNew = !projFile;
@@ -1272,7 +1266,6 @@ async function archiveToSection(app, filePath, mainLineNum, subLines, config, _i
       const hadOwnKanbanTag = parsed.tags.some((t) => config.normKanban.includes(normalizeTag(t)));
       parsed.tags = parsed.tags.filter((t) => !config.normKanban.includes(normalizeTag(t)));
       parsed.orderDigits = null;
-      parsed.orderState = null;
       if (_isTopLevel && keepRecurring && config.normRecurrent && hasRecurrentAnnotation(lines[idx], config.normRecurrent)) {
         hasRecurrentInBlock = true;
         const repeatSpec = extractRepeatSpec(lines[idx]);
@@ -1347,7 +1340,6 @@ async function archiveDoneSubtasks(app, filePath, cardLineNum, subs, config) {
       const p = parseTaskLine(raw);
       p.tags = p.tags.filter((t) => !config.normKanban.includes(normalizeTag(t)));
       p.orderDigits = null;
-      p.orderState = null;
       return serializeTaskLine(p);
     };
     const chunks = [];
@@ -1432,7 +1424,7 @@ async function promoteSubToChild(app, filePath, subLineNum, parentTag, parentDig
     } else {
       newCalc = { digits: prevSibling.digits + "9", len: prevSibling.len + 1 };
     }
-    const newState = [config.normDone, config.normLater].includes(normParent) ? "collapsed" : "expanded";
+    const expandOnPromote = ![config.normDone, config.normLater].includes(normParent);
     const { tFile, lines } = await readFileLines(app, filePath);
     if (subLineNum < 1 || subLineNum > lines.length)
       return false;
@@ -1450,9 +1442,10 @@ async function promoteSubToChild(app, filePath, subLineNum, parentTag, parentDig
           parsed.date = dm[0];
       }
       parsed.orderDigits = newCalc.digits;
-      parsed.orderState = newState;
       lines[subLineNum - 1] = serializeTaskLine(parsed);
       await writeFileLines(app, tFile, lines);
+      if (expandOnPromote)
+        pendingForceExpand.add(forceExpandKey(filePath, subLineNum));
       new import_obsidian.Notice(`Tagged subtask with ${parentTag.replace(/^#/, "").toUpperCase()}.`);
     };
     if (normParent === config.normRecurrent && !(hasRecurrentAnnotation(parsed.text, config.normRecurrent) && hasValidTriggers(parsed.text, config.normRecurrent))) {
@@ -1599,7 +1592,6 @@ function parseFileEntries(lines, filePath, config) {
           item: { text: hMatch[2].trim(), tags, line: i + 1 + start, subs: [] },
           source: { path: filePath },
           filePath,
-          state: parsed2?.state ?? "collapsed",
           digits: parsed2?.digits ?? null,
           len: parsed2?.len ?? null,
           isPromoted: stack.length > 0,
@@ -1627,7 +1619,6 @@ function parseFileEntries(lines, filePath, config) {
       item: { text: trim, tags: ownTags, line: i + 1 + start, subs: [] },
       source: { path: filePath },
       filePath,
-      state: parsed?.state ?? "collapsed",
       digits: parsed?.digits ?? null,
       len: parsed?.len ?? null,
       isPromoted: stack.length > 0 && ownTags.some(
@@ -1697,8 +1688,10 @@ async function collectItems(app, targetFilePaths, config) {
   let discoveryIdx = 0;
   for (const filePath of targetFilePaths) {
     const fileItems = await getCachedFileEntries(app, filePath, config);
-    for (const e of fileItems)
-      allItems.push({ ...e, discoveryIndex: discoveryIdx++ });
+    for (const e of fileItems) {
+      const state = pendingForceExpand.has(forceExpandKey(filePath, e.item.line)) ? "expanded" : "collapsed";
+      allItems.push({ ...e, state, discoveryIndex: discoveryIdx++ });
+    }
   }
   return allItems;
 }
@@ -1759,10 +1752,9 @@ async function assignInitialOrders(app, columns, _config) {
         app,
         unordered[i].filePath,
         unordered[i].item.line,
-        digits,
-        "collapsed"
+        digits
       );
-      Object.assign(unordered[i], { digits, len, state: "collapsed" });
+      Object.assign(unordered[i], { digits, len });
     }
     col.cards.sort(compareCardsByDigits);
   }
@@ -3064,7 +3056,6 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
     data-last-sub-line="${lastSubLn}"
     data-raw="${rawText.replace(/"/g, "&quot;")}"
     data-digits="${item.digits || ""}"
-    data-state="${item.state}"
     data-tags='${JSON.stringify(item.item.tags).replace(/'/g, "&#39;")}'
     data-subs='${JSON.stringify(item.item.subs.map((s) => ({ line: s.line, text: s.text, subs: s.subs || [] }))).replace(/'/g, "&#39;")}'
     data-is-promoted="${item.isPromoted || false}"
@@ -3526,7 +3517,7 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
   });
   if (laterToMove.length) {
     for (const item of laterToMove)
-      await moveToColumn(app, item.filePath, item.item.line, item.item.tags, config.dueColumn, false, config, null, null, null, null, true);
+      await moveToColumn(app, item.filePath, item.item.line, item.item.tags, config.dueColumn, false, config, null, null, null, true);
     items = await collectItems(app, paths, config);
   }
   {
@@ -3559,7 +3550,7 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
     });
     if (recurrentToMove.length) {
       for (const item of recurrentToMove)
-        await moveToColumn(app, item.filePath, item.item.line, item.item.tags, config.dueColumn, false, config, null, null, null, null, true);
+        await moveToColumn(app, item.filePath, item.item.line, item.item.tags, config.dueColumn, false, config, null, null, null, true);
       items = await collectItems(app, paths, config);
     }
     let anySubTriggered = false;
@@ -3574,6 +3565,8 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
     if (await popOrphanedRecurrentSubs(app, items, config))
       items = await collectItems(app, paths, config);
   }
+  for (const i of items)
+    pendingForceExpand.delete(forceExpandKey(i.filePath, i.item.line));
   const columns = groupByColumns(items, config);
   await assignInitialOrders(app, columns, config);
   const laterColData = columns[config.normLater];
@@ -3678,7 +3671,6 @@ function attachListeners(boardEl, config, app, refresh) {
       filePath: c.dataset.file,
       lineNum: parseInt(c.dataset.line, 10),
       originalTags: JSON.parse(c.dataset.tags),
-      state: c.dataset.state,
       isPromoted: c.dataset.isPromoted === "true",
       subs: c.dataset.subs ? JSON.parse(c.dataset.subs) : [],
       rawText: c.dataset.raw || ""
@@ -4016,7 +4008,6 @@ function attachListeners(boardEl, config, app, refresh) {
       }
     }
     const isDone = targetNorm === config.normDone;
-    const newState = "collapsed";
     const siblings = zone ? siblingDataFrom(zone) : [];
     const insertIdx = zone && currentInsertIndex >= 0 ? currentInsertIndex : siblings.length;
     const isMulti = card.originalTags.map(normalizeTag).filter((t) => config.normKanban.includes(t)).length > 1;
@@ -4028,13 +4019,13 @@ function attachListeners(boardEl, config, app, refresh) {
       const lineTxt = lines[card.lineNum - 1] || "";
       if (!hasValidTriggers(lineTxt, config.normRecurrent) && !hasChildWithTrigger(card.subs, config.normRecurrent)) {
         showRecurrentTriggerDialog(app, async (trigger) => {
-          await moveToColumn(app, card.filePath, card.lineNum, card.originalTags, targetTag, false, config, null, newCalc.digits, newState, trigger, wasLater);
+          await moveToColumn(app, card.filePath, card.lineNum, card.originalTags, targetTag, false, config, null, newCalc.digits, trigger, wasLater);
           await uncheckSubtasks(app, card.filePath, card.subs, config);
           requestAnimationFrame(() => setTimeout(refresh, 50));
         }, [], extractRepeatSpec(lineTxt));
         return;
       }
-      const ok = await moveToColumn(app, card.filePath, card.lineNum, card.originalTags, targetTag, false, config, null, newCalc.digits, newState, null, wasLater);
+      const ok = await moveToColumn(app, card.filePath, card.lineNum, card.originalTags, targetTag, false, config, null, newCalc.digits, null, wasLater);
       if (ok)
         await uncheckSubtasks(app, card.filePath, card.subs, config);
       if (ok)
@@ -4042,7 +4033,7 @@ function attachListeners(boardEl, config, app, refresh) {
     } else if (targetNorm === config.normLater) {
       const { lines } = await readFileLines(app, card.filePath);
       const lineTxt = lines[card.lineNum - 1] || "";
-      const dateMatch = lineTxt.replace(/%%[\s\S]*?@\s*\d+\s*[cx]\s*%%/g, "").trim().match(/@(\d{4}-\d{2}-\d{2})/);
+      const dateMatch = lineTxt.replace(/%%[\s\S]*?@\s*\d+\s*[cx]?\s*%%/g, "").trim().match(/@(\d{4}-\d{2}-\d{2})/);
       const existing = dateMatch ? new Date(dateMatch[1] + "T00:00:00") : null;
       const defDate = getDefaultDate(existing).toISOString().split("T")[0];
       showDateDialog(
@@ -4060,7 +4051,6 @@ function attachListeners(boardEl, config, app, refresh) {
             config,
             dateStr,
             newCalc.digits,
-            newState,
             null,
             dateStr === null
           );
@@ -4079,12 +4069,14 @@ function attachListeners(boardEl, config, app, refresh) {
         config,
         null,
         newCalc.digits,
-        openOnDone ? "expanded" : newState,
         null,
         wasLater
       );
-      if (ok)
+      if (ok) {
+        if (openOnDone)
+          pendingForceExpand.add(forceExpandKey(card.filePath, card.lineNum));
         requestAnimationFrame(() => setTimeout(refresh, 50));
+      }
     }
     currentInsertIndex = -1;
   }
@@ -4424,23 +4416,6 @@ function attachListeners(boardEl, config, app, refresh) {
       input.focus();
       input.setSelectionRange(input.value.length, input.value.length);
     }));
-  }
-  async function onToggle(e) {
-    const details = e.target;
-    if (details.tagName !== "DETAILS")
-      return;
-    const card = details.closest(".kanban-card");
-    if (!card)
-      return;
-    const newState = details.open ? "expanded" : "collapsed";
-    await updateFileOrderComment(
-      app,
-      card.dataset.file,
-      parseInt(card.dataset.line, 10),
-      card.dataset.digits || "00000",
-      newState
-    );
-    card.dataset.state = newState;
   }
   let touchCard = null;
   let ghost = null;
@@ -4943,24 +4918,19 @@ function attachListeners(boardEl, config, app, refresh) {
         subs = JSON.parse(card.dataset.subs || "[]");
       } catch {
       }
-      const alreadyOpen = card.dataset.state === "expanded";
+      const alreadyOpen = card.querySelector("details")?.open === true;
+      const lineNum = parseInt(card.dataset.line, 10);
       if (hasUnchecked(subs) && !alreadyOpen) {
-        await updateFileOrderComment(
-          app,
-          card.dataset.file,
-          parseInt(card.dataset.line, 10),
-          card.dataset.digits || "00000",
-          "expanded"
-        );
-        card.dataset.state = "expanded";
+        pendingForceExpand.add(forceExpandKey(card.dataset.file, lineNum));
         card.querySelector("details")?.setAttribute("open", "");
         opened++;
         continue;
       }
+      pendingForceExpand.delete(forceExpandKey(card.dataset.file, lineNum));
       const ok = await archiveToSection(
         app,
         card.dataset.file,
-        parseInt(card.dataset.line, 10),
+        lineNum,
         subs,
         config,
         card.dataset.isPromoted !== "true"
@@ -5021,7 +4991,6 @@ function attachListeners(boardEl, config, app, refresh) {
   boardEl.addEventListener("click", onArchiveClick);
   boardEl.addEventListener("dblclick", onDblClick);
   boardEl.addEventListener("dblclick", onSubDblClick);
-  boardEl.addEventListener("toggle", onToggle, true);
   boardEl.addEventListener("touchstart", onTouchStart, { passive: true });
   boardEl.addEventListener("touchmove", onTouchMove, { passive: false });
   boardEl.addEventListener("touchend", onTouchEnd, { passive: false });
@@ -5049,7 +5018,6 @@ function attachListeners(boardEl, config, app, refresh) {
     boardEl.removeEventListener("click", onArchiveClick);
     boardEl.removeEventListener("dblclick", onDblClick);
     boardEl.removeEventListener("dblclick", onSubDblClick);
-    boardEl.removeEventListener("toggle", onToggle, true);
     boardEl.removeEventListener("touchstart", onTouchStart);
     boardEl.removeEventListener("touchmove", onTouchMove);
     boardEl.removeEventListener("touchend", onTouchEnd);
