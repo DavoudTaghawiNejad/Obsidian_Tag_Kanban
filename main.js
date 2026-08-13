@@ -811,6 +811,15 @@ function expireLastExpandedIfStale(graceMs) {
     currentlyExpandedKey = null;
   }
 }
+function collapseAllCards(boardEl) {
+  boardEl.querySelectorAll(".kanban-card details[open]").forEach((details) => {
+    details.removeAttribute("open");
+    const arrow = details.closest(".kanban-card")?.querySelector(".kb-expand-arrow");
+    if (arrow)
+      arrow.textContent = "\u25BC";
+  });
+  currentlyExpandedKey = null;
+}
 async function getCachedFileLines(app, filePath) {
   const tFile = app.vault.getAbstractFileByPath(filePath);
   if (!tFile)
@@ -5076,6 +5085,14 @@ var KanbanView = class extends import_obsidian2.ItemView {
     // unrelated leaf change elsewhere) can be stamped exactly once — see
     // noteBoardLeft/expireLastExpandedIfStale.
     this.wasActive = false;
+    // Pushed onto Obsidian's global keymap only while this leaf is the active
+    // one — see pushBoardScope/popBoardScope — so a bare Escape is intercepted
+    // on the board itself (previously it fell through to Obsidian's own
+    // handling instead of doing anything useful here) without stealing Escape
+    // from other leaves. A dialog opened from the board pushes its own Scope
+    // on top of this one (see makeOverlay in kanban.ts), so its Escape
+    // naturally takes priority while it's open.
+    this.boardScope = null;
     this.plugin = plugin;
   }
   getViewType() {
@@ -5095,13 +5112,17 @@ var KanbanView = class extends import_obsidian2.ItemView {
           expireLastExpandedIfStale(this.plugin.settings.keepLastExpandedMinutes * 60 * 1e3);
           this.scheduleRefresh(100);
           this.scrollPastSearchBar();
+          this.pushBoardScope();
         } else if (this.wasActive) {
           noteBoardLeft();
+          this.popBoardScope();
         }
         this.wasActive = isActive;
       })
     );
     this.wasActive = this.leaf === this.app.workspace.activeLeaf;
+    if (this.wasActive)
+      this.pushBoardScope();
     this.scheduleMidnightRefresh();
     this.resizeObserver = new ResizeObserver(() => this.scheduleResizeCheck());
     this.resizeObserver.observe(this.contentEl);
@@ -5117,6 +5138,33 @@ var KanbanView = class extends import_obsidian2.ItemView {
     const offset = scroll.getBoundingClientRect().top - this.contentEl.getBoundingClientRect().top + this.contentEl.scrollTop;
     this.contentEl.scrollTop = offset;
   }
+  pushBoardScope() {
+    if (this.boardScope)
+      return;
+    const scope = new import_obsidian2.Scope();
+    scope.register([], "Escape", () => {
+      this.handleBoardEscape();
+      return false;
+    });
+    this.boardScope = scope;
+    this.app.keymap.pushScope(scope);
+  }
+  popBoardScope() {
+    if (!this.boardScope)
+      return;
+    this.app.keymap.popScope(this.boardScope);
+    this.boardScope = null;
+  }
+  // Bare Escape on the board itself (no dialog open — a dialog's own Scope,
+  // pushed on top of this one, would have already handled Escape as a
+  // cancel): collapse every expanded card and scroll the filter row back out
+  // of view, same as first landing on the board.
+  handleBoardEscape() {
+    const boardEl = this.contentEl.querySelector("#kanban-wrapper");
+    if (boardEl)
+      collapseAllCards(boardEl);
+    this.scrollPastSearchBar();
+  }
   async onClose() {
     if (this.debounceTimer)
       clearTimeout(this.debounceTimer);
@@ -5127,6 +5175,7 @@ var KanbanView = class extends import_obsidian2.ItemView {
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
     this.listenerCleanup?.();
+    this.popBoardScope();
   }
   // Called from action handlers (promote, demote, archive, drop) to force an immediate re-render.
   async refresh() {

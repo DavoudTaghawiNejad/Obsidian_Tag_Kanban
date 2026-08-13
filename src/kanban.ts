@@ -1144,6 +1144,20 @@ export function expireLastExpandedIfStale(graceMs: number): void {
   }
 }
 
+// Collapses every open card on the board — used by the board-level Escape
+// handler (KanbanView.handleBoardEscape). Explicitly clears
+// currentlyExpandedKey rather than relying on the native "toggle" event that
+// removeAttribute below queues, matching the same belt-and-suspenders
+// approach the archive handler in attachListeners already uses.
+export function collapseAllCards(boardEl: HTMLElement): void {
+  boardEl.querySelectorAll<HTMLDetailsElement>(".kanban-card details[open]").forEach((details) => {
+    details.removeAttribute("open");
+    const arrow = details.closest(".kanban-card")?.querySelector<HTMLElement>(".kb-expand-arrow");
+    if (arrow) arrow.textContent = "▼";
+  });
+  currentlyExpandedKey = null;
+}
+
 async function getCachedFileLines(app: App, filePath: string): Promise<string[]> {
   const tFile = app.vault.getAbstractFileByPath(filePath) as TFile | null;
   if (!tFile) return [];

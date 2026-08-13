@@ -1,4 +1,4 @@
-import { ItemView, WorkspaceLeaf } from "obsidian";
+import { ItemView, Scope, WorkspaceLeaf } from "obsidian";
 import KanbanPlugin from "./main";
 import {
   buildConfig,
@@ -8,6 +8,7 @@ import {
   isNarrowLayout,
   noteBoardLeft,
   expireLastExpandedIfStale,
+  collapseAllCards,
 } from "./kanban";
 
 export const VIEW_TYPE_KANBAN = "kanban-board-view";
@@ -26,6 +27,14 @@ export class KanbanView extends ItemView {
   // unrelated leaf change elsewhere) can be stamped exactly once — see
   // noteBoardLeft/expireLastExpandedIfStale.
   private wasActive = false;
+  // Pushed onto Obsidian's global keymap only while this leaf is the active
+  // one — see pushBoardScope/popBoardScope — so a bare Escape is intercepted
+  // on the board itself (previously it fell through to Obsidian's own
+  // handling instead of doing anything useful here) without stealing Escape
+  // from other leaves. A dialog opened from the board pushes its own Scope
+  // on top of this one (see makeOverlay in kanban.ts), so its Escape
+  // naturally takes priority while it's open.
+  private boardScope: Scope | null = null;
 
   constructor(leaf: WorkspaceLeaf, plugin: KanbanPlugin) {
     super(leaf);
@@ -53,8 +62,10 @@ export class KanbanView extends ItemView {
           expireLastExpandedIfStale(this.plugin.settings.keepLastExpandedMinutes * 60 * 1000);
           this.scheduleRefresh(100);
           this.scrollPastSearchBar();
+          this.pushBoardScope();
         } else if (this.wasActive) {
           noteBoardLeft();
+          this.popBoardScope();
         }
         this.wasActive = isActive;
       })
@@ -62,6 +73,7 @@ export class KanbanView extends ItemView {
     // The leaf is typically already active by the time onOpen runs, before
     // the listener above exists to have caught that transition itself.
     this.wasActive = this.leaf === this.app.workspace.activeLeaf;
+    if (this.wasActive) this.pushBoardScope();
 
     // Refresh just past midnight so past-due #later cards auto-move
     this.scheduleMidnightRefresh();
@@ -86,6 +98,33 @@ export class KanbanView extends ItemView {
     this.contentEl.scrollTop = offset;
   }
 
+  private pushBoardScope() {
+    if (this.boardScope) return;
+    const scope = new Scope();
+    scope.register([], "Escape", () => {
+      this.handleBoardEscape();
+      return false;
+    });
+    this.boardScope = scope;
+    this.app.keymap.pushScope(scope);
+  }
+
+  private popBoardScope() {
+    if (!this.boardScope) return;
+    this.app.keymap.popScope(this.boardScope);
+    this.boardScope = null;
+  }
+
+  // Bare Escape on the board itself (no dialog open — a dialog's own Scope,
+  // pushed on top of this one, would have already handled Escape as a
+  // cancel): collapse every expanded card and scroll the filter row back out
+  // of view, same as first landing on the board.
+  private handleBoardEscape() {
+    const boardEl = this.contentEl.querySelector<HTMLElement>("#kanban-wrapper");
+    if (boardEl) collapseAllCards(boardEl);
+    this.scrollPastSearchBar();
+  }
+
   async onClose() {
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
     if (this.midnightTimer) clearTimeout(this.midnightTimer);
@@ -93,6 +132,7 @@ export class KanbanView extends ItemView {
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
     this.listenerCleanup?.();
+    this.popBoardScope();
   }
 
   // Called from action handlers (promote, demote, archive, drop) to force an immediate re-render.
