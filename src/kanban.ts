@@ -1039,6 +1039,7 @@ function renderCheckbox(
     showCheckbox?: boolean;
     vaultName?: string | null;
     enablePromotion?: boolean;
+    promoted?: boolean;
     subLine?: number | null;
     parentTag?: string | null;
     parentDigits?: string | null;
@@ -1049,6 +1050,7 @@ function renderCheckbox(
     showCheckbox = true,
     vaultName = null,
     enablePromotion = false,
+    promoted = false,
     subLine = null,
     parentTag = null,
     parentDigits = null,
@@ -1081,7 +1083,9 @@ function renderCheckbox(
     enablePromotion && isSub && subLine && parentTag && parentDigits !== null
       ? `<span class="promote-icon" style="margin-left:6px;font-size:1.2em;cursor:pointer;color:var(--kb-accent);"
            data-line="${subLine}" data-parent-tag="${parentTag}" data-parent-digits="${parentDigits}">&#9655</span>`
-      : "";
+      : promoted && isSub
+        ? `<span class="promoted-icon" title="Already its own card" style="margin-left:6px;font-size:1.2em;color:var(--kb-accent);">&#9679;</span>`
+        : "";
 
   return `${cbHtml}${content}${promoteHtml}`;
 }
@@ -4161,6 +4165,7 @@ function createCardHTML(
       showCheckbox: hasCheckbox,
       vaultName,
       enablePromotion: hasCheckbox && !isChecked && !alreadyTagged,
+      promoted: alreadyTagged,
       subLine: sub.line,
       parentTag,
       parentDigits: item.digits,
