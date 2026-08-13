@@ -4401,7 +4401,6 @@ export function buildColorCSS(config: KanbanConfig): string {
 
 async function tagUntaggedRecurrentCards(app: App, paths: string[], config: KanbanConfig): Promise<void> {
   const annotationRe = new RegExp(`@${config.normRecurrent}\\b`, 'i');
-  const listItemRe = /^(\s*)(?:[-*+]|\d+[.)]\s)/;
   for (const filePath of paths) {
     const tFile = app.vault.getAbstractFileByPath(filePath) as TFile | null;
     if (!tFile) continue;
@@ -4416,25 +4415,19 @@ async function tagUntaggedRecurrentCards(app: App, paths: string[], config: Kanb
     const scanLimit = calloutIdx >= 0 ? calloutIdx : lines.length;
     for (let i = 0; i < scanLimit; i++) {
       if (!annotationRe.test(lines[i])) continue;
+      // Only a top-level (unindented) line becomes its own Recurrent card here.
+      // An indented "@recurrent" annotation is always a per-subtask trigger (see
+      // triggerRecurrentSubs) — it's consumed in place and only ever promoted to
+      // Due, never Recurrent, once it actually fires. Previously this was allowed
+      // through as long as the immediate parent line didn't itself carry the
+      // #recurrent tag, which broke the instant the parent card moved out of
+      // Recurrent to any other column: the subtask's now-dormant annotation (still
+      // waiting for its own trigger, or simply never stripped) would suddenly pass
+      // that check and get wrongly auto-tagged into its own phantom Recurrent card.
+      const myIndent = (lines[i].match(/^(\s*)/) || [""])[0].length;
+      if (myIndent > 0) continue;
       const tags = extractTags(lines[i]);
       if (tags.some((t: string) => config.normKanban.includes(normalizeTag(t)))) continue;
-      // Skip if this line is a subtask of a parent that already has #recurrent
-      const myIndent = (lines[i].match(/^(\s*)/) || [""])[0].length;
-      if (myIndent > 0) {
-        let skipLine = false;
-        for (let j = i - 1; j >= 0; j--) {
-          if (!listItemRe.test(lines[j])) continue;
-          const parentIndent = (lines[j].match(/^(\s*)/) || [""])[0].length;
-          if (parentIndent < myIndent) {
-            const parentTags = extractTags(lines[j]);
-            if (parentTags.some((t: string) => normalizeTag(t) === config.normRecurrent)) {
-              skipLine = true;
-            }
-            break;
-          }
-        }
-        if (skipLine) continue;
-      }
       const parsed = parseTaskLine(lines[i]);
       parsed.tags.push(config.recurrentColumn);
       lines[i] = serializeTaskLine(parsed);

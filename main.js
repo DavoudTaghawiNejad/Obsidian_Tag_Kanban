@@ -3216,7 +3216,6 @@ function buildColorCSS(config) {
 }
 async function tagUntaggedRecurrentCards(app, paths, config) {
   const annotationRe = new RegExp(`@${config.normRecurrent}\\b`, "i");
-  const listItemRe = /^(\s*)(?:[-*+]|\d+[.)]\s)/;
   for (const filePath of paths) {
     const tFile = app.vault.getAbstractFileByPath(filePath);
     if (!tFile)
@@ -3228,27 +3227,12 @@ async function tagUntaggedRecurrentCards(app, paths, config) {
     for (let i = 0; i < scanLimit; i++) {
       if (!annotationRe.test(lines[i]))
         continue;
+      const myIndent = (lines[i].match(/^(\s*)/) || [""])[0].length;
+      if (myIndent > 0)
+        continue;
       const tags = extractTags(lines[i]);
       if (tags.some((t) => config.normKanban.includes(normalizeTag(t))))
         continue;
-      const myIndent = (lines[i].match(/^(\s*)/) || [""])[0].length;
-      if (myIndent > 0) {
-        let skipLine = false;
-        for (let j = i - 1; j >= 0; j--) {
-          if (!listItemRe.test(lines[j]))
-            continue;
-          const parentIndent = (lines[j].match(/^(\s*)/) || [""])[0].length;
-          if (parentIndent < myIndent) {
-            const parentTags = extractTags(lines[j]);
-            if (parentTags.some((t) => normalizeTag(t) === config.normRecurrent)) {
-              skipLine = true;
-            }
-            break;
-          }
-        }
-        if (skipLine)
-          continue;
-      }
       const parsed = parseTaskLine(lines[i]);
       parsed.tags.push(config.recurrentColumn);
       lines[i] = serializeTaskLine(parsed);
