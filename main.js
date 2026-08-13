@@ -800,6 +800,17 @@ var pendingForceExpand = /* @__PURE__ */ new Set();
 function forceExpandKey(filePath, line) {
   return `${filePath}:${line}`;
 }
+var currentlyExpandedKey = null;
+var leftBoardAt = null;
+var KEEP_LAST_EXPANDED_MS = 5 * 60 * 1e3;
+function noteBoardLeft() {
+  leftBoardAt = Date.now();
+}
+function restoreLastExpandedIfRecent() {
+  if (currentlyExpandedKey && leftBoardAt !== null && Date.now() - leftBoardAt < KEEP_LAST_EXPANDED_MS) {
+    pendingForceExpand.add(currentlyExpandedKey);
+  }
+}
 async function getCachedFileLines(app, filePath) {
   const tFile = app.vault.getAbstractFileByPath(filePath);
   if (!tFile)
@@ -4417,6 +4428,20 @@ function attachListeners(boardEl, config, app, refresh) {
       input.setSelectionRange(input.value.length, input.value.length);
     }));
   }
+  function onToggle(e) {
+    const details = e.target;
+    if (details.tagName !== "DETAILS")
+      return;
+    const card = details.closest(".kanban-card");
+    if (!card)
+      return;
+    const key = forceExpandKey(card.dataset.file, parseInt(card.dataset.line, 10));
+    if (details.open) {
+      currentlyExpandedKey = key;
+    } else if (currentlyExpandedKey === key) {
+      currentlyExpandedKey = null;
+    }
+  }
   let touchCard = null;
   let ghost = null;
   let isTouchDrag = false;
@@ -4991,6 +5016,7 @@ function attachListeners(boardEl, config, app, refresh) {
   boardEl.addEventListener("click", onArchiveClick);
   boardEl.addEventListener("dblclick", onDblClick);
   boardEl.addEventListener("dblclick", onSubDblClick);
+  boardEl.addEventListener("toggle", onToggle, true);
   boardEl.addEventListener("touchstart", onTouchStart, { passive: true });
   boardEl.addEventListener("touchmove", onTouchMove, { passive: false });
   boardEl.addEventListener("touchend", onTouchEnd, { passive: false });
@@ -5018,6 +5044,7 @@ function attachListeners(boardEl, config, app, refresh) {
     boardEl.removeEventListener("click", onArchiveClick);
     boardEl.removeEventListener("dblclick", onDblClick);
     boardEl.removeEventListener("dblclick", onSubDblClick);
+    boardEl.removeEventListener("toggle", onToggle, true);
     boardEl.removeEventListener("touchstart", onTouchStart);
     boardEl.removeEventListener("touchmove", onTouchMove);
     boardEl.removeEventListener("touchend", onTouchEnd);
@@ -5039,6 +5066,11 @@ var KanbanView = class extends import_obsidian2.ItemView {
     this.listenerCleanup = null;
     this.resizeObserver = null;
     this.resizeDebounceTimer = null;
+    // Tracks whether this leaf was the active one as of the last
+    // active-leaf-change, so the transition away from it (not just any
+    // unrelated leaf change elsewhere) can be stamped exactly once — see
+    // noteBoardLeft/restoreLastExpandedIfRecent.
+    this.wasActive = false;
     this.plugin = plugin;
   }
   getViewType() {
@@ -5053,12 +5085,18 @@ var KanbanView = class extends import_obsidian2.ItemView {
   async onOpen() {
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", (leaf) => {
-        if (leaf === this.leaf) {
+        const isActive = leaf === this.leaf;
+        if (isActive) {
+          restoreLastExpandedIfRecent();
           this.scheduleRefresh(100);
           this.scrollPastSearchBar();
+        } else if (this.wasActive) {
+          noteBoardLeft();
         }
+        this.wasActive = isActive;
       })
     );
+    this.wasActive = this.leaf === this.app.workspace.activeLeaf;
     this.scheduleMidnightRefresh();
     this.resizeObserver = new ResizeObserver(() => this.scheduleResizeCheck());
     this.resizeObserver.observe(this.contentEl);

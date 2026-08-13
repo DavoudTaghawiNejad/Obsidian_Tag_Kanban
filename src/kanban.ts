@@ -1115,6 +1115,29 @@ function forceExpandKey(filePath: string, line: number): string {
   return `${filePath}:${line}`;
 }
 
+// The single card the user last opened by hand (session-only, tracked by the
+// boardEl "toggle" listener below), kept force-expanded for a few minutes
+// after the board view stops being the active leaf — see noteBoardLeft/
+// restoreLastExpandedIfRecent, called from KanbanView's active-leaf-change
+// handler. Past that window it's left to render collapsed as normal.
+let currentlyExpandedKey: string | null = null;
+let leftBoardAt: number | null = null;
+const KEEP_LAST_EXPANDED_MS = 5 * 60 * 1000;
+
+export function noteBoardLeft(): void {
+  leftBoardAt = Date.now();
+}
+
+export function restoreLastExpandedIfRecent(): void {
+  if (
+    currentlyExpandedKey &&
+    leftBoardAt !== null &&
+    Date.now() - leftBoardAt < KEEP_LAST_EXPANDED_MS
+  ) {
+    pendingForceExpand.add(currentlyExpandedKey);
+  }
+}
+
 async function getCachedFileLines(app: App, filePath: string): Promise<string[]> {
   const tFile = app.vault.getAbstractFileByPath(filePath) as TFile | null;
   if (!tFile) return [];
@@ -5921,6 +5944,23 @@ export function attachListeners(
     }));
   }
 
+  // ── Details toggle → remember the last card opened by hand ──
+  // No file write and no other bookkeeping — just enough for
+  // restoreLastExpandedIfRecent to re-open this same card if the user comes
+  // back to the board within a few minutes of navigating away from it.
+  function onToggle(e: Event) {
+    const details = e.target as HTMLDetailsElement;
+    if (details.tagName !== "DETAILS") return;
+    const card = details.closest(".kanban-card") as HTMLElement | null;
+    if (!card) return;
+    const key = forceExpandKey(card.dataset.file!, parseInt(card.dataset.line!, 10));
+    if (details.open) {
+      currentlyExpandedKey = key;
+    } else if (currentlyExpandedKey === key) {
+      currentlyExpandedKey = null;
+    }
+  }
+
   // ── Touch interaction ──
   let touchCard: HTMLElement | null = null;
   let ghost: HTMLElement | null = null;
@@ -6536,6 +6576,7 @@ export function attachListeners(
   boardEl.addEventListener("click", onArchiveClick);
   boardEl.addEventListener("dblclick", onDblClick);
   boardEl.addEventListener("dblclick", onSubDblClick);
+  boardEl.addEventListener("toggle", onToggle, true);
   boardEl.addEventListener("touchstart", onTouchStart as unknown as EventListener, { passive: true });
   boardEl.addEventListener("touchmove", onTouchMove as unknown as EventListener, { passive: false });
   boardEl.addEventListener("touchend", onTouchEnd as unknown as EventListener, { passive: false });
@@ -6564,6 +6605,7 @@ export function attachListeners(
     boardEl.removeEventListener("click", onArchiveClick);
     boardEl.removeEventListener("dblclick", onDblClick);
     boardEl.removeEventListener("dblclick", onSubDblClick);
+    boardEl.removeEventListener("toggle", onToggle, true);
     boardEl.removeEventListener("touchstart", onTouchStart as unknown as EventListener);
     boardEl.removeEventListener("touchmove", onTouchMove as unknown as EventListener);
     boardEl.removeEventListener("touchend", onTouchEnd as unknown as EventListener);

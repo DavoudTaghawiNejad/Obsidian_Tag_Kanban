@@ -1,6 +1,14 @@
 import { ItemView, WorkspaceLeaf } from "obsidian";
 import KanbanPlugin from "./main";
-import { buildConfig, validateConfig, buildBoard, attachListeners, isNarrowLayout } from "./kanban";
+import {
+  buildConfig,
+  validateConfig,
+  buildBoard,
+  attachListeners,
+  isNarrowLayout,
+  noteBoardLeft,
+  restoreLastExpandedIfRecent,
+} from "./kanban";
 
 export const VIEW_TYPE_KANBAN = "kanban-board-view";
 
@@ -13,6 +21,11 @@ export class KanbanView extends ItemView {
   private listenerCleanup: (() => void) | null = null;
   private resizeObserver: ResizeObserver | null = null;
   private resizeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  // Tracks whether this leaf was the active one as of the last
+  // active-leaf-change, so the transition away from it (not just any
+  // unrelated leaf change elsewhere) can be stamped exactly once — see
+  // noteBoardLeft/restoreLastExpandedIfRecent.
+  private wasActive = false;
 
   constructor(leaf: WorkspaceLeaf, plugin: KanbanPlugin) {
     super(leaf);
@@ -35,12 +48,20 @@ export class KanbanView extends ItemView {
     // Refresh when this leaf becomes the active view
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", (leaf) => {
-        if (leaf === this.leaf) {
+        const isActive = leaf === this.leaf;
+        if (isActive) {
+          restoreLastExpandedIfRecent();
           this.scheduleRefresh(100);
           this.scrollPastSearchBar();
+        } else if (this.wasActive) {
+          noteBoardLeft();
         }
+        this.wasActive = isActive;
       })
     );
+    // The leaf is typically already active by the time onOpen runs, before
+    // the listener above exists to have caught that transition itself.
+    this.wasActive = this.leaf === this.app.workspace.activeLeaf;
 
     // Refresh just past midnight so past-due #later cards auto-move
     this.scheduleMidnightRefresh();
