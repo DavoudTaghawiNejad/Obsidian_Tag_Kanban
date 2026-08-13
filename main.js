@@ -1054,7 +1054,10 @@ async function moveToColumn(app, filePath, lineNum, originalTags, targetTag, isD
       parsed.date = dateStrToAppend;
     if (isDone) {
       const n2 = new Date();
-      parsed.doneDate = `${n2.getFullYear()}-${String(n2.getMonth() + 1).padStart(2, "0")}-${String(n2.getDate()).padStart(2, "0")}`;
+      const todayStr = `${n2.getFullYear()}-${String(n2.getMonth() + 1).padStart(2, "0")}-${String(n2.getDate()).padStart(2, "0")}`;
+      parsed.doneDate = todayStr;
+      if (!parsed.createdDate)
+        parsed.createdDate = todayStr;
     } else if (!(config.normRecurrent && normalizeTag(targetTag) === config.normRecurrent)) {
       parsed.doneDate = null;
     }
@@ -3273,6 +3276,10 @@ async function moveCheckedCardsToDone(app, paths, config) {
       if (hasOwnKanbanTag && !alreadyDone) {
         parsed.tags = parsed.tags.filter((t) => !matchesKanbanTag(t, config.normKanban));
         parsed.tags.push(config.doneColumn);
+        if (!parsed.createdDate) {
+          const n = new Date();
+          parsed.createdDate = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
+        }
         lineChanged = true;
       }
       if (!parsed.doneDate) {

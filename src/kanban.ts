@@ -1456,7 +1456,14 @@ async function moveToColumn(
     if (dateStrToAppend) parsed.date = dateStrToAppend;
     if (isDone) {
       const n = new Date();
-      parsed.doneDate = `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,"0")}-${String(n.getDate()).padStart(2,"0")}`;
+      const todayStr = `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,"0")}-${String(n.getDate()).padStart(2,"0")}`;
+      parsed.doneDate = todayStr;
+      // A card landing in Done without a created date (e.g. dragged straight
+      // there from Recurrent/Maybe Someday, where it's deliberately kept
+      // undated) would otherwise sit with a Done tag and no @created stamp
+      // until the next board render's stampMissingCreatedDates backfill —
+      // stamp it immediately instead of leaving that gap.
+      if (!parsed.createdDate) parsed.createdDate = todayStr;
     } else if (!(config.normRecurrent && normalizeTag(targetTag) === config.normRecurrent)) {
       // A recurring card cycling back into its own Recurrent column keeps the
       // done date from the occurrence that just completed (dragged straight
@@ -4504,6 +4511,14 @@ export async function moveCheckedCardsToDone(app: App, paths: string[], config: 
       if (hasOwnKanbanTag && !alreadyDone) {
         parsed.tags = parsed.tags.filter((t) => !matchesKanbanTag(t, config.normKanban));
         parsed.tags.push(config.doneColumn);
+        // Stamped immediately rather than left for stampMissingCreatedDates —
+        // same reasoning as moveToColumn's Done path: a card landing here
+        // undated (e.g. hand-edited straight out of Recurrent/Maybe Someday)
+        // shouldn't sit with a Done tag and no @created stamp even briefly.
+        if (!parsed.createdDate) {
+          const n = new Date();
+          parsed.createdDate = `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,"0")}-${String(n.getDate()).padStart(2,"0")}`;
+        }
         lineChanged = true;
       }
       if (!parsed.doneDate) {
