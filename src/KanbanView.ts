@@ -9,6 +9,7 @@ import {
   noteBoardLeft,
   expireLastExpandedIfStale,
   collapseAllCards,
+  clearFamilyIsolation,
 } from "./kanban";
 
 export const VIEW_TYPE_KANBAN = "kanban-board-view";
@@ -141,7 +142,10 @@ export class KanbanView extends ItemView {
   // of view, same as first landing on the board.
   private handleBoardEscape() {
     const boardEl = this.contentEl.querySelector<HTMLElement>("#kanban-wrapper");
-    if (boardEl) collapseAllCards(boardEl);
+    if (boardEl) {
+      collapseAllCards(boardEl);
+      clearFamilyIsolation(boardEl);
+    }
     this.scrollPastSearchBar();
   }
 

@@ -820,6 +820,22 @@ function collapseAllCards(boardEl) {
   });
   currentlyExpandedKey = null;
 }
+function clearFamilyIsolation(boardEl) {
+  if (!boardEl.dataset.familyIsolate)
+    return;
+  delete boardEl.dataset.familyIsolate;
+  boardEl.querySelectorAll(".kanban-card").forEach((c) => {
+    c.style.display = "";
+  });
+  if (boardEl.dataset.narrow === "1") {
+    const activeNorm = boardEl.querySelector(
+      '[data-col-norm][data-col-active="1"]'
+    )?.dataset.colNorm;
+    boardEl.querySelectorAll("[data-col-container]").forEach((colDiv) => {
+      colDiv.style.display = colDiv.dataset.colContainer === activeNorm ? "block" : "none";
+    });
+  }
+}
 async function getCachedFileLines(app, filePath) {
   const tFile = app.vault.getAbstractFileByPath(filePath);
   if (!tFile)
@@ -3685,6 +3701,8 @@ function attachListeners(boardEl, config, app, refresh) {
   const ownerDoc = () => boardEl.ownerDocument;
   let draggedCard = null;
   let currentInsertIndex = -1;
+  let familyIsolateTimer = null;
+  const cardKey = (card) => `${card.dataset.file}:${card.dataset.line}`;
   const cardDataFrom = (el) => {
     const c = el?.closest(".kanban-card");
     if (!c)
@@ -3733,10 +3751,8 @@ function attachListeners(boardEl, config, app, refresh) {
   };
   const subsHasLine = (subs, line) => subs.some((s) => s.line === line);
   const subsHasLineDeep = (subs, line) => subs.some((s) => s.line === line || subsHasLineDeep(s.subs || [], line));
-  const applyHighlights = (card) => {
-    clearHighlights();
+  const topParentOf = (card, allCards) => {
     const file = card.dataset.file;
-    const allCards = Array.from(boardEl.querySelectorAll(".kanban-card"));
     let topParent = card;
     for (let safety = 0; safety < 20; safety++) {
       const tpLine = parseInt(topParent.dataset.line, 10);
@@ -3747,6 +3763,10 @@ function attachListeners(boardEl, config, app, refresh) {
         break;
       topParent = parent;
     }
+    return topParent;
+  };
+  const familyFromRoot = (topParent, allCards) => {
+    const file = topParent.dataset.file;
     const family = /* @__PURE__ */ new Set([topParent]);
     const queue = [topParent];
     while (queue.length) {
@@ -3761,6 +3781,14 @@ function attachListeners(boardEl, config, app, refresh) {
         }
       }
     }
+    return family;
+  };
+  const applyHighlights = (card) => {
+    clearHighlights();
+    const file = card.dataset.file;
+    const allCards = Array.from(boardEl.querySelectorAll(".kanban-card"));
+    const topParent = topParentOf(card, allCards);
+    const family = familyFromRoot(topParent, allCards);
     const ownSubs = JSON.parse(card.dataset.subs || "[]");
     const children = new Set(
       allCards.filter(
@@ -3804,20 +3832,6 @@ function attachListeners(boardEl, config, app, refresh) {
     }
     return normalizeHaystack((card.dataset.raw || "") + subsSearchText(subs));
   };
-  const familyRootOf = (card, allCards) => {
-    const file = card.dataset.file;
-    let topParent = card;
-    for (let safety = 0; safety < 20; safety++) {
-      const tpLine = parseInt(topParent.dataset.line, 10);
-      const parent = allCards.find(
-        (o) => o !== topParent && o.dataset.file === file && subsHasLineDeep(JSON.parse(o.dataset.subs || "[]"), tpLine)
-      );
-      if (!parent)
-        break;
-      topParent = parent;
-    }
-    return topParent;
-  };
   const restoreNarrowActiveColumn = () => {
     if (!isNarrowNow())
       return;
@@ -3838,10 +3852,23 @@ function attachListeners(boardEl, config, app, refresh) {
       colDiv.style.display = anyVisible ? "block" : "none";
     });
   };
-  const applyFilter = () => {
+  const applyFilterInner = () => {
+    const allCards = Array.from(boardEl.querySelectorAll(".kanban-card"));
+    const isolatedRootKey = boardEl.dataset.familyIsolate;
+    if (isolatedRootKey) {
+      const root = allCards.find((c) => cardKey(c) === isolatedRootKey);
+      if (root) {
+        const family = familyFromRoot(root, allCards);
+        allCards.forEach((c) => {
+          c.style.display = family.has(c) ? "" : "none";
+        });
+        showNarrowColumnsWithMatches();
+        return;
+      }
+      delete boardEl.dataset.familyIsolate;
+    }
     const searchInput = boardEl.querySelector("#kb-search-input");
     const query = normalizeQuery(searchInput?.value ?? "");
-    const allCards = Array.from(boardEl.querySelectorAll(".kanban-card"));
     if (!query) {
       allCards.forEach((c) => {
         c.style.display = "";
@@ -3856,7 +3883,7 @@ function attachListeners(boardEl, config, app, refresh) {
     const rootOf = /* @__PURE__ */ new Map();
     const familyMatches = /* @__PURE__ */ new Set();
     for (const card of allCards) {
-      const root = familyRootOf(card, allCards);
+      const root = topParentOf(card, allCards);
       rootOf.set(card, root);
       if (matches.get(card))
         familyMatches.add(root);
@@ -3867,15 +3894,46 @@ function attachListeners(boardEl, config, app, refresh) {
     }
     showNarrowColumnsWithMatches();
   };
+  const applyFilter = () => {
+    const viewContent = boardEl.closest(".view-content");
+    const prevScrollTop = viewContent?.scrollTop;
+    applyFilterInner();
+    if (viewContent && prevScrollTop !== void 0) {
+      viewContent.scrollTop = prevScrollTop;
+      requestAnimationFrame(() => {
+        viewContent.scrollTop = prevScrollTop;
+      });
+    }
+  };
   const searchInputEl = boardEl.querySelector("#kb-search-input");
   const searchClearEl = boardEl.querySelector("#kb-search-clear");
+  const toggleFamilyIsolation = (card) => {
+    const allCards = Array.from(boardEl.querySelectorAll(".kanban-card"));
+    const topParent = topParentOf(card, allCards);
+    if (topParent === card && familyFromRoot(topParent, allCards).size === 1)
+      return;
+    const rootKey = cardKey(topParent);
+    if (boardEl.dataset.familyIsolate === rootKey) {
+      delete boardEl.dataset.familyIsolate;
+    } else {
+      boardEl.dataset.familyIsolate = rootKey;
+      if (searchInputEl)
+        searchInputEl.value = "";
+    }
+    applyFilter();
+  };
+  const onSearchInput = () => {
+    delete boardEl.dataset.familyIsolate;
+    applyFilter();
+  };
   const onSearchClear = () => {
     if (searchInputEl)
       searchInputEl.value = "";
+    delete boardEl.dataset.familyIsolate;
     applyFilter();
     searchInputEl?.focus();
   };
-  searchInputEl?.addEventListener("input", applyFilter);
+  searchInputEl?.addEventListener("input", onSearchInput);
   searchClearEl?.addEventListener("click", onSearchClear);
   applyFilter();
   function openCardColorDialog(card) {
@@ -3971,13 +4029,36 @@ function attachListeners(boardEl, config, app, refresh) {
       }
     );
   }
+  const hasOwnClickEffect = (target) => {
+    if (target.closest("a,button,.promote-icon,.demote-btn,.kb-date-label,.kb-trigger-label,.kb-sub-check,.kb-add-sub")) {
+      return true;
+    }
+    const titleDiv = target.closest(".card-title");
+    return !!titleDiv?.hasAttribute("onclick");
+  };
   function onCardClick(e) {
     const card = e.target.closest(".kanban-card");
-    if (!card)
+    if (!card) {
+      if (boardEl.dataset.familyIsolate) {
+        delete boardEl.dataset.familyIsolate;
+        applyFilter();
+      }
       return;
+    }
     applyHighlights(card);
-    if (e.target === card && !isNarrowNow()) {
-      openCardColorDialog(card);
+    if (familyIsolateTimer)
+      clearTimeout(familyIsolateTimer);
+    if (hasOwnClickEffect(e.target)) {
+      familyIsolateTimer = null;
+      return;
+    }
+    if (e.detail > 1) {
+      familyIsolateTimer = null;
+    } else {
+      familyIsolateTimer = setTimeout(() => {
+        familyIsolateTimer = null;
+        toggleFamilyIsolation(card);
+      }, 300);
     }
   }
   function onParentLinkClick(e) {
@@ -4244,19 +4325,27 @@ function attachListeners(boardEl, config, app, refresh) {
     }, existing, extractRepeatSpec(rawText));
   }
   async function onDblClick(e) {
+    const card = e.target.closest(".kanban-card");
+    if (!card)
+      return;
     if (e.target.closest("a,button,.promote-icon,.demote-btn,.kb-date-label,.kb-trigger-label"))
       return;
     const titleDiv = e.target.closest(".card-title");
-    if (!titleDiv)
+    if (titleDiv) {
+      if (isNarrowNow()) {
+        showCardMenu(card);
+        return;
+      }
+      await startTitleEdit(card, titleDiv);
       return;
-    const card = titleDiv.closest(".kanban-card");
-    if (!card)
+    }
+    if (e.target !== card)
       return;
     if (isNarrowNow()) {
       showCardMenu(card);
       return;
     }
-    await startTitleEdit(card, titleDiv);
+    openCardColorDialog(card);
   }
   async function startTitleEdit(card, titleDivArg) {
     const titleDiv = titleDivArg ?? card.querySelector(".card-title");
@@ -5036,6 +5125,8 @@ function attachListeners(boardEl, config, app, refresh) {
   boardEl.addEventListener("touchend", onTouchEnd, { passive: false });
   boardEl.addEventListener("touchcancel", clearTouch, { passive: true });
   return () => {
+    if (familyIsolateTimer)
+      clearTimeout(familyIsolateTimer);
     boardEl.removeEventListener("click", onObsidianLinkClick, true);
     boardEl.removeEventListener("mousedown", onMouseDown);
     boardEl.removeEventListener("mousedown", onMidMouseDown);
@@ -5063,7 +5154,7 @@ function attachListeners(boardEl, config, app, refresh) {
     boardEl.removeEventListener("touchmove", onTouchMove);
     boardEl.removeEventListener("touchend", onTouchEnd);
     boardEl.removeEventListener("touchcancel", clearTouch);
-    searchInputEl?.removeEventListener("input", applyFilter);
+    searchInputEl?.removeEventListener("input", onSearchInput);
     searchClearEl?.removeEventListener("click", onSearchClear);
   };
 }
@@ -5173,8 +5264,10 @@ var KanbanView = class extends import_obsidian2.ItemView {
   // of view, same as first landing on the board.
   handleBoardEscape() {
     const boardEl = this.contentEl.querySelector("#kanban-wrapper");
-    if (boardEl)
+    if (boardEl) {
       collapseAllCards(boardEl);
+      clearFamilyIsolation(boardEl);
+    }
     this.scrollPastSearchBar();
   }
   async onClose() {

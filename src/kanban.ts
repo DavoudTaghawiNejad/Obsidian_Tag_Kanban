@@ -1158,6 +1158,28 @@ export function collapseAllCards(boardEl: HTMLElement): void {
   currentlyExpandedKey = null;
 }
 
+// Releases the click-to-isolate family filter (see toggleFamilyIsolation in
+// attachListeners) — used by the board-level Escape handler. Safe to call
+// unconditionally: a no-op when no isolation is active. Restores card
+// visibility directly rather than going through attachListeners' applyFilter
+// (private to that closure) — correct because activating isolation always
+// clears the search box first, so whenever isolation is active the query is
+// guaranteed empty and "show everything" is exactly what applyFilter's own
+// no-query branch would do anyway.
+export function clearFamilyIsolation(boardEl: HTMLElement): void {
+  if (!boardEl.dataset.familyIsolate) return;
+  delete boardEl.dataset.familyIsolate;
+  boardEl.querySelectorAll<HTMLElement>(".kanban-card").forEach((c) => { c.style.display = ""; });
+  if (boardEl.dataset.narrow === "1") {
+    const activeNorm = boardEl.querySelector<HTMLElement>(
+      '[data-col-norm][data-col-active="1"]'
+    )?.dataset.colNorm;
+    boardEl.querySelectorAll<HTMLElement>("[data-col-container]").forEach((colDiv) => {
+      colDiv.style.display = colDiv.dataset.colContainer === activeNorm ? "block" : "none";
+    });
+  }
+}
+
 async function getCachedFileLines(app: App, filePath: string): Promise<string[]> {
   const tFile = app.vault.getAbstractFileByPath(filePath) as TFile | null;
   if (!tFile) return [];
@@ -5111,8 +5133,16 @@ export function attachListeners(
   const ownerDoc = () => boardEl.ownerDocument;
   let draggedCard: any = null;
   let currentInsertIndex = -1;
+  // Isolation is deferred behind this timer (see onCardClick) so the first
+  // click of a double-click never gets the chance to reshuffle the board
+  // (hiding cards shifts everything under the cursor) before the second
+  // click lands — that reshuffle was breaking double-click-to-edit on card
+  // and subtask titles.
+  let familyIsolateTimer: ReturnType<typeof setTimeout> | null = null;
 
   // ── Helpers ──
+  const cardKey = (card: HTMLElement): string => `${card.dataset.file}:${card.dataset.line}`;
+
   const cardDataFrom = (el: Element | null) => {
     const c = el?.closest(".kanban-card") as HTMLElement | null;
     if (!c) return null;
@@ -5176,12 +5206,12 @@ export function attachListeners(
   const subsHasLineDeep = (subs: any[], line: number): boolean =>
     subs.some((s: any) => s.line === line || subsHasLineDeep(s.subs || [], line));
 
-  const applyHighlights = (card: HTMLElement) => {
-    clearHighlights();
+  // Walks up from a card to its top-most ancestor within the same file,
+  // following the outline nesting. Shared by the hover-highlight coloring
+  // below and by the click-to-isolate filter further down, so "family"
+  // always means the same set of cards everywhere on the board.
+  const topParentOf = (card: HTMLElement, allCards: HTMLElement[]): HTMLElement => {
     const file = card.dataset.file!;
-    const allCards = Array.from(boardEl.querySelectorAll<HTMLElement>(".kanban-card"));
-
-    // Walk up to find the top-most ancestor
     let topParent = card;
     for (let safety = 0; safety < 20; safety++) {
       const tpLine = parseInt(topParent.dataset.line!, 10);
@@ -5192,8 +5222,13 @@ export function attachListeners(
       if (!parent) break;
       topParent = parent;
     }
+    return topParent;
+  };
 
-    // BFS: collect every card reachable downward from the top parent
+  // BFS: every card reachable downward from a top parent — family members
+  // can land in any column, not just the parent's.
+  const familyFromRoot = (topParent: HTMLElement, allCards: HTMLElement[]): Set<HTMLElement> => {
+    const file = topParent.dataset.file!;
     const family = new Set<HTMLElement>([topParent]);
     const queue: HTMLElement[] = [topParent];
     while (queue.length) {
@@ -5207,6 +5242,15 @@ export function attachListeners(
         }
       }
     }
+    return family;
+  };
+
+  const applyHighlights = (card: HTMLElement) => {
+    clearHighlights();
+    const file = card.dataset.file!;
+    const allCards = Array.from(boardEl.querySelectorAll<HTMLElement>(".kanban-card"));
+    const topParent = topParentOf(card, allCards);
+    const family = familyFromRoot(topParent, allCards);
 
     // Direct children of the hovered card
     const ownSubs = JSON.parse(card.dataset.subs || "[]");
@@ -5272,24 +5316,6 @@ export function attachListeners(
     return normalizeHaystack((card.dataset.raw || "") + subsSearchText(subs));
   };
 
-  // Same ancestry walk as applyHighlights (top-most ancestor within the same
-  // file, following the outline nesting) — used here purely to group cards
-  // into families for the filter, not for the hover-highlight colouring.
-  const familyRootOf = (card: HTMLElement, allCards: HTMLElement[]): HTMLElement => {
-    const file = card.dataset.file!;
-    let topParent = card;
-    for (let safety = 0; safety < 20; safety++) {
-      const tpLine = parseInt(topParent.dataset.line!, 10);
-      const parent = allCards.find(
-        (o) => o !== topParent && o.dataset.file === file &&
-          subsHasLineDeep(JSON.parse(o.dataset.subs || "[]"), tpLine)
-      );
-      if (!parent) break;
-      topParent = parent;
-    }
-    return topParent;
-  };
-
   // Narrow (single-column/phone) layout normally shows only the active tab's
   // column, hiding the rest via colDiv display:none — great for browsing, but
   // it would hide filter matches sitting in every other column. While a query
@@ -5320,12 +5346,32 @@ export function attachListeners(
   };
 
   // Cards that don't match the query are hidden, unless another card in the
-  // same family (see familyRootOf) does match — then the whole family stays
+  // same family (see topParentOf) does match — then the whole family stays
   // visible, so context (parent/siblings) around a hit is never cut off.
-  const applyFilter = () => {
+  //
+  // Clicking a card (see toggleFamilyIsolation) takes priority over the text
+  // query when active: it isolates that one card's family, hiding everything
+  // else outright, so the family is visible without having to scroll for it.
+  // The stored key lives on boardEl's dataset (not a plain closure variable)
+  // so it survives attachListeners being torn down and rebuilt on refresh —
+  // same trick as dataset.activeCol/dataset.narrow.
+  const applyFilterInner = () => {
+    const allCards = Array.from(boardEl.querySelectorAll<HTMLElement>(".kanban-card"));
+
+    const isolatedRootKey = boardEl.dataset.familyIsolate;
+    if (isolatedRootKey) {
+      const root = allCards.find((c) => cardKey(c) === isolatedRootKey);
+      if (root) {
+        const family = familyFromRoot(root, allCards);
+        allCards.forEach((c) => { c.style.display = family.has(c) ? "" : "none"; });
+        showNarrowColumnsWithMatches();
+        return;
+      }
+      delete boardEl.dataset.familyIsolate; // the card that started this is gone — fall through
+    }
+
     const searchInput = boardEl.querySelector<HTMLInputElement>("#kb-search-input");
     const query = normalizeQuery(searchInput?.value ?? "");
-    const allCards = Array.from(boardEl.querySelectorAll<HTMLElement>(".kanban-card"));
 
     if (!query) {
       allCards.forEach((c) => { c.style.display = ""; });
@@ -5340,7 +5386,7 @@ export function attachListeners(
     const rootOf = new Map<HTMLElement, HTMLElement>();
     const familyMatches = new Set<HTMLElement>();
     for (const card of allCards) {
-      const root = familyRootOf(card, allCards);
+      const root = topParentOf(card, allCards);
       rootOf.set(card, root);
       if (matches.get(card)) familyMatches.add(root);
     }
@@ -5353,14 +5399,67 @@ export function attachListeners(
     showNarrowColumnsWithMatches();
   };
 
+  // Hiding/showing cards can shrink the board's content height enough that
+  // the browser auto-clamps the pane's scroll position back toward 0 — which
+  // un-hides the search bar sitting above #kanban-scroll (scrolled out of
+  // view on open, see KanbanView.scrollPastSearchBar) even though nothing
+  // asked for it to reappear. Restoring the pre-filter scrollTop re-clamps it
+  // against the *new* (smaller) scrollHeight instead, so it only creeps back
+  // into view if there's genuinely not enough content left to stay past it.
+  const applyFilter = () => {
+    const viewContent = boardEl.closest<HTMLElement>(".view-content");
+    const prevScrollTop = viewContent?.scrollTop;
+    applyFilterInner();
+    if (viewContent && prevScrollTop !== undefined) {
+      viewContent.scrollTop = prevScrollTop;
+      // On some WebKit-based views (iPad's), a scrollTop write made in the
+      // same tick as the display-toggling above gets overridden once the
+      // browser actually settles layout for the now-shorter content — the
+      // write above alone silently loses the race there, letting the search
+      // bar creep back into view. Re-applying it once more after that layout
+      // pass has run keeps it pinned on those views too.
+      requestAnimationFrame(() => { viewContent.scrollTop = prevScrollTop; });
+    }
+  };
+
   const searchInputEl = boardEl.querySelector<HTMLInputElement>("#kb-search-input");
   const searchClearEl = boardEl.querySelector<HTMLButtonElement>("#kb-search-clear");
+
+  // Clicking a card isolates its family (hides every other card); clicking
+  // any card already inside the isolated family releases it again. Clicking
+  // a card outside it switches the isolation to the new family instead.
+  const toggleFamilyIsolation = (card: HTMLElement) => {
+    const allCards = Array.from(boardEl.querySelectorAll<HTMLElement>(".kanban-card"));
+    const topParent = topParentOf(card, allCards);
+    // Standalone card (no parent/children/siblings) — isolating it would just
+    // hide every other card on the board for no relational reason, so the
+    // click isn't offered as a filter trigger at all here (same "no family"
+    // check applyHighlights uses to skip coloring).
+    if (topParent === card && familyFromRoot(topParent, allCards).size === 1) return;
+    const rootKey = cardKey(topParent);
+    if (boardEl.dataset.familyIsolate === rootKey) {
+      delete boardEl.dataset.familyIsolate;
+    } else {
+      boardEl.dataset.familyIsolate = rootKey;
+      // Isolation and the text search are mutually exclusive — an active
+      // query would otherwise sit there silently doing nothing (applyFilter
+      // returns before ever reading it), which reads as broken.
+      if (searchInputEl) searchInputEl.value = "";
+    }
+    applyFilter();
+  };
+
+  const onSearchInput = () => {
+    delete boardEl.dataset.familyIsolate;
+    applyFilter();
+  };
   const onSearchClear = () => {
     if (searchInputEl) searchInputEl.value = "";
+    delete boardEl.dataset.familyIsolate;
     applyFilter();
     searchInputEl?.focus();
   };
-  searchInputEl?.addEventListener("input", applyFilter);
+  searchInputEl?.addEventListener("input", onSearchInput);
   searchClearEl?.addEventListener("click", onSearchClear);
   // Re-apply immediately: reconcileZoneCards may have swapped in fresh card
   // nodes (whose display style always starts unset) since the last render.
@@ -5445,16 +5544,54 @@ export function attachListeners(
     );
   }
 
+  // True for a click on anything inside the card that already has its own
+  // effect — a checkbox, a date/trigger label, promote/demote, the add-sub
+  // "+" button, or (only when present — see the hasSubs branch of
+  // createCardNode) the title's own expand/collapse toggle. Several of these
+  // handlers are registered on boardEl *after* onCardClick and only call
+  // stopPropagation (not stopImmediatePropagation), which doesn't stop a
+  // same-element listener that already ran — so onCardClick has to opt
+  // itself out explicitly rather than rely on those handlers to suppress it.
+  const hasOwnClickEffect = (target: Element): boolean => {
+    if (target.closest("a,button,.promote-icon,.demote-btn,.kb-date-label,.kb-trigger-label,.kb-sub-check,.kb-add-sub")) {
+      return true;
+    }
+    const titleDiv = target.closest(".card-title") as HTMLElement | null;
+    return !!titleDiv?.hasAttribute("onclick");
+  };
+
   function onCardClick(e: MouseEvent) {
     const card = (e.target as Element).closest(".kanban-card") as HTMLElement | null;
-    if (!card) return;
-    applyHighlights(card);
-    // Clicking the card's own blank margin (nothing written, no icon under the
-    // cursor — the click target is the outer card div itself, not any child
-    // text/icon element) opens the highlight-color picker. On narrow layouts
-    // this is instead offered from the double-tap card menu (see showCardMenu).
-    if (e.target === card && !isNarrowNow()) {
-      openCardColorDialog(card);
+    if (!card) {
+      // Clicking anywhere else on the board (blank column space, a header,
+      // the tab bar, ...) releases an active isolation the same way clicking
+      // the isolated card again or pressing Escape does.
+      if (boardEl.dataset.familyIsolate) {
+        delete boardEl.dataset.familyIsolate;
+        applyFilter();
+      }
+      return;
+    }
+    applyHighlights(card); // paint-only (outline/background) — safe to run immediately, never shifts layout
+    if (familyIsolateTimer) clearTimeout(familyIsolateTimer);
+    if (hasOwnClickEffect(e.target as Element)) {
+      // Let that element's own handler do its thing undisturbed — no
+      // isolation reshuffle competing with it.
+      familyIsolateTimer = null;
+      return;
+    }
+    if (e.detail > 1) {
+      // Second (or later) click of a double-click — a dblclick handler
+      // (title/subtask edit) is about to run on the *current*, undisturbed
+      // layout; don't reshuffle the board out from under it.
+      familyIsolateTimer = null;
+    } else {
+      // First click — wait out the double-click window before actually
+      // isolating, in case a second click follows and cancels this.
+      familyIsolateTimer = setTimeout(() => {
+        familyIsolateTimer = null;
+        toggleFamilyIsolation(card);
+      }, 300);
     }
   }
 
@@ -5761,16 +5898,31 @@ export function attachListeners(
 
   // ── Inline card text editing ──
   async function onDblClick(e: MouseEvent) {
-    if ((e.target as Element).closest("a,button,.promote-icon,.demote-btn,.kb-date-label,.kb-trigger-label")) return;
-    const titleDiv = (e.target as Element).closest(".card-title") as HTMLElement | null;
-    if (!titleDiv) return;
-    const card = titleDiv.closest(".kanban-card") as HTMLElement | null;
+    const card = (e.target as Element).closest(".kanban-card") as HTMLElement | null;
     if (!card) return;
+    if ((e.target as Element).closest("a,button,.promote-icon,.demote-btn,.kb-date-label,.kb-trigger-label")) return;
+
+    const titleDiv = (e.target as Element).closest(".card-title") as HTMLElement | null;
+    if (titleDiv) {
+      if (isNarrowNow()) {
+        showCardMenu(card);
+        return;
+      }
+      await startTitleEdit(card, titleDiv);
+      return;
+    }
+
+    // Double-click on the card's own blank margin — e.target is the card
+    // element itself, not any child (title, subtask row, parent-link badge,
+    // button, checkbox, ...) — opens the color/reorder-subtasks dialog.
+    // Narrow layout offers the same thing via the card-menu sheet instead
+    // (same as the title double-click above).
+    if (e.target !== card) return;
     if (isNarrowNow()) {
       showCardMenu(card);
       return;
     }
-    await startTitleEdit(card, titleDiv);
+    openCardColorDialog(card);
   }
 
   async function startTitleEdit(card: HTMLElement, titleDivArg?: HTMLElement | null) {
@@ -6612,6 +6764,7 @@ export function attachListeners(
   boardEl.addEventListener("touchcancel", clearTouch, { passive: true });
 
   return () => {
+    if (familyIsolateTimer) clearTimeout(familyIsolateTimer);
     boardEl.removeEventListener("click", onObsidianLinkClick, true);
     boardEl.removeEventListener("mousedown", onMouseDown);
     boardEl.removeEventListener("mousedown", onMidMouseDown);
@@ -6639,7 +6792,7 @@ export function attachListeners(
     boardEl.removeEventListener("touchmove", onTouchMove as unknown as EventListener);
     boardEl.removeEventListener("touchend", onTouchEnd as unknown as EventListener);
     boardEl.removeEventListener("touchcancel", clearTouch);
-    searchInputEl?.removeEventListener("input", applyFilter);
+    searchInputEl?.removeEventListener("input", onSearchInput);
     searchClearEl?.removeEventListener("click", onSearchClear);
   };
 }
