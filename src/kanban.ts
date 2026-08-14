@@ -965,7 +965,8 @@ function formatCardDateAnnotation(text: string, inline = false): string {
       label = `next ${days[dateVal.getDay()]}`;
     } else {
       const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-      label = `${months[Number(m) - 1]} ${Number(d)}`;
+      const yearSuffix = Number(y) !== today.getFullYear() ? `, ${y}` : "";
+      label = `${months[Number(m) - 1]} ${Number(d)}${yearSuffix}`;
     }
     const display = inline ? "inline" : "block";
     return `<span class="kb-date-label" data-date="${y}-${m}-${d}" style="display:${display};font-size:.8em;color:var(--kb-date-color);font-family:var(--kb-date-font);cursor:pointer;text-decoration:underline dotted;">${label}</span>`;
