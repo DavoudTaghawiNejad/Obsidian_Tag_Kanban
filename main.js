@@ -178,16 +178,17 @@ function extractTags(text) {
 var DELETED_TAG = "#deleted";
 var isDeletedTag = (t) => normalizeTag(t) === normalizeTag(DELETED_TAG);
 function parseOrderComment(text) {
-  const m = text.match(/%% @(\d+)\w? %%/);
+  const m = text.match(/%% @(-?\d+)\w? %%/);
   if (!m)
     return null;
-  return /[1-9]/.test(m[1]) ? { digits: m[1], len: m[1].length } : null;
+  const mag = m[1].replace(/^-/, "");
+  return /[1-9]/.test(mag) ? { digits: m[1], len: mag.length } : null;
 }
 function parseTaskLine(raw) {
   const indent = (raw.match(/^(\s*)/) || ["", ""])[1];
   let rest = raw.slice(indent.length);
   let orderDigits = null;
-  const om = rest.match(/%% @(\d+)\w? %%/);
+  const om = rest.match(/%% @(-?\d+)\w? %%/);
   if (om) {
     orderDigits = om[1];
   }
@@ -283,11 +284,29 @@ async function updateFileOrderComment(app, filePath, lineNum, newDigits) {
     return false;
   }
 }
+function splitSigned(s) {
+  return s.startsWith("-") ? { neg: true, mag: s.slice(1) } : { neg: false, mag: s };
+}
+function magLen(s) {
+  return s.startsWith("-") ? s.length - 1 : s.length;
+}
+function bigFloorDiv(a, b) {
+  const q = a / b;
+  return a < 0n && q * b !== a ? q - 1n : q;
+}
 function compareDigits(a, b) {
-  const l = Math.max(a.length, b.length);
-  const pa = a.padEnd(l, "0");
-  const pb = b.padEnd(l, "0");
-  return pa < pb ? -1 : pa > pb ? 1 : 0;
+  const A = splitSigned(a), B = splitSigned(b);
+  const aZero = !/[1-9]/.test(A.mag), bZero = !/[1-9]/.test(B.mag);
+  const aSign = aZero ? 0 : A.neg ? -1 : 1;
+  const bSign = bZero ? 0 : B.neg ? -1 : 1;
+  if (aSign !== bSign)
+    return aSign - bSign;
+  if (aSign === 0)
+    return 0;
+  const l = Math.max(A.mag.length, B.mag.length);
+  const pa = A.mag.padEnd(l, "0"), pb = B.mag.padEnd(l, "0");
+  const cmp = pa < pb ? -1 : pa > pb ? 1 : 0;
+  return aSign < 0 ? -cmp : cmp;
 }
 function compareCardsByDigits(a, b) {
   if (a.digits == null && b.digits == null)
@@ -299,26 +318,50 @@ function compareCardsByDigits(a, b) {
   const c = compareDigits(a.digits, b.digits);
   return c !== 0 ? c : (a.discoveryIndex || 0) - (b.discoveryIndex || 0);
 }
-function calcMidDigits(prev, next, isEnd) {
-  const l = Math.max(prev.len || 1, next?.len || 1);
-  const a = BigInt(prev.digits.padEnd(l, "0"));
-  const b = isEnd ? 10n ** BigInt(l) : BigInt((next.digits || "0").padEnd(l, "0"));
-  const sum = a + b;
-  const mid = sum / 2n;
-  if (sum % 2n === 0n) {
-    return { digits: mid.toString().padStart(l, "0"), len: l };
+function calcMidDigits(prev, next) {
+  if (!prev && !next)
+    return { digits: "5", len: 1 };
+  const L = Math.max(prev?.len || 0, next?.len || 0, 1);
+  const scaleAt = (s) => {
+    const { neg, mag } = splitSigned(s.digits);
+    const v = BigInt(mag.padEnd(L, "0") + "0");
+    return neg ? -v : v;
+  };
+  const OPEN = 10n ** BigInt(L + 1);
+  const lowBound = prev ? scaleAt(prev) : -OPEN;
+  const highBound = next ? scaleAt(next) : OPEN;
+  for (let d = 1; d <= L + 1; d++) {
+    const scale = 10n ** BigInt(L + 1 - d);
+    const nMin = bigFloorDiv(lowBound, scale) + 1n;
+    const nMax = -bigFloorDiv(-highBound, scale) - 1n;
+    if (nMin > nMax || nMin === 0n && nMax === 0n)
+      continue;
+    let pick;
+    if (!prev) {
+      pick = nMax !== 0n ? nMax : nMax - 1n;
+    } else if (!next) {
+      pick = nMin !== 0n ? nMin : nMin + 1n;
+    } else {
+      pick = bigFloorDiv(nMin + nMax, 2n);
+      if (pick === 0n)
+        pick = nMax >= 1n ? 1n : -1n;
+    }
+    if (pick < nMin || pick > nMax || pick === 0n)
+      continue;
+    const neg = pick < 0n;
+    const mag = (neg ? -pick : pick).toString().padStart(d, "0");
+    return { digits: neg ? `-${mag}` : mag, len: d };
   }
-  const digs = (mid * 10n + 5n).toString().padStart(l + 1, "0");
-  return { digits: digs, len: l + 1 };
+  return { digits: "5", len: 1 };
 }
 function calcInsertOrder(siblingData, insertIndex, isMulti = false) {
   const n = siblingData.length;
   if (insertIndex === 0 || isMulti) {
-    return n === 0 ? { digits: "5", len: 1 } : calcMidDigits({ digits: "0", len: 1 }, siblingData[0], false);
+    return n === 0 ? { digits: "5", len: 1 } : calcMidDigits(null, siblingData[0]);
   }
   if (insertIndex >= n)
-    return calcMidDigits(siblingData[n - 1], null, true);
-  return calcMidDigits(siblingData[insertIndex - 1], siblingData[insertIndex], false);
+    return calcMidDigits(siblingData[n - 1], null);
+  return calcMidDigits(siblingData[insertIndex - 1], siblingData[insertIndex]);
 }
 function parseCardDate(text) {
   const m = text.match(/@(\d{4}-\d{2}-\d{2})/);
@@ -974,7 +1017,7 @@ async function editCardText(app, filePath, lineNum, newText) {
     const tags = extractTags(original).join(" ");
     const createdMatch = original.match(/%% @created:\d{4}-\d{2}-\d{2} %%/);
     const createdComment = createdMatch ? createdMatch[0] : "";
-    const orderMatch = original.match(/%% @\d+\w %%/);
+    const orderMatch = original.match(/%% @-?\d+\w? %%/);
     const orderComment = orderMatch ? orderMatch[0] : "";
     const colorMatch = original.match(/%% @color:#[0-9a-fA-F]{6} %%/);
     const colorComment = colorMatch ? colorMatch[0] : "";
@@ -1453,14 +1496,9 @@ async function promoteSubToChild(app, filePath, subLineNum, parentTag, parentDig
     const allItems = await collectItems(app, targetPaths, config);
     const columns = groupByColumns(allItems, config);
     const parentCard = (columns[normParent]?.cards || []).find((c) => c.digits != null && c.digits === parentDigits);
-    const prevSibling = parentCard ? { digits: parentCard.digits || "0", len: parentCard.len || 1 } : { digits: parentDigits || "0", len: (parentDigits || "0").length };
+    const prevSibling = parentCard ? { digits: parentCard.digits || "0", len: parentCard.len || magLen(parentCard.digits || "0") } : { digits: parentDigits || "0", len: magLen(parentDigits || "0") };
     const higher = (columns[normParent]?.cards || []).filter((c) => c.digits != null && compareDigits(c.digits, parentDigits) > 0).sort((a, b) => compareDigits(a.digits, b.digits));
-    let newCalc;
-    if (higher.length) {
-      newCalc = calcMidDigits(prevSibling, higher[0], false);
-    } else {
-      newCalc = { digits: prevSibling.digits + "9", len: prevSibling.len + 1 };
-    }
+    const newCalc = calcMidDigits(prevSibling, higher.length ? higher[0] : null);
     const expandOnPromote = ![config.normDone, config.normLater].includes(normParent);
     const { tFile, lines } = await readFileLines(app, filePath);
     if (subLineNum < 1 || subLineNum > lines.length)
@@ -1779,13 +1817,15 @@ async function assignInitialOrders(app, columns, _config) {
     const unordered = col.cards.filter((c) => c.digits == null && !c.multiTag).sort((a, b) => a.discoveryIndex - b.discoveryIndex);
     if (!unordered.length)
       continue;
-    const highDigits = ordered.length ? ordered[0].digits || "9" : "9";
-    const baseLen = ordered.length ? ordered[0].len || highDigits.length : 1;
-    const len = baseLen + String(unordered.length + 1).length;
-    const highBig = BigInt(highDigits.padEnd(len, "0"));
-    const stepBig = highBig / BigInt(unordered.length + 1);
+    const anchor = ordered.length ? { digits: ordered[0].digits, len: ordered[0].len || magLen(ordered[0].digits) } : { digits: "9", len: 1 };
+    const slots = new Array(unordered.length);
+    let bound = anchor;
+    for (let i = unordered.length - 1; i >= 0; i--) {
+      bound = calcMidDigits(null, bound);
+      slots[i] = bound;
+    }
     for (let i = 0; i < unordered.length; i++) {
-      const digits = (stepBig * BigInt(i + 1)).toString().padStart(len, "0");
+      const { digits, len } = slots[i];
       await updateFileOrderComment(
         app,
         unordered[i].filePath,
@@ -3719,7 +3759,7 @@ function attachListeners(boardEl, config, app, refresh) {
   };
   const siblingDataFrom = (zone) => Array.from(zone.querySelectorAll(".kanban-card")).map((c) => {
     const digits = c.dataset.digits || "99999";
-    return { digits, len: digits.length };
+    return { digits, len: magLen(digits) };
   }).sort((a, b) => compareDigits(a.digits, b.digits));
   const highlightNearestSlot = (zone, clientY) => {
     const rect = zone.getBoundingClientRect();

@@ -299,10 +299,16 @@ const DELETED_TAG = "#deleted";
 const isDeletedTag = (t: string) => normalizeTag(t) === normalizeTag(DELETED_TAG);
 
 // ─── ORDER-COMMENT PARSING ────────────────────────────────────────────────────
-// Format: %% @<digits> %%
+// Format: %% @<digits> %% or %% @-<digits> %% (a leading '-' places the card
+// below zero — see the ORDER ARITHMETIC section for why that's useful).
 // A trailing single letter (the old expanded/collapsed flag, e.g. "%% @123x %%")
 // is tolerated on read for files written before that flag was dropped, but is
 // never written back — the next write to a line rewrites it in the bare form.
+//
+// `digits` carries the sign (e.g. "-35"); `len` is always the *magnitude*
+// length (excluding the sign), since that's what the padding/scale math in
+// calcMidDigits needs — use magLen()/splitSigned() rather than `.length`
+// when deriving one of these from a fresh digit string.
 
 interface OrderInfo {
   digits: string;
@@ -310,10 +316,12 @@ interface OrderInfo {
 }
 
 function parseOrderComment(text: string): OrderInfo | null {
-  const m = text.match(/%% @(\d+)\w? %%/);
+  const m = text.match(/%% @(-?\d+)\w? %%/);
   if (!m) return null;
-  // An all-zero digit string means "no real order" (same as absent).
-  return /[1-9]/.test(m[1]) ? { digits: m[1], len: m[1].length } : null;
+  const mag = m[1].replace(/^-/, "");
+  // An all-zero digit string means "no real order" (same as absent) — sign
+  // doesn't matter here, since -0 and 0 are the same value.
+  return /[1-9]/.test(mag) ? { digits: m[1], len: mag.length } : null;
 }
 
 // ─── TASK LINE PARSE / SERIALIZE ─────────────────────────────────────────────
@@ -340,7 +348,7 @@ function parseTaskLine(raw: string): TaskLine {
   // Order comment (a legacy trailing letter, e.g. "%% @123x %%", is tolerated
   // on read but dropped on the next write — see parseOrderComment above).
   let orderDigits: string | null = null;
-  const om = rest.match(/%% @(\d+)\w? %%/);
+  const om = rest.match(/%% @(-?\d+)\w? %%/);
   if (om) {
     orderDigits = om[1];
   }
@@ -447,21 +455,57 @@ async function updateFileOrderComment(
   }
 }
 
-// ─── ORDER ARITHMETIC (BigInt midpoints) ─────────────────────────────────────
+// ─── ORDER ARITHMETIC (shortest signed decimal strictly between two bounds) ──
+// Order values are signed decimal fractions (±0.<digits>) — see the
+// ORDER-COMMENT PARSING section above for the on-disk format. Placing a card
+// between two neighbors (or at an open end of a column) picks the value with
+// the *fewest digits* that still sits strictly between them, not the
+// arithmetic midpoint — repeated inserts at the same spot then grow the
+// digit string only as fast as actually necessary. When one side has no
+// real neighbor (inserting at the very top/bottom of a column, or promoting
+// a subtask with nothing already ordered after it), the result hugs the
+// real neighbor instead of centering on an arbitrary bound. That's also
+// what lets a run of inserts at the very top cross zero into negative
+// values once there's no more room above zero, rather than growing
+// precision forever — the actual reason negative order values exist.
 
 interface SiblingData {
   digits: string;
   len: number;
 }
 
-// Compares two order-digit strings as unbounded decimal fractions (0.<digits>),
-// without ever going through a lossy float — pad the shorter to the longer's
-// length with trailing zeros, then compare the strings directly.
+// Splits a signed digit string ("-35" / "35") into its sign and magnitude.
+function splitSigned(s: string): { neg: boolean; mag: string } {
+  return s.startsWith("-") ? { neg: true, mag: s.slice(1) } : { neg: false, mag: s };
+}
+
+// Magnitude length of a (possibly signed) digit string — what SiblingData.len
+// and OrderInfo.len should always hold, as opposed to the raw string length.
+function magLen(s: string): number {
+  return s.startsWith("-") ? s.length - 1 : s.length;
+}
+
+// Floor division for BigInts (b > 0) — BigInt's native `/` truncates toward
+// zero, which is wrong here whenever a is negative.
+function bigFloorDiv(a: bigint, b: bigint): bigint {
+  const q = a / b;
+  return a < 0n && q * b !== a ? q - 1n : q;
+}
+
+// Compares two signed order-digit strings as decimal fractions (±0.<digits>),
+// without ever going through a lossy float — pad the shorter magnitude to the
+// longer's length with trailing zeros, then compare.
 function compareDigits(a: string, b: string): number {
-  const l = Math.max(a.length, b.length);
-  const pa = a.padEnd(l, "0");
-  const pb = b.padEnd(l, "0");
-  return pa < pb ? -1 : pa > pb ? 1 : 0;
+  const A = splitSigned(a), B = splitSigned(b);
+  const aZero = !/[1-9]/.test(A.mag), bZero = !/[1-9]/.test(B.mag);
+  const aSign = aZero ? 0 : A.neg ? -1 : 1;
+  const bSign = bZero ? 0 : B.neg ? -1 : 1;
+  if (aSign !== bSign) return aSign - bSign;
+  if (aSign === 0) return 0;
+  const l = Math.max(A.mag.length, B.mag.length);
+  const pa = A.mag.padEnd(l, "0"), pb = B.mag.padEnd(l, "0");
+  const cmp = pa < pb ? -1 : pa > pb ? 1 : 0;
+  return aSign < 0 ? -cmp : cmp;
 }
 
 // Cards without an order-digits string sort last, tie-broken by discovery order.
@@ -476,19 +520,45 @@ function compareCardsByDigits(
   return c !== 0 ? c : (a.discoveryIndex || 0) - (b.discoveryIndex || 0);
 }
 
-function calcMidDigits(prev: SiblingData, next: SiblingData | null, isEnd: boolean): SiblingData {
-  const l = Math.max(prev.len || 1, next?.len || 1);
-  const a = BigInt(prev.digits.padEnd(l, "0"));
-  const b = isEnd
-    ? 10n ** BigInt(l)
-    : BigInt((next!.digits || "0").padEnd(l, "0"));
-  const sum = a + b;
-  const mid = sum / 2n;
-  if (sum % 2n === 0n) {
-    return { digits: mid.toString().padStart(l, "0"), len: l };
+// Shortest signed value strictly between `prev` and `next`. Either bound may
+// be omitted (null) to mean "no real neighbor on this side" — the search
+// then hugs whichever bound is real instead of centering on a virtual one.
+function calcMidDigits(prev: SiblingData | null, next: SiblingData | null): SiblingData {
+  if (!prev && !next) return { digits: "5", len: 1 };
+
+  const L = Math.max(prev?.len || 0, next?.len || 0, 1);
+  const scaleAt = (s: SiblingData): bigint => {
+    const { neg, mag } = splitSigned(s.digits);
+    const v = BigInt(mag.padEnd(L, "0") + "0"); // scaled to L+1 digits
+    return neg ? -v : v;
+  };
+  const OPEN = 10n ** BigInt(L + 1); // virtual ±1 bound for an absent neighbor
+  const lowBound = prev ? scaleAt(prev) : -OPEN;
+  const highBound = next ? scaleAt(next) : OPEN;
+
+  for (let d = 1; d <= L + 1; d++) {
+    const scale = 10n ** BigInt(L + 1 - d);
+    const nMin = bigFloorDiv(lowBound, scale) + 1n;
+    const nMax = -bigFloorDiv(-highBound, scale) - 1n;
+    if (nMin > nMax || (nMin === 0n && nMax === 0n)) continue;
+
+    let pick: bigint;
+    if (!prev) {
+      pick = nMax !== 0n ? nMax : nMax - 1n;
+    } else if (!next) {
+      pick = nMin !== 0n ? nMin : nMin + 1n;
+    } else {
+      pick = bigFloorDiv(nMin + nMax, 2n);
+      if (pick === 0n) pick = nMax >= 1n ? 1n : -1n;
+    }
+    if (pick < nMin || pick > nMax || pick === 0n) continue;
+
+    const neg = pick < 0n;
+    const mag = (neg ? -pick : pick).toString().padStart(d, "0");
+    return { digits: neg ? `-${mag}` : mag, len: d };
   }
-  const digs = (mid * 10n + 5n).toString().padStart(l + 1, "0");
-  return { digits: digs, len: l + 1 };
+  // Unreachable as long as prev's value is genuinely less than next's.
+  return { digits: "5", len: 1 };
 }
 
 function calcInsertOrder(
@@ -500,10 +570,10 @@ function calcInsertOrder(
   if (insertIndex === 0 || isMulti) {
     return n === 0
       ? { digits: "5", len: 1 }
-      : calcMidDigits({ digits: "0", len: 1 }, siblingData[0], false);
+      : calcMidDigits(null, siblingData[0]);
   }
-  if (insertIndex >= n) return calcMidDigits(siblingData[n - 1], null, true);
-  return calcMidDigits(siblingData[insertIndex - 1], siblingData[insertIndex], false);
+  if (insertIndex >= n) return calcMidDigits(siblingData[n - 1], null);
+  return calcMidDigits(siblingData[insertIndex - 1], siblingData[insertIndex]);
 }
 
 // ─── DATE HELPERS ─────────────────────────────────────────────────────────────
@@ -1357,7 +1427,7 @@ async function editCardText(
     const tags = extractTags(original).join(" ");
     const createdMatch = original.match(/%% @created:\d{4}-\d{2}-\d{2} %%/);
     const createdComment = createdMatch ? createdMatch[0] : "";
-    const orderMatch = original.match(/%% @\d+\w %%/);
+    const orderMatch = original.match(/%% @-?\d+\w? %%/);
     const orderComment = orderMatch ? orderMatch[0] : "";
     const colorMatch = original.match(/%% @color:#[0-9a-fA-F]{6} %%/);
     const colorComment = colorMatch ? colorMatch[0] : "";
@@ -2112,22 +2182,16 @@ async function promoteSubToChild(
       .find((c: any) => c.digits != null && c.digits === parentDigits);
 
     const prevSibling = parentCard
-      ? { digits: parentCard.digits || "0", len: parentCard.len || 1 }
-      : { digits: parentDigits || "0", len: (parentDigits || "0").length };
+      ? { digits: parentCard.digits || "0", len: parentCard.len || magLen(parentCard.digits || "0") }
+      : { digits: parentDigits || "0", len: magLen(parentDigits || "0") };
 
     const higher = (columns[normParent]?.cards || [])
       .filter((c: any) => c.digits != null && compareDigits(c.digits, parentDigits) > 0)
       .sort((a: any, b: any) => compareDigits(a.digits, b.digits));
 
-    let newCalc: { digits: string; len: number };
-    if (higher.length) {
-      newCalc = calcMidDigits(prevSibling, higher[0], false);
-    } else {
-      // No sibling ordered after the parent — any digit string that's greater
-      // than the parent's (after zero-padding) works, with no upper bound to
-      // squeeze under.
-      newCalc = { digits: prevSibling.digits + "9", len: prevSibling.len + 1 };
-    }
+    // No sibling ordered after the parent falls through to calcMidDigits'
+    // no-upper-bound case (hugs just above the parent, no forced digit growth).
+    const newCalc: SiblingData = calcMidDigits(prevSibling, higher.length ? higher[0] : null);
 
     // A newly-promoted card starts expanded so its own subtasks (if any) are
     // immediately visible, unless it lands straight in Done/Later — a
@@ -2608,16 +2672,22 @@ async function assignInitialOrders(
     if (!unordered.length) continue;
 
     // New (unordered) cards are slotted before the lowest already-ordered
-    // card, splitting the range [0, highDigits) into equal BigInt steps —
-    // extra digits of precision are added so every step stays distinct.
-    const highDigits = ordered.length ? ordered[0].digits || "9" : "9";
-    const baseLen = ordered.length ? ordered[0].len || highDigits.length : 1;
-    const len = baseLen + String(unordered.length + 1).length;
-    const highBig = BigInt(highDigits.padEnd(len, "0"));
-    const stepBig = highBig / BigInt(unordered.length + 1);
+    // card (discovery order preserved), each one computed with the same
+    // shortest-value-between-bounds primitive the drag-and-drop path uses —
+    // working backwards from the anchor so every step only needs to stay
+    // below the slot just assigned after it.
+    const anchor: SiblingData = ordered.length
+      ? { digits: ordered[0].digits, len: ordered[0].len || magLen(ordered[0].digits) }
+      : { digits: "9", len: 1 };
+    const slots: SiblingData[] = new Array(unordered.length);
+    let bound = anchor;
+    for (let i = unordered.length - 1; i >= 0; i--) {
+      bound = calcMidDigits(null, bound);
+      slots[i] = bound;
+    }
 
     for (let i = 0; i < unordered.length; i++) {
-      const digits = (stepBig * BigInt(i + 1)).toString().padStart(len, "0");
+      const { digits, len } = slots[i];
       await updateFileOrderComment(
         app,
         unordered[i].filePath,
@@ -5160,7 +5230,7 @@ export function attachListeners(
   const siblingDataFrom = (zone: HTMLElement): SiblingData[] =>
     Array.from(zone.querySelectorAll(".kanban-card")).map((c: any) => {
       const digits = c.dataset.digits || "99999";
-      return { digits, len: digits.length };
+      return { digits, len: magLen(digits) };
     }).sort((a, b) => compareDigits(a.digits, b.digits));
 
   const highlightNearestSlot = (zone: HTMLElement, clientY: number) => {
