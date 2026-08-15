@@ -277,7 +277,7 @@ async function updateFileOrderComment(app, filePath, lineNum, newDigits) {
       return true;
     parsed.orderDigits = digits;
     lines[lineNum - 1] = serializeTaskLine(parsed);
-    await app.vault.modify(tFile, lines.join("\n"));
+    await vaultModify(app, tFile, lines.join("\n"));
     return true;
   } catch (e) {
     console.error("updateFileOrderComment failed:", e);
@@ -919,8 +919,12 @@ async function readFileLines(app, filePath) {
     throw new Error(`File not found: ${filePath}`);
   return { tFile, lines: (await app.vault.read(tFile)).split("\n") };
 }
+async function vaultModify(app, tFile, content) {
+  await app.vault.modify(tFile, content);
+  invalidateCachedFile(tFile.path);
+}
 async function writeFileLines(app, tFile, lines) {
-  await app.vault.modify(tFile, lines.join("\n"));
+  await vaultModify(app, tFile, lines.join("\n"));
 }
 async function updateCardDate(app, filePath, lineNum, newDateStr) {
   const { tFile, lines } = await readFileLines(app, filePath);
@@ -1257,7 +1261,7 @@ async function addNewItem(app, columnTag, userText, dateStr, config, notesText =
     const projLines = (await app.vault.read(projFile)).split("\n");
     const insertAt = afterLeadingHeading(projLines, afterFrontMatter(projLines));
     projLines.splice(insertAt, 0, newLine, ...noteLines);
-    await app.vault.modify(projFile, projLines.join("\n"));
+    await vaultModify(app, projFile, projLines.join("\n"));
     const isCustomTarget = docTitle.toLowerCase() !== sanitizeDocTitle(defaultDocName).toLowerCase();
     const masterDocName = config.projectsDocument.trim();
     if (wasNew && isCustomTarget && masterDocName) {
@@ -1269,7 +1273,7 @@ async function addNewItem(app, columnTag, userText, dateStr, config, notesText =
       }
       const masterLines = (await app.vault.read(masterFile)).split("\n");
       masterLines.splice(afterFrontMatter(masterLines), 0, `[[${projFile.basename}]]`);
-      await app.vault.modify(masterFile, masterLines.join("\n"));
+      await vaultModify(app, masterFile, masterLines.join("\n"));
     }
     new import_obsidian.Notice(`Added "${userText}" to ${projFile.path}.`);
     return true;
@@ -1304,7 +1308,7 @@ async function moveCardToNewDoc(app, filePath, lineNum, plainTitle, targetTag, c
     projFile = await app.vault.create(docPath, "");
   const projLines = (await app.vault.read(projFile)).split("\n");
   projLines.splice(afterFrontMatter(projLines), 0, newTaskLine);
-  await app.vault.modify(projFile, projLines.join("\n"));
+  await vaultModify(app, projFile, projLines.join("\n"));
   const nd = new Date();
   const movedDate = `${nd.getFullYear()}-${String(nd.getMonth() + 1).padStart(2, "0")}-${String(nd.getDate()).padStart(2, "0")}`;
   lines.splice(lineNum - 1, 1, `[[${safeTitle}]] (moved: ${movedDate})`);
@@ -1319,7 +1323,7 @@ async function moveCardToNewDoc(app, filePath, lineNum, plainTitle, targetTag, c
     }
     const masterLines = (await app.vault.read(masterFile)).split("\n");
     masterLines.splice(afterFrontMatter(masterLines), 0, `[[${safeTitle}]]`);
-    await app.vault.modify(masterFile, masterLines.join("\n"));
+    await vaultModify(app, masterFile, masterLines.join("\n"));
   }
   new import_obsidian.Notice(isNew ? `Created "${safeTitle}.md" and moved task.` : `Moved task to existing "${safeTitle}.md".`);
 }
@@ -3324,7 +3328,7 @@ async function tagUntaggedRecurrentCards(app, paths, config) {
       changed = true;
     }
     if (changed)
-      await app.vault.modify(tFile, lines.join("\n"));
+      await vaultModify(app, tFile, lines.join("\n"));
   }
 }
 async function moveCheckedCardsToDone(app, paths, config) {
@@ -3363,7 +3367,7 @@ async function moveCheckedCardsToDone(app, paths, config) {
       }
     }
     if (changed)
-      await app.vault.modify(tFile, lines.join("\n"));
+      await vaultModify(app, tFile, lines.join("\n"));
   }
 }
 async function stampMissingCreatedDates(app, paths, config) {
@@ -3406,7 +3410,7 @@ async function stampMissingCreatedDates(app, paths, config) {
       changed = true;
     }
     if (changed)
-      await app.vault.modify(tFile, lines.join("\n"));
+      await vaultModify(app, tFile, lines.join("\n"));
   }
 }
 var KANBAN_NARROW_BREAKPOINT = 700;

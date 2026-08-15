@@ -447,7 +447,7 @@ async function updateFileOrderComment(
 
     parsed.orderDigits = digits;
     lines[lineNum - 1] = serializeTaskLine(parsed);
-    await app.vault.modify(tFile, lines.join("\n"));
+    await vaultModify(app, tFile, lines.join("\n"));
     return true;
   } catch (e: any) {
     console.error("updateFileOrderComment failed:", e);
@@ -1291,8 +1291,24 @@ async function readFileLines(
   return { tFile, lines: (await app.vault.read(tFile)).split("\n") };
 }
 
+// Every write in this plugin must go through here, not app.vault.modify
+// directly. Obsidian only updates TFile.stat.mtime and fires the vault
+// "modify" event from its filesystem-watcher callback (Vault.onChange) —
+// never synchronously as part of modify()'s own promise — so both of
+// fileLineCache/fileEntryCache's invalidation paths (the main.ts "modify"
+// listener, and the mtime-equality check in getCachedFileLines/
+// getCachedFileEntries) depend on that watcher round-trip. On a synced
+// vault (iCloud, etc.) that round-trip can lag well past the board's own
+// post-write refresh, so a render right after a write can still read stale
+// cached content — invalidating here, immediately after our own write
+// resolves, doesn't depend on that timing at all.
+async function vaultModify(app: App, tFile: TFile, content: string): Promise<void> {
+  await app.vault.modify(tFile, content);
+  invalidateCachedFile(tFile.path);
+}
+
 async function writeFileLines(app: App, tFile: TFile, lines: string[]) {
-  await app.vault.modify(tFile, lines.join("\n"));
+  await vaultModify(app, tFile, lines.join("\n"));
 }
 
 async function updateCardDate(app: App, filePath: string, lineNum: number, newDateStr: string | null): Promise<void> {
@@ -1768,7 +1784,7 @@ async function addNewItem(
     const projLines = (await app.vault.read(projFile)).split("\n");
     const insertAt = afterLeadingHeading(projLines, afterFrontMatter(projLines));
     projLines.splice(insertAt, 0, newLine, ...noteLines);
-    await app.vault.modify(projFile, projLines.join("\n"));
+    await vaultModify(app, projFile, projLines.join("\n"));
 
     const isCustomTarget = docTitle.toLowerCase() !== sanitizeDocTitle(defaultDocName).toLowerCase();
     const masterDocName = config.projectsDocument.trim();
@@ -1780,7 +1796,7 @@ async function addNewItem(
       }
       const masterLines = (await app.vault.read(masterFile)).split("\n");
       masterLines.splice(afterFrontMatter(masterLines), 0, `[[${projFile.basename}]]`);
-      await app.vault.modify(masterFile, masterLines.join("\n"));
+      await vaultModify(app, masterFile, masterLines.join("\n"));
     }
 
     new Notice(`Added "${userText}" to ${projFile.path}.`);
@@ -1833,7 +1849,7 @@ async function moveCardToNewDoc(
   if (!projFile) projFile = await app.vault.create(docPath, "");
   const projLines = (await app.vault.read(projFile)).split("\n");
   projLines.splice(afterFrontMatter(projLines), 0, newTaskLine);
-  await app.vault.modify(projFile, projLines.join("\n"));
+  await vaultModify(app, projFile, projLines.join("\n"));
 
   // Remove card line from source, insert [[link]] in its place
   const nd = new Date();
@@ -1851,7 +1867,7 @@ async function moveCardToNewDoc(
     }
     const masterLines = (await app.vault.read(masterFile)).split("\n");
     masterLines.splice(afterFrontMatter(masterLines), 0, `[[${safeTitle}]]`);
-    await app.vault.modify(masterFile, masterLines.join("\n"));
+    await vaultModify(app, masterFile, masterLines.join("\n"));
   }
 
   new Notice(isNew ? `Created "${safeTitle}.md" and moved task.` : `Moved task to existing "${safeTitle}.md".`);
@@ -4616,7 +4632,7 @@ async function tagUntaggedRecurrentCards(app: App, paths: string[], config: Kanb
       }
       changed = true;
     }
-    if (changed) await app.vault.modify(tFile, lines.join('\n'));
+    if (changed) await vaultModify(app, tFile, lines.join('\n'));
   }
 }
 
@@ -4670,7 +4686,7 @@ export async function moveCheckedCardsToDone(app: App, paths: string[], config: 
         changed = true;
       }
     }
-    if (changed) await app.vault.modify(tFile, lines.join("\n"));
+    if (changed) await vaultModify(app, tFile, lines.join("\n"));
   }
 }
 
@@ -4730,7 +4746,7 @@ export async function stampMissingCreatedDates(app: App, paths: string[], config
       lines[idx] = serializeTaskLine(parsed);
       changed = true;
     }
-    if (changed) await app.vault.modify(tFile, lines.join("\n"));
+    if (changed) await vaultModify(app, tFile, lines.join("\n"));
   }
 }
 
