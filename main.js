@@ -2668,12 +2668,18 @@ async function applySubtaskTree(app, filePath, cardLineNum, root, config) {
   const { tFile, lines } = await readFileLines(app, filePath);
   const fileItems = parseFileEntries(lines, filePath, config);
   const card = fileItems.find((f) => f.item.line === cardLineNum);
-  if (!card || !card.item.subs.length)
+  if (!card)
     return;
-  const startLine = card.item.subs[0].line;
-  const endLine = maxSubLine(card.item.subs) || cardLineNum;
   const newBlock = serializeDialogTree(root);
-  lines.splice(startLine - 1, endLine - startLine + 1, ...newBlock);
+  if (card.item.subs.length) {
+    const startLine = card.item.subs[0].line;
+    const endLine = maxSubLine(card.item.subs) || cardLineNum;
+    lines.splice(startLine - 1, endLine - startLine + 1, ...newBlock);
+  } else {
+    if (!newBlock.length)
+      return;
+    lines.splice(cardLineNum, 0, ...newBlock);
+  }
   await writeFileLines(app, tFile, lines);
 }
 function wireSubtaskTree(app, containerEl, titleEl, root, config, onEditSubtask, onDeleteSubtask, onChange, setEscapeHandler, dialogEscapeDefault) {
@@ -2682,6 +2688,7 @@ function wireSubtaskTree(app, containerEl, titleEl, root, config, onEditSubtask,
   let dirty = false;
   const rowEls = /* @__PURE__ */ new Map();
   let slots = [];
+  let nextNewId = -1;
   const makeSlot = (parentId, index) => {
     const s = doc.createElement("div");
     s.className = "kb-subtask-slot";
@@ -2786,7 +2793,7 @@ function wireSubtaskTree(app, containerEl, titleEl, root, config, onEditSubtask,
     const node = findNode(root, line);
     if (!node)
       return;
-    const raw = node.raw;
+    const raw = cleanSubtaskText(node.raw, config).raw;
     const savedHTML = label.innerHTML;
     const input = doc.createElement("textarea");
     input.value = raw;
@@ -2850,6 +2857,74 @@ function wireSubtaskTree(app, containerEl, titleEl, root, config, onEditSubtask,
     }));
   };
   containerEl.addEventListener("dblclick", onRowDblClick);
+  const startNewNodeEdit = (node, isCheckboxNode) => {
+    const row = rowEls.get(node.id);
+    const label = row?.querySelector(":scope > div > .kb-subtask-label");
+    if (!row || !label)
+      return;
+    const input = doc.createElement("textarea");
+    input.className = "card-edit-input";
+    input.rows = 1;
+    input.style.cssText = `
+      width:100%;box-sizing:border-box;
+      background:var(--background-primary);
+      color:var(--text-normal);
+      border:none;border-bottom:2px solid var(--kb-accent);
+      outline:none;padding:2px 0;font-size:inherit;font-weight:inherit;
+      font-family:inherit;border-radius:0;
+      resize:none;overflow:hidden;line-height:inherit;display:block;`;
+    const autoResize = () => {
+      input.style.height = "0px";
+      input.style.height = input.scrollHeight + "px";
+    };
+    label.innerHTML = "";
+    label.style.pointerEvents = "auto";
+    label.appendChild(input);
+    const popModEnterScope = withNewlineOnModEnter(app, input, autoResize);
+    let finished = false;
+    const finish = () => {
+      if (finished)
+        return;
+      finished = true;
+      popModEnterScope();
+      setEscapeHandler(dialogEscapeDefault);
+      const rawLines = input.value.replace(/\r\n/g, "\n").split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+      const parent = findParentOf(root, node.id);
+      if (!rawLines.length) {
+        if (parent)
+          parent.children = parent.children.filter((c) => c.id !== node.id);
+      } else {
+        node.raw = `${isCheckboxNode ? "- [ ] " : "- "}${rawLines[0]}`;
+        for (const l of rawLines.slice(1)) {
+          const { hasCheckbox, text } = parseLineMarker(l);
+          node.children.push({ id: nextNewId--, raw: `${hasCheckbox ? "- [ ] " : "- "}${text}`, trailingRaw: [], children: [] });
+        }
+      }
+      dirty = true;
+      render();
+    };
+    setEscapeHandler(finish);
+    input.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" && !ev.ctrlKey && !ev.metaKey) {
+        ev.preventDefault();
+        finish();
+      }
+    });
+    input.addEventListener("input", autoResize);
+    input.addEventListener("blur", finish);
+    input.addEventListener("dblclick", (ev) => ev.stopPropagation());
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      autoResize();
+      input.focus();
+    }));
+  };
+  const addNode = (isCheckboxNode) => {
+    const node = { id: nextNewId--, raw: isCheckboxNode ? "- [ ] " : "- ", trailingRaw: [], children: [] };
+    root.children.push(node);
+    dirty = true;
+    render();
+    startNewNodeEdit(node, isCheckboxNode);
+  };
   let suppressToggleClick = false;
   const onToggleClick = (e) => {
     if (suppressToggleClick) {
@@ -3086,6 +3161,7 @@ function wireSubtaskTree(app, containerEl, titleEl, root, config, onEditSubtask,
       dirty = true;
       render();
     },
+    addNode,
     refreshClamping: () => adjustClamping(),
     destroy: () => {
       containerEl.removeEventListener("mousedown", onMouseDown);
@@ -3117,18 +3193,20 @@ function showCardColorDialog(app, existingColor, title, cardLineNum, subtaskTree
   const swatchesHtml = CARD_COLOR_HUES.map(([name, h]) => `<button type="button" class="kb-color-swatch" data-hue="${h}" title="${name}" style="${swatchBtnStyle(h, h === selectedHue)}"></button>`).join("") + `<button type="button" class="kb-color-swatch" data-hue="-1" title="Gray" style="${swatchBtnStyle(-1, selectedHue === -1)}"></button><button type="button" class="kb-color-swatch" data-hue="-2" title="Default (no color)" style="${swatchBtnStyle(-2, selectedHue === -2)}"></button>`;
   const deleteBtnStyle = "padding:8px 16px;background:var(--text-error, #e03e3e);border:none;border-radius:4px;cursor:pointer;color:#fff;";
   const sortBtnStyle = "align-self:flex-start;flex-shrink:0;margin-bottom:8px;padding:5px 12px;border-radius:6px;border:1px solid var(--background-modifier-border);background:var(--background-secondary);color:var(--text-normal);cursor:pointer;font-size:.85em;";
-  const subtaskSectionHtml = subtaskTree.length > 0 ? `
+  const subtaskSectionHtml = `
     <div id="k-subtask-section" style="margin-top:14px;text-align:left;flex:1;min-height:0;display:flex;flex-direction:column;">
       <div id="k-subtask-toggle" style="font-size:.8em;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;flex-shrink:0;cursor:pointer;display:flex;align-items:center;gap:5px;user-select:none;">
         <span id="k-subtask-arrow" style="font-size:1.1em;line-height:1;color:var(--kb-accent);">\u25BC</span>
         <span>Order subtasks</span>
       </div>
       <div id="k-subtask-btnrow" style="display:flex;gap:8px;flex-wrap:wrap;flex-shrink:0;">
+        <button id="k-subtask-add-task" type="button" style="${sortBtnStyle}" title="Add a new subtask below all others">Add \u2610</button>
+        <button id="k-subtask-add-comment" type="button" style="${sortBtnStyle}" title="Add a new plain (non-checkbox) note below all others">Add \u2022</button>
         <button id="k-subtask-sort" type="button" style="${sortBtnStyle}" title="Move all done subtasks below the open ones">Open \u2192 Done</button>
         <button id="k-subtask-archive-done" type="button" style="${sortBtnStyle}" title="Copy this card's title to the archive (if not already there), then move its fully-done subtasks underneath it">Archive done</button>
       </div>
       <div id="k-subtask-col" style="flex:1;min-height:0;overflow-y:auto;padding:8px;border:1px solid var(--background-modifier-border);border-radius:8px;background:var(--background-secondary);display:flex;flex-direction:column;"></div>
-    </div>` : "";
+    </div>`;
   dialog.innerHTML = `
     <div style="flex-shrink:0;">
       <h3 id="k-card-title-row" style="margin:0 0 12px;font-size:1.1em;overflow-wrap:anywhere;border-radius:6px;">${title || "Card"}</h3>
@@ -3141,6 +3219,8 @@ function showCardColorDialog(app, existingColor, title, cardLineNum, subtaskTree
   const subtaskSection = dialog.querySelector("#k-subtask-section");
   const subtaskToggle = dialog.querySelector("#k-subtask-toggle");
   const subtaskArrow = dialog.querySelector("#k-subtask-arrow");
+  const subtaskAddTaskBtn = dialog.querySelector("#k-subtask-add-task");
+  const subtaskAddCommentBtn = dialog.querySelector("#k-subtask-add-comment");
   const subtaskSortBtn = dialog.querySelector("#k-subtask-sort");
   const subtaskArchiveDoneBtn = dialog.querySelector("#k-subtask-archive-done");
   const subtaskBtnRow = dialog.querySelector("#k-subtask-btnrow");
@@ -3155,6 +3235,15 @@ function showCardColorDialog(app, existingColor, title, cardLineNum, subtaskTree
     refreshDeleteVisibility();
   };
   const treeCtl = subtaskColEl ? wireSubtaskTree(app, subtaskColEl, titleRowEl, root, config, onEditSubtask, onDeleteSubtask, onTreeChange, setEscapeHandler, () => closeAndCleanup()) : null;
+  const addNodeExpanded = (isCheckboxNode) => {
+    if (!subtasksExpanded) {
+      subtasksExpanded = true;
+      applySubtaskExpanded();
+    }
+    treeCtl?.addNode(isCheckboxNode);
+  };
+  subtaskAddTaskBtn?.addEventListener("click", () => addNodeExpanded(true));
+  subtaskAddCommentBtn?.addEventListener("click", () => addNodeExpanded(false));
   subtaskSortBtn?.addEventListener("click", () => treeCtl?.sortOpenDone());
   subtaskArchiveDoneBtn?.addEventListener("click", () => {
     closeAndCleanup();

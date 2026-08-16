@@ -3845,15 +3845,24 @@ function serializeDialogTree(root: DialogNode, depth = 1): string[] {
 // file. Re-derived fresh from the file rather than trusting the tree's own
 // dialog-open-time line numbers, since a DialogNode's `id` is only a stable
 // *identity* for the session, not a live file position once anything moved.
+// A card that currently has no subtasks on disk at all (every one of them
+// added fresh this session via Add Subtask/Add Comment — see wireSubtaskTree's
+// addNode) has no existing range to replace; the whole regenerated block is
+// inserted directly after the card's own line instead.
 async function applySubtaskTree(app: App, filePath: string, cardLineNum: number, root: DialogNode, config: KanbanConfig): Promise<void> {
   const { tFile, lines } = await readFileLines(app, filePath);
   const fileItems = parseFileEntries(lines, filePath, config);
   const card = fileItems.find((f: any) => f.item.line === cardLineNum);
-  if (!card || !card.item.subs.length) return;
-  const startLine = card.item.subs[0].line;
-  const endLine = maxSubLine(card.item.subs) || cardLineNum;
+  if (!card) return;
   const newBlock = serializeDialogTree(root);
-  lines.splice(startLine - 1, endLine - startLine + 1, ...newBlock);
+  if (card.item.subs.length) {
+    const startLine = card.item.subs[0].line;
+    const endLine = maxSubLine(card.item.subs) || cardLineNum;
+    lines.splice(startLine - 1, endLine - startLine + 1, ...newBlock);
+  } else {
+    if (!newBlock.length) return;
+    lines.splice(cardLineNum, 0, ...newBlock);
+  }
   await writeFileLines(app, tFile, lines);
 }
 
@@ -3893,13 +3902,18 @@ function wireSubtaskTree(
   // otherwise close/cancel the whole dialog) — see onRowDblClick below.
   setEscapeHandler: (fn: () => void) => void,
   dialogEscapeDefault: () => void
-): { sortOpenDone(): void; refreshClamping(): void; destroy(): void } {
+): { sortOpenDone(): void; addNode(isCheckboxNode: boolean): void; refreshClamping(): void; destroy(): void } {
   const doc = containerEl.ownerDocument;
   const DRAG_DELAY = 200, MOVE_THRESHOLD = 6;
 
   let dirty = false;
   const rowEls = new Map<number, HTMLElement>();
   let slots: { el: HTMLElement; parentId: number; index: number }[] = [];
+  // Synthetic ids for nodes added this session (see addNode) — negative, so
+  // they can never collide with a real line number (always >= 1). Purely a
+  // session-local identity, same as every other node's id; never written
+  // anywhere.
+  let nextNewId = -1;
 
   const makeSlot = (parentId: number, index: number): HTMLElement => {
     const s = doc.createElement("div");
@@ -4056,7 +4070,14 @@ function wireSubtaskTree(
     const line = parseInt(row.dataset.id!, 10);
     const node = findNode(root, line);
     if (!node) return;
-    const raw = node.raw;
+    // The editable content is the bullet/checkbox/kanban-tag-stripped text
+    // (matching the board's own onSubDblClick and cleanSubtaskText) — NOT
+    // node.raw itself, which still carries its own "- [ ]" prefix.
+    // onEditSubtask ultimately calls editCardText, which reconstructs the
+    // line by gluing the ORIGINAL line's own bullet/checkbox/tags back onto
+    // whatever's typed here; feeding it node.raw directly would double up
+    // that prefix on every real edit.
+    const raw = cleanSubtaskText(node.raw, config).raw;
 
     const savedHTML = label.innerHTML;
     const input = doc.createElement("textarea");
@@ -4121,6 +4142,90 @@ function wireSubtaskTree(
     }));
   };
   containerEl.addEventListener("dblclick", onRowDblClick);
+
+  // Opens a freshly-added node (see addNode) for typing. A pure in-memory
+  // edit, unlike onRowDblClick's edit of an EXISTING node: there's nothing
+  // on disk yet to write to, so committing just fills in this node's own
+  // `raw` (and, for any extra lines the user typed, brand-new child nodes —
+  // same "further lines become children one level deeper" convention as
+  // editCardText's own Ctrl+Enter handling) and re-renders, leaving the
+  // dialog open exactly like a move or a marker toggle. Only reaches disk
+  // if the session is later applied; leaving it blank drops the placeholder
+  // instead of leaving an empty subtask behind.
+  const startNewNodeEdit = (node: DialogNode, isCheckboxNode: boolean) => {
+    const row = rowEls.get(node.id);
+    const label = row?.querySelector<HTMLElement>(":scope > div > .kb-subtask-label");
+    if (!row || !label) return;
+
+    const input = doc.createElement("textarea");
+    input.className = "card-edit-input";
+    input.rows = 1;
+    input.style.cssText = `
+      width:100%;box-sizing:border-box;
+      background:var(--background-primary);
+      color:var(--text-normal);
+      border:none;border-bottom:2px solid var(--kb-accent);
+      outline:none;padding:2px 0;font-size:inherit;font-weight:inherit;
+      font-family:inherit;border-radius:0;
+      resize:none;overflow:hidden;line-height:inherit;display:block;`;
+    const autoResize = () => {
+      input.style.height = "0px";
+      input.style.height = input.scrollHeight + "px";
+    };
+
+    label.innerHTML = "";
+    label.style.pointerEvents = "auto";
+    label.appendChild(input);
+
+    const popModEnterScope = withNewlineOnModEnter(app, input, autoResize);
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      popModEnterScope();
+      setEscapeHandler(dialogEscapeDefault);
+
+      const rawLines = input.value.replace(/\r\n/g, "\n").split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+      const parent = findParentOf(root, node.id);
+      if (!rawLines.length) {
+        if (parent) parent.children = parent.children.filter((c) => c.id !== node.id);
+      } else {
+        node.raw = `${isCheckboxNode ? "- [ ] " : "- "}${rawLines[0]}`;
+        for (const l of rawLines.slice(1)) {
+          const { hasCheckbox, text } = parseLineMarker(l);
+          node.children.push({ id: nextNewId--, raw: `${hasCheckbox ? "- [ ] " : "- "}${text}`, trailingRaw: [], children: [] });
+        }
+      }
+      dirty = true;
+      render();
+    };
+
+    setEscapeHandler(finish);
+    input.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" && !ev.ctrlKey && !ev.metaKey) { ev.preventDefault(); finish(); }
+    });
+    input.addEventListener("input", autoResize);
+    input.addEventListener("blur", finish);
+    input.addEventListener("dblclick", (ev) => ev.stopPropagation());
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      autoResize();
+      input.focus();
+    }));
+  };
+
+  // The "+ Subtask"/"+ Comment" buttons: always append a brand-new node as
+  // a direct child of the card (level 1), below every existing top-level
+  // subtask, then immediately open it for typing. A subtask starts with a
+  // checkbox; a comment is a plain bullet (no checkbox) — matching this
+  // codebase's existing convention that a plain bullet is a descriptive/
+  // context line rather than an actual task.
+  const addNode = (isCheckboxNode: boolean) => {
+    const node: DialogNode = { id: nextNewId--, raw: isCheckboxNode ? "- [ ] " : "- ", trailingRaw: [], children: [] };
+    root.children.push(node);
+    dirty = true;
+    render();
+    startNewNodeEdit(node, isCheckboxNode);
+  };
 
   // Click on the ">"/"^"/"_" toggle span (see renderCheckbox's depToggle
   // option) — cycles a row's marker ">" -> "^" -> "_" (no marker) -> ">" ...,
@@ -4370,6 +4475,7 @@ function wireSubtaskTree(
       dirty = true;
       render();
     },
+    addNode,
     refreshClamping: () => adjustClamping(),
     destroy: () => {
       containerEl.removeEventListener("mousedown", onMouseDown);
@@ -4454,20 +4560,25 @@ function showCardColorDialog(
 
   // Sits between the color swatches and the Apply/Cancel/Delete row, and can
   // be collapsed independently of them (see applySubtaskExpanded below). The
-  // sort button lives inside the collapsible body (with the column), not the
-  // always-visible toggle header.
-  const subtaskSectionHtml = subtaskTree.length > 0 ? `
+  // button row lives inside the collapsible body (with the column), not the
+  // always-visible toggle header. Always rendered, even with zero existing
+  // subtasks — Add Subtask/Add Comment need somewhere to live for a card
+  // that doesn't have any yet (see applySubtaskTree's own handling of that
+  // case).
+  const subtaskSectionHtml = `
     <div id="k-subtask-section" style="margin-top:14px;text-align:left;flex:1;min-height:0;display:flex;flex-direction:column;">
       <div id="k-subtask-toggle" style="font-size:.8em;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;flex-shrink:0;cursor:pointer;display:flex;align-items:center;gap:5px;user-select:none;">
         <span id="k-subtask-arrow" style="font-size:1.1em;line-height:1;color:var(--kb-accent);">▼</span>
         <span>Order subtasks</span>
       </div>
       <div id="k-subtask-btnrow" style="display:flex;gap:8px;flex-wrap:wrap;flex-shrink:0;">
+        <button id="k-subtask-add-task" type="button" style="${sortBtnStyle}" title="Add a new subtask below all others">Add ☐</button>
+        <button id="k-subtask-add-comment" type="button" style="${sortBtnStyle}" title="Add a new plain (non-checkbox) note below all others">Add •</button>
         <button id="k-subtask-sort" type="button" style="${sortBtnStyle}" title="Move all done subtasks below the open ones">Open → Done</button>
         <button id="k-subtask-archive-done" type="button" style="${sortBtnStyle}" title="Copy this card's title to the archive (if not already there), then move its fully-done subtasks underneath it">Archive done</button>
       </div>
       <div id="k-subtask-col" style="flex:1;min-height:0;overflow-y:auto;padding:8px;border:1px solid var(--background-modifier-border);border-radius:8px;background:var(--background-secondary);display:flex;flex-direction:column;"></div>
-    </div>` : "";
+    </div>`;
 
   dialog.innerHTML = `
     <div style="flex-shrink:0;">
@@ -4482,6 +4593,8 @@ function showCardColorDialog(
   const subtaskSection = dialog.querySelector<HTMLElement>("#k-subtask-section");
   const subtaskToggle = dialog.querySelector<HTMLElement>("#k-subtask-toggle");
   const subtaskArrow = dialog.querySelector<HTMLElement>("#k-subtask-arrow");
+  const subtaskAddTaskBtn = dialog.querySelector<HTMLButtonElement>("#k-subtask-add-task");
+  const subtaskAddCommentBtn = dialog.querySelector<HTMLButtonElement>("#k-subtask-add-comment");
   const subtaskSortBtn = dialog.querySelector<HTMLButtonElement>("#k-subtask-sort");
   const subtaskArchiveDoneBtn = dialog.querySelector<HTMLButtonElement>("#k-subtask-archive-done");
   const subtaskBtnRow = dialog.querySelector<HTMLElement>("#k-subtask-btnrow");
@@ -4506,6 +4619,16 @@ function showCardColorDialog(
   const treeCtl = subtaskColEl
     ? wireSubtaskTree(app, subtaskColEl, titleRowEl, root, config, onEditSubtask, onDeleteSubtask, onTreeChange, setEscapeHandler, () => closeAndCleanup())
     : null;
+
+  // Auto-expands the (possibly collapsed) subtask section first — the new
+  // row needs to actually be visible (and laid out) for its textarea to
+  // focus/auto-resize correctly.
+  const addNodeExpanded = (isCheckboxNode: boolean) => {
+    if (!subtasksExpanded) { subtasksExpanded = true; applySubtaskExpanded(); }
+    treeCtl?.addNode(isCheckboxNode);
+  };
+  subtaskAddTaskBtn?.addEventListener("click", () => addNodeExpanded(true));
+  subtaskAddCommentBtn?.addEventListener("click", () => addNodeExpanded(false));
 
   subtaskSortBtn?.addEventListener("click", () => treeCtl?.sortOpenDone());
 
