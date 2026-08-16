@@ -1250,7 +1250,12 @@ function renderCheckbox(
     content = content.slice(6);
     if (showCheckbox) {
       if (isSub && subLine != null) {
-        cbHtml = `<input type="checkbox" class="kb-sub-check" data-sub-line="${subLine}"${checked ? " checked" : ""} style="width:1em;height:1em;margin-right:5px;vertical-align:middle;cursor:pointer;">`;
+        // pointer-events:auto matters when this renders inside the reorder
+        // dialog's row label, which wraps its content in pointer-events:none
+        // (see wireSubtaskTree's buildRow) so the whole row stays draggable
+        // — harmless elsewhere (the board's own renderSub never sets that on
+        // an ancestor, so this is already the effective default there).
+        cbHtml = `<input type="checkbox" class="kb-sub-check" data-sub-line="${subLine}"${checked ? " checked" : ""} style="width:1em;height:1em;margin-right:5px;vertical-align:middle;cursor:pointer;pointer-events:auto;">`;
       } else {
         cbHtml = `<input type="checkbox" disabled${checked ? " checked" : ""} style="width:1em;height:1em;margin-right:5px;vertical-align:middle;">`;
       }
@@ -4237,46 +4242,85 @@ function wireSubtaskTree(
     startNewNodeEdit(node, isCheckboxNode);
   };
 
-  // Click on the ">"/"^"/"_" toggle span (see renderCheckbox's depToggle
-  // option) — cycles a row's marker ">" -> "^" -> "_" (no marker) -> ">" ...,
-  // except ">" is skipped entirely for a row with no real predecessor (see
-  // appendUnit's hasPredecessor), where it isn't a valid state at all — for
-  // such a row the cycle is just "^" -> "_" -> "^" ... A pure in-memory tree
-  // mutation, exactly like a move: it never touches disk and never closes
-  // the dialog — just rewrites this node's own `raw` text and re-renders, so
-  // the row (and whatever group it now belongs to, if the marker change
-  // moved it in or out of a chain) reflects the new state immediately and
-  // stays open for further clicks or drags. Only reaches disk if the
-  // session is later applied. A gesture that starts on the toggle glyph is
-  // NOT excluded from drag-tracking below (unlike an earlier version of
-  // this dialog, which is exactly what made a real drag attempt starting on
-  // the glyph silently do nothing except fire a spurious trailing click
-  // that cycled the marker instead) — it participates in the same
-  // move-threshold disambiguation as the rest of the row.
-  // suppressToggleClick swallows that trailing native "click" a real drag
-  // still fires on release, so it doesn't also cycle the marker on top of
-  // whatever the drag itself did.
+  // Handles every plain click inside the column that isn't itself a drag —
+  // the ">"/"^"/"_" dependency toggle and the checkbox both live here,
+  // sharing one suppressToggleClick flag (see below), since only one
+  // top-level listener can safely consume a flag that guards against a
+  // spurious trailing click after a real drag: two independent listeners
+  // each checking-and-clearing the same flag would only have the first one
+  // ever actually see it set.
+  //
+  // A gesture that starts on either the toggle glyph or the checkbox is NOT
+  // excluded from drag-tracking below (unlike an earlier version of this
+  // dialog, which is exactly what made a real drag attempt starting on the
+  // glyph silently do nothing except fire a spurious trailing click that
+  // cycled the marker instead) — both participate in the same
+  // move-threshold disambiguation as the rest of the row. suppressToggleClick
+  // swallows that trailing native "click" a real drag still fires on
+  // release, so it doesn't also toggle something on top of whatever the
+  // drag itself did.
   let suppressToggleClick = false;
-  const onToggleClick = (e: MouseEvent) => {
+  const onContainerClick = (e: MouseEvent) => {
     if (suppressToggleClick) { suppressToggleClick = false; return; }
-    const target = (e.target as Element).closest(".kb-dep-toggle") as HTMLElement | null;
-    if (!target) return;
-    const line = parseInt(target.dataset.line!, 10);
-    if (isNaN(line)) return;
-    const node = findNode(root, line);
-    if (!node) return;
-    const marker = (target.dataset.marker || null) as ">" | "^" | null;
-    const hasPredecessor = target.dataset.hasPredecessor === "true";
-    const cycle: (">" | "^" | null)[] = hasPredecessor ? [">", "^", null] : ["^", null];
-    const idx = cycle.indexOf(marker);
-    const newMarker = cycle[idx === -1 ? 0 : (idx + 1) % cycle.length];
-    const parsed = parseTaskLine(node.raw);
-    parsed.dependsOn = newMarker;
-    node.raw = serializeTaskLine(parsed);
-    dirty = true;
-    render();
+    const target = e.target as Element;
+
+    // ">"/"^"/"_" dependency-marker toggle (see renderCheckbox's depToggle
+    // option) — cycles ">" -> "^" -> "_" (no marker) -> ">" ..., except ">"
+    // is skipped entirely for a row with no real predecessor (see
+    // appendUnit's hasPredecessor), where it isn't a valid state at all —
+    // for such a row the cycle is just "^" -> "_" -> "^" ... A pure
+    // in-memory tree mutation, exactly like a move: it never touches disk
+    // and never closes the dialog — just rewrites this node's own `raw`
+    // text and re-renders, so the row (and whatever group it now belongs
+    // to, if the marker change moved it in or out of a chain) reflects the
+    // new state immediately and stays open for further clicks or drags.
+    // Only reaches disk if the session is later applied.
+    const toggle = target.closest(".kb-dep-toggle") as HTMLElement | null;
+    if (toggle) {
+      const line = parseInt(toggle.dataset.line!, 10);
+      if (isNaN(line)) return;
+      const node = findNode(root, line);
+      if (!node) return;
+      const marker = (toggle.dataset.marker || null) as ">" | "^" | null;
+      const hasPredecessor = toggle.dataset.hasPredecessor === "true";
+      const cycle: (">" | "^" | null)[] = hasPredecessor ? [">", "^", null] : ["^", null];
+      const idx = cycle.indexOf(marker);
+      const newMarker = cycle[idx === -1 ? 0 : (idx + 1) % cycle.length];
+      const parsed = parseTaskLine(node.raw);
+      parsed.dependsOn = newMarker;
+      node.raw = serializeTaskLine(parsed);
+      dirty = true;
+      render();
+      return;
+    }
+
+    // Checkbox check/uncheck — same in-memory-only, dialog-stays-open
+    // treatment as the marker toggle, and the same checked/doneDate pairing
+    // as the board's own onSubCheckClick: checking stamps today's done
+    // date, unchecking clears it. cb.checked already reflects the native
+    // toggle that just happened (this click handler runs after it), so
+    // there's nothing to compute beyond reading it.
+    const cb = target.closest(".kb-sub-check") as HTMLInputElement | null;
+    if (cb) {
+      const line = parseInt(cb.dataset.subLine!, 10);
+      if (isNaN(line)) return;
+      const node = findNode(root, line);
+      if (!node) return;
+      const parsed = parseTaskLine(node.raw);
+      if (parsed.checked === null) return;
+      parsed.checked = cb.checked;
+      if (parsed.checked) {
+        const n = new Date();
+        parsed.doneDate = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
+      } else {
+        parsed.doneDate = null;
+      }
+      node.raw = serializeTaskLine(parsed);
+      dirty = true;
+      render();
+    }
   };
-  containerEl.addEventListener("click", onToggleClick);
+  containerEl.addEventListener("click", onContainerClick);
 
   let dragId: number | null = null;
   let ghost: HTMLElement | null = null;
@@ -4489,7 +4533,7 @@ function wireSubtaskTree(
     refreshClamping: () => adjustClamping(),
     destroy: () => {
       containerEl.removeEventListener("mousedown", onMouseDown);
-      containerEl.removeEventListener("click", onToggleClick);
+      containerEl.removeEventListener("click", onContainerClick);
       containerEl.removeEventListener("touchstart", onTouchStart);
       containerEl.removeEventListener("touchmove", onTouchMove);
       containerEl.removeEventListener("touchend", onTouchEnd);
@@ -4568,19 +4612,15 @@ function showCardColorDialog(
   const deleteBtnStyle = "padding:8px 16px;background:var(--text-error, #e03e3e);border:none;border-radius:4px;cursor:pointer;color:#fff;";
   const sortBtnStyle = "align-self:flex-start;flex-shrink:0;margin-bottom:8px;padding:5px 12px;border-radius:6px;border:1px solid var(--background-modifier-border);background:var(--background-secondary);color:var(--text-normal);cursor:pointer;font-size:.85em;";
 
-  // Sits between the color swatches and the Apply/Cancel/Delete row, and can
-  // be collapsed independently of them (see applySubtaskExpanded below). The
-  // button row lives inside the collapsible body (with the column), not the
-  // always-visible toggle header. Always rendered, even with zero existing
+  // Sits between the color swatches and the Apply/Cancel/Delete row — always
+  // shown, not a collapsible element (a card's subtasks are core content
+  // here, not an optional aside). Always rendered, even with zero existing
   // subtasks — Add Subtask/Add Comment need somewhere to live for a card
   // that doesn't have any yet (see applySubtaskTree's own handling of that
   // case).
   const subtaskSectionHtml = `
-    <div id="k-subtask-section" style="margin-top:14px;text-align:left;flex:1;min-height:0;display:flex;flex-direction:column;">
-      <div id="k-subtask-toggle" style="font-size:.8em;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;flex-shrink:0;cursor:pointer;display:flex;align-items:center;gap:5px;user-select:none;">
-        <span id="k-subtask-arrow" style="font-size:1.1em;line-height:1;color:var(--kb-accent);">▼</span>
-        <span>Order subtasks</span>
-      </div>
+    <div id="k-subtask-section" style="margin-top:14px;text-align:left;flex:1 1 auto;min-height:0;display:flex;flex-direction:column;">
+      <div style="font-size:.8em;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;flex-shrink:0;">Order subtasks</div>
       <div id="k-subtask-btnrow" style="display:flex;gap:8px;flex-wrap:wrap;flex-shrink:0;">
         <button id="k-subtask-add-task" type="button" style="${sortBtnStyle}" title="Add a new subtask below all others">Add ☐</button>
         <button id="k-subtask-add-comment" type="button" style="${sortBtnStyle}" title="Add a new plain (non-checkbox) note below all others">Add •</button>
@@ -4600,45 +4640,39 @@ function showCardColorDialog(
 
   const titleRowEl = dialog.querySelector<HTMLElement>("#k-card-title-row")!;
   const subtaskColEl = dialog.querySelector<HTMLElement>("#k-subtask-col");
-  const subtaskSection = dialog.querySelector<HTMLElement>("#k-subtask-section");
-  const subtaskToggle = dialog.querySelector<HTMLElement>("#k-subtask-toggle");
-  const subtaskArrow = dialog.querySelector<HTMLElement>("#k-subtask-arrow");
   const subtaskAddTaskBtn = dialog.querySelector<HTMLButtonElement>("#k-subtask-add-task");
   const subtaskAddCommentBtn = dialog.querySelector<HTMLButtonElement>("#k-subtask-add-comment");
   const subtaskSortBtn = dialog.querySelector<HTMLButtonElement>("#k-subtask-sort");
   const subtaskArchiveDoneBtn = dialog.querySelector<HTMLButtonElement>("#k-subtask-archive-done");
-  const subtaskBtnRow = dialog.querySelector<HTMLElement>("#k-subtask-btnrow");
   const deleteBtn = dialog.querySelector("#k-color-delete") as HTMLButtonElement;
 
-  // Full-height, flex-column dialog layout only while the subtask section is
-  // expanded — collapsing it hands the space back and the dialog shrinks to
-  // its natural (non-flex, makeOverlay-default) size, same as a card with no
-  // subtasks at all.
-  let subtasksExpanded = false;
+  // The subtask section is always shown (not collapsible — see
+  // subtaskSectionHtml above), so the dialog always takes the full-height,
+  // flex-column layout that used to apply only once expanded.
+  dialog.style.height = "90vh";
+  dialog.style.display = "flex";
+  dialog.style.flexDirection = "column";
+  dialog.style.overflow = "hidden";
 
-  // Deleting the whole card while a reorder is in progress (or while the
-  // section is simply open, so the user's focus is on subtasks rather than
-  // the card itself) is both easy to hit by mistake and hard to undo, so the
-  // Delete button hides itself for the duration.
+  // Deleting the whole card while a reorder is in progress is both easy to
+  // hit by mistake and hard to undo, so the Delete button hides itself for
+  // the duration.
   let dirty = false;
   const refreshDeleteVisibility = () => {
-    deleteBtn.style.display = (subtasksExpanded || dirty) ? "none" : "";
+    deleteBtn.style.display = dirty ? "none" : "";
   };
   const onTreeChange = (d: boolean) => { dirty = d; refreshDeleteVisibility(); };
 
   const treeCtl = subtaskColEl
     ? wireSubtaskTree(app, subtaskColEl, titleRowEl, root, config, onEditSubtask, onDeleteSubtask, onTreeChange, setEscapeHandler, () => closeAndCleanup())
     : null;
+  // Re-measure now that the column has actually been laid out — a reading
+  // of scrollHeight/clientHeight always forces a synchronous layout, so
+  // this reflects the dialog's real size now that it's on screen.
+  treeCtl?.refreshClamping();
 
-  // Auto-expands the (possibly collapsed) subtask section first — the new
-  // row needs to actually be visible (and laid out) for its textarea to
-  // focus/auto-resize correctly.
-  const addNodeExpanded = (isCheckboxNode: boolean) => {
-    if (!subtasksExpanded) { subtasksExpanded = true; applySubtaskExpanded(); }
-    treeCtl?.addNode(isCheckboxNode);
-  };
-  subtaskAddTaskBtn?.addEventListener("click", () => addNodeExpanded(true));
-  subtaskAddCommentBtn?.addEventListener("click", () => addNodeExpanded(false));
+  subtaskAddTaskBtn?.addEventListener("click", () => treeCtl?.addNode(true));
+  subtaskAddCommentBtn?.addEventListener("click", () => treeCtl?.addNode(false));
 
   subtaskSortBtn?.addEventListener("click", () => treeCtl?.sortOpenDone());
 
@@ -4647,33 +4681,11 @@ function showCardColorDialog(
     onArchiveDoneSubtasks();
   });
 
-  const applySubtaskExpanded = () => {
-    if (!subtaskColEl || !subtaskSection || !subtaskArrow) return;
-    subtaskColEl.style.display = subtasksExpanded ? "flex" : "none";
-    if (subtaskBtnRow) subtaskBtnRow.style.display = subtasksExpanded ? "flex" : "none";
-    subtaskSection.style.flex = subtasksExpanded ? "1 1 auto" : "0 0 auto";
-    subtaskArrow.textContent = subtasksExpanded ? "▲" : "▼";
-    dialog.style.height = subtasksExpanded ? "90vh" : "";
-    dialog.style.display = subtasksExpanded ? "flex" : "";
-    dialog.style.flexDirection = subtasksExpanded ? "column" : "";
-    dialog.style.overflow = subtasksExpanded ? "hidden" : "";
-    // Re-measure now that the column's visibility/size just changed — a
-    // reading of scrollHeight/clientHeight always forces a synchronous
-    // layout, so this reflects every style change made above.
-    if (subtasksExpanded) treeCtl?.refreshClamping();
-    refreshDeleteVisibility();
-  };
-  applySubtaskExpanded();
-  subtaskToggle?.addEventListener("click", () => {
-    subtasksExpanded = !subtasksExpanded;
-    applySubtaskExpanded();
-  });
-
   // The dialog can only get taller/shorter via the window itself resizing
   // (no user-facing resize handle), so this only needs to run occasionally,
   // not on every animation frame.
   const dialogWindow = dialog.ownerDocument.defaultView;
-  const onWindowResize = () => { if (subtasksExpanded) treeCtl?.refreshClamping(); };
+  const onWindowResize = () => treeCtl?.refreshClamping();
   dialogWindow?.addEventListener("resize", onWindowResize);
 
   const swatchWrap = dialog.querySelector("#k-color-swatches") as HTMLElement;
@@ -4840,7 +4852,10 @@ function cleanSubtaskText(subText: string, config: KanbanConfig): { hasCheckbox:
 function renderSubtaskPreviewHTML(sub: any, config: KanbanConfig, hasPredecessor: boolean = true): string {
   const { hasCheckbox, formatted } = cleanSubtaskText(sub.text, config);
   const subText = formatCardDateAnnotation(formatTriggerAnnotations(formatted, config.normRecurrent, false), true);
-  return renderCheckbox(subText, { isSub: false, showCheckbox: hasCheckbox, subLine: sub.line, depToggle: { hasPredecessor } });
+  // isSub:true (not the board-preview default of false) renders a live,
+  // clickable checkbox (class kb-sub-check) instead of a disabled one — see
+  // wireSubtaskTree's onContainerClick for the reorder dialog's own handler.
+  return renderCheckbox(subText, { isSub: true, showCheckbox: hasCheckbox, subLine: sub.line, depToggle: { hasPredecessor } });
 }
 
 function createCardHTML(

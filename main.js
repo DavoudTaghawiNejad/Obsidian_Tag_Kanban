@@ -898,7 +898,7 @@ function renderCheckbox(text, opts = {}) {
     content = content.slice(6);
     if (showCheckbox) {
       if (isSub && subLine != null) {
-        cbHtml = `<input type="checkbox" class="kb-sub-check" data-sub-line="${subLine}"${checked ? " checked" : ""} style="width:1em;height:1em;margin-right:5px;vertical-align:middle;cursor:pointer;">`;
+        cbHtml = `<input type="checkbox" class="kb-sub-check" data-sub-line="${subLine}"${checked ? " checked" : ""} style="width:1em;height:1em;margin-right:5px;vertical-align:middle;cursor:pointer;pointer-events:auto;">`;
       } else {
         cbHtml = `<input type="checkbox" disabled${checked ? " checked" : ""} style="width:1em;height:1em;margin-right:5px;vertical-align:middle;">`;
       }
@@ -2926,32 +2926,56 @@ function wireSubtaskTree(app, containerEl, titleEl, root, config, onEditSubtask,
     startNewNodeEdit(node, isCheckboxNode);
   };
   let suppressToggleClick = false;
-  const onToggleClick = (e) => {
+  const onContainerClick = (e) => {
     if (suppressToggleClick) {
       suppressToggleClick = false;
       return;
     }
-    const target = e.target.closest(".kb-dep-toggle");
-    if (!target)
+    const target = e.target;
+    const toggle = target.closest(".kb-dep-toggle");
+    if (toggle) {
+      const line = parseInt(toggle.dataset.line, 10);
+      if (isNaN(line))
+        return;
+      const node = findNode(root, line);
+      if (!node)
+        return;
+      const marker = toggle.dataset.marker || null;
+      const hasPredecessor = toggle.dataset.hasPredecessor === "true";
+      const cycle = hasPredecessor ? [">", "^", null] : ["^", null];
+      const idx = cycle.indexOf(marker);
+      const newMarker = cycle[idx === -1 ? 0 : (idx + 1) % cycle.length];
+      const parsed = parseTaskLine(node.raw);
+      parsed.dependsOn = newMarker;
+      node.raw = serializeTaskLine(parsed);
+      dirty = true;
+      render();
       return;
-    const line = parseInt(target.dataset.line, 10);
-    if (isNaN(line))
-      return;
-    const node = findNode(root, line);
-    if (!node)
-      return;
-    const marker = target.dataset.marker || null;
-    const hasPredecessor = target.dataset.hasPredecessor === "true";
-    const cycle = hasPredecessor ? [">", "^", null] : ["^", null];
-    const idx = cycle.indexOf(marker);
-    const newMarker = cycle[idx === -1 ? 0 : (idx + 1) % cycle.length];
-    const parsed = parseTaskLine(node.raw);
-    parsed.dependsOn = newMarker;
-    node.raw = serializeTaskLine(parsed);
-    dirty = true;
-    render();
+    }
+    const cb = target.closest(".kb-sub-check");
+    if (cb) {
+      const line = parseInt(cb.dataset.subLine, 10);
+      if (isNaN(line))
+        return;
+      const node = findNode(root, line);
+      if (!node)
+        return;
+      const parsed = parseTaskLine(node.raw);
+      if (parsed.checked === null)
+        return;
+      parsed.checked = cb.checked;
+      if (parsed.checked) {
+        const n = new Date();
+        parsed.doneDate = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
+      } else {
+        parsed.doneDate = null;
+      }
+      node.raw = serializeTaskLine(parsed);
+      dirty = true;
+      render();
+    }
   };
-  containerEl.addEventListener("click", onToggleClick);
+  containerEl.addEventListener("click", onContainerClick);
   let dragId = null;
   let ghost = null;
   let hoverSlot = null;
@@ -3165,7 +3189,7 @@ function wireSubtaskTree(app, containerEl, titleEl, root, config, onEditSubtask,
     refreshClamping: () => adjustClamping(),
     destroy: () => {
       containerEl.removeEventListener("mousedown", onMouseDown);
-      containerEl.removeEventListener("click", onToggleClick);
+      containerEl.removeEventListener("click", onContainerClick);
       containerEl.removeEventListener("touchstart", onTouchStart);
       containerEl.removeEventListener("touchmove", onTouchMove);
       containerEl.removeEventListener("touchend", onTouchEnd);
@@ -3194,11 +3218,8 @@ function showCardColorDialog(app, existingColor, title, cardLineNum, subtaskTree
   const deleteBtnStyle = "padding:8px 16px;background:var(--text-error, #e03e3e);border:none;border-radius:4px;cursor:pointer;color:#fff;";
   const sortBtnStyle = "align-self:flex-start;flex-shrink:0;margin-bottom:8px;padding:5px 12px;border-radius:6px;border:1px solid var(--background-modifier-border);background:var(--background-secondary);color:var(--text-normal);cursor:pointer;font-size:.85em;";
   const subtaskSectionHtml = `
-    <div id="k-subtask-section" style="margin-top:14px;text-align:left;flex:1;min-height:0;display:flex;flex-direction:column;">
-      <div id="k-subtask-toggle" style="font-size:.8em;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;flex-shrink:0;cursor:pointer;display:flex;align-items:center;gap:5px;user-select:none;">
-        <span id="k-subtask-arrow" style="font-size:1.1em;line-height:1;color:var(--kb-accent);">\u25BC</span>
-        <span>Order subtasks</span>
-      </div>
+    <div id="k-subtask-section" style="margin-top:14px;text-align:left;flex:1 1 auto;min-height:0;display:flex;flex-direction:column;">
+      <div style="font-size:.8em;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;flex-shrink:0;">Order subtasks</div>
       <div id="k-subtask-btnrow" style="display:flex;gap:8px;flex-wrap:wrap;flex-shrink:0;">
         <button id="k-subtask-add-task" type="button" style="${sortBtnStyle}" title="Add a new subtask below all others">Add \u2610</button>
         <button id="k-subtask-add-comment" type="button" style="${sortBtnStyle}" title="Add a new plain (non-checkbox) note below all others">Add \u2022</button>
@@ -3216,65 +3237,34 @@ function showCardColorDialog(app, existingColor, title, cardLineNum, subtaskTree
     <div id="k-color-actions" style="flex-shrink:0;margin-top:14px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap;align-items:center;">${buttonHtml("Apply", true)}${buttonHtml("Cancel", false)}<button id="k-color-delete" type="button" style="${deleteBtnStyle}">Delete</button></div>`;
   const titleRowEl = dialog.querySelector("#k-card-title-row");
   const subtaskColEl = dialog.querySelector("#k-subtask-col");
-  const subtaskSection = dialog.querySelector("#k-subtask-section");
-  const subtaskToggle = dialog.querySelector("#k-subtask-toggle");
-  const subtaskArrow = dialog.querySelector("#k-subtask-arrow");
   const subtaskAddTaskBtn = dialog.querySelector("#k-subtask-add-task");
   const subtaskAddCommentBtn = dialog.querySelector("#k-subtask-add-comment");
   const subtaskSortBtn = dialog.querySelector("#k-subtask-sort");
   const subtaskArchiveDoneBtn = dialog.querySelector("#k-subtask-archive-done");
-  const subtaskBtnRow = dialog.querySelector("#k-subtask-btnrow");
   const deleteBtn = dialog.querySelector("#k-color-delete");
-  let subtasksExpanded = false;
+  dialog.style.height = "90vh";
+  dialog.style.display = "flex";
+  dialog.style.flexDirection = "column";
+  dialog.style.overflow = "hidden";
   let dirty = false;
   const refreshDeleteVisibility = () => {
-    deleteBtn.style.display = subtasksExpanded || dirty ? "none" : "";
+    deleteBtn.style.display = dirty ? "none" : "";
   };
   const onTreeChange = (d) => {
     dirty = d;
     refreshDeleteVisibility();
   };
   const treeCtl = subtaskColEl ? wireSubtaskTree(app, subtaskColEl, titleRowEl, root, config, onEditSubtask, onDeleteSubtask, onTreeChange, setEscapeHandler, () => closeAndCleanup()) : null;
-  const addNodeExpanded = (isCheckboxNode) => {
-    if (!subtasksExpanded) {
-      subtasksExpanded = true;
-      applySubtaskExpanded();
-    }
-    treeCtl?.addNode(isCheckboxNode);
-  };
-  subtaskAddTaskBtn?.addEventListener("click", () => addNodeExpanded(true));
-  subtaskAddCommentBtn?.addEventListener("click", () => addNodeExpanded(false));
+  treeCtl?.refreshClamping();
+  subtaskAddTaskBtn?.addEventListener("click", () => treeCtl?.addNode(true));
+  subtaskAddCommentBtn?.addEventListener("click", () => treeCtl?.addNode(false));
   subtaskSortBtn?.addEventListener("click", () => treeCtl?.sortOpenDone());
   subtaskArchiveDoneBtn?.addEventListener("click", () => {
     closeAndCleanup();
     onArchiveDoneSubtasks();
   });
-  const applySubtaskExpanded = () => {
-    if (!subtaskColEl || !subtaskSection || !subtaskArrow)
-      return;
-    subtaskColEl.style.display = subtasksExpanded ? "flex" : "none";
-    if (subtaskBtnRow)
-      subtaskBtnRow.style.display = subtasksExpanded ? "flex" : "none";
-    subtaskSection.style.flex = subtasksExpanded ? "1 1 auto" : "0 0 auto";
-    subtaskArrow.textContent = subtasksExpanded ? "\u25B2" : "\u25BC";
-    dialog.style.height = subtasksExpanded ? "90vh" : "";
-    dialog.style.display = subtasksExpanded ? "flex" : "";
-    dialog.style.flexDirection = subtasksExpanded ? "column" : "";
-    dialog.style.overflow = subtasksExpanded ? "hidden" : "";
-    if (subtasksExpanded)
-      treeCtl?.refreshClamping();
-    refreshDeleteVisibility();
-  };
-  applySubtaskExpanded();
-  subtaskToggle?.addEventListener("click", () => {
-    subtasksExpanded = !subtasksExpanded;
-    applySubtaskExpanded();
-  });
   const dialogWindow = dialog.ownerDocument.defaultView;
-  const onWindowResize = () => {
-    if (subtasksExpanded)
-      treeCtl?.refreshClamping();
-  };
+  const onWindowResize = () => treeCtl?.refreshClamping();
   dialogWindow?.addEventListener("resize", onWindowResize);
   const swatchWrap = dialog.querySelector("#k-color-swatches");
   const [applyBtn, cancelBtn] = dialog.querySelectorAll("#k-color-actions button");
@@ -3379,7 +3369,7 @@ function cleanSubtaskText(subText, config) {
 function renderSubtaskPreviewHTML(sub, config, hasPredecessor = true) {
   const { hasCheckbox, formatted } = cleanSubtaskText(sub.text, config);
   const subText = formatCardDateAnnotation(formatTriggerAnnotations(formatted, config.normRecurrent, false), true);
-  return renderCheckbox(subText, { isSub: false, showCheckbox: hasCheckbox, subLine: sub.line, depToggle: { hasPredecessor } });
+  return renderCheckbox(subText, { isSub: true, showCheckbox: hasCheckbox, subLine: sub.line, depToggle: { hasPredecessor } });
 }
 function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
   let display = item.item.text;
