@@ -3875,14 +3875,15 @@ function wireSubtaskTree(
   titleEl: HTMLElement,
   root: DialogNode,
   config: KanbanConfig,
-  // Same immediate-save semantics as the board's own subtask editor. All
-  // three close the dialog on success (see their call sites in
-  // showCardColorDialog) — each can change which group a row belongs to, or
-  // shift line numbers this session's Apply-time write depends on, so the
-  // in-memory tree isn't safe to keep dragging afterward.
+  // Same immediate-save semantics as the board's own subtask editor. Both
+  // close the dialog on success (see their call sites in
+  // showCardColorDialog) — each can shift line numbers this session's
+  // Apply-time write depends on, so the in-memory tree isn't safe to keep
+  // dragging afterward. The marker toggle, by contrast, is a pure in-memory
+  // tree mutation just like a move — see onToggleClick below — so it never
+  // touches disk or closes the dialog on its own.
   onEditSubtask: (line: number, newText: string) => Promise<string | null>,
   onDeleteSubtask: (line: number) => Promise<boolean>,
-  onToggleDependencyMarker: (line: number, newMarker: ">" | "^" | null) => Promise<void>,
   // Fired after every tree mutation (a completed move, a sort) with whether
   // the tree now differs from what was first rendered — including once,
   // synchronously, during this initial setup (dirty = false).
@@ -4112,30 +4113,40 @@ function wireSubtaskTree(
   // option) — cycles a row's marker ">" -> "^" -> "_" (no marker) -> ">" ...,
   // except ">" is skipped entirely for a row with no real predecessor (see
   // appendUnit's hasPredecessor), where it isn't a valid state at all — for
-  // such a row the cycle is just "^" -> "_" -> "^" ... Immediate-commit and
-  // closes the dialog, same reasoning as edit/delete above. A gesture that
-  // starts on the toggle glyph is NOT excluded from drag-tracking below
-  // (unlike an earlier version of this dialog, which is exactly what made a
-  // real drag attempt starting on the glyph silently do nothing except fire
-  // a spurious trailing click that cycled the marker instead) — it
-  // participates in the same move-threshold disambiguation as the rest of
-  // the row. suppressToggleClick swallows that trailing native "click" a
-  // real drag still fires on release, so it doesn't also cycle the marker
-  // on top of whatever the drag itself did.
+  // such a row the cycle is just "^" -> "_" -> "^" ... A pure in-memory tree
+  // mutation, exactly like a move: it never touches disk and never closes
+  // the dialog — just rewrites this node's own `raw` text and re-renders, so
+  // the row (and whatever group it now belongs to, if the marker change
+  // moved it in or out of a chain) reflects the new state immediately and
+  // stays open for further clicks or drags. Only reaches disk if the
+  // session is later applied. A gesture that starts on the toggle glyph is
+  // NOT excluded from drag-tracking below (unlike an earlier version of
+  // this dialog, which is exactly what made a real drag attempt starting on
+  // the glyph silently do nothing except fire a spurious trailing click
+  // that cycled the marker instead) — it participates in the same
+  // move-threshold disambiguation as the rest of the row.
+  // suppressToggleClick swallows that trailing native "click" a real drag
+  // still fires on release, so it doesn't also cycle the marker on top of
+  // whatever the drag itself did.
   let suppressToggleClick = false;
-  const onToggleClick = async (e: MouseEvent) => {
+  const onToggleClick = (e: MouseEvent) => {
     if (suppressToggleClick) { suppressToggleClick = false; return; }
     const target = (e.target as Element).closest(".kb-dep-toggle") as HTMLElement | null;
     if (!target) return;
     const line = parseInt(target.dataset.line!, 10);
     if (isNaN(line)) return;
+    const node = findNode(root, line);
+    if (!node) return;
     const marker = (target.dataset.marker || null) as ">" | "^" | null;
     const hasPredecessor = target.dataset.hasPredecessor === "true";
     const cycle: (">" | "^" | null)[] = hasPredecessor ? [">", "^", null] : ["^", null];
     const idx = cycle.indexOf(marker);
     const newMarker = cycle[idx === -1 ? 0 : (idx + 1) % cycle.length];
-    await onToggleDependencyMarker(line, newMarker);
-    dialogEscapeDefault();
+    const parsed = parseTaskLine(node.raw);
+    parsed.dependsOn = newMarker;
+    node.raw = serializeTaskLine(parsed);
+    dirty = true;
+    render();
   };
   containerEl.addEventListener("click", onToggleClick);
 
@@ -4386,9 +4397,11 @@ function showCardColorDialog(
   // Same immediate-save semantics as the board's own subtask editor: these
   // fire (and persist) right away, independent of Apply/Cancel, and close
   // the dialog on success (see wireSubtaskTree's matching params for why).
+  // The marker toggle has no equivalent callback here — it's a pure
+  // in-memory tree mutation handled entirely inside wireSubtaskTree, folded
+  // into `finalTree` like any other pending move.
   onEditSubtask: (line: number, newText: string) => Promise<string | null>,
   onDeleteSubtask: (line: number) => Promise<boolean>,
-  onToggleDependencyMarker: (line: number, newMarker: ">" | "^" | null) => Promise<void>,
   // Same immediate-save semantics as onDelete below: fires right away and
   // closes the dialog (moved/removed subtask lines make every line number
   // this dialog captured at open time stale, so continuing to drag-reorder
@@ -4478,7 +4491,7 @@ function showCardColorDialog(
   const onTreeChange = (d: boolean) => { dirty = d; refreshDeleteVisibility(); };
 
   const treeCtl = subtaskColEl
-    ? wireSubtaskTree(app, subtaskColEl, titleRowEl, root, config, onEditSubtask, onDeleteSubtask, onToggleDependencyMarker, onTreeChange, setEscapeHandler, () => closeAndCleanup())
+    ? wireSubtaskTree(app, subtaskColEl, titleRowEl, root, config, onEditSubtask, onDeleteSubtask, onTreeChange, setEscapeHandler, () => closeAndCleanup())
     : null;
 
   subtaskSortBtn?.addEventListener("click", () => treeCtl?.sortOpenDone());
@@ -6121,10 +6134,6 @@ export function attachListeners(
         const ok = await deleteCardOrSubtask(app, filePath, subLine, lastLine, config, false, false, [], false, hasDependents);
         if (ok) requestAnimationFrame(() => setTimeout(refresh, 50));
         return ok;
-      },
-      async (subLine, newMarker) => {
-        await toggleDependencyMarker(app, filePath, subLine, newMarker);
-        requestAnimationFrame(() => setTimeout(refresh, 50));
       },
       () => {
         archiveDoneSubtasks(app, filePath, lineNum, subs, config).then((result) => {

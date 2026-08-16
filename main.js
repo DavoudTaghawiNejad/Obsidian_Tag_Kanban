@@ -2676,7 +2676,7 @@ async function applySubtaskTree(app, filePath, cardLineNum, root, config) {
   lines.splice(startLine - 1, endLine - startLine + 1, ...newBlock);
   await writeFileLines(app, tFile, lines);
 }
-function wireSubtaskTree(app, containerEl, titleEl, root, config, onEditSubtask, onDeleteSubtask, onToggleDependencyMarker, onChange, setEscapeHandler, dialogEscapeDefault) {
+function wireSubtaskTree(app, containerEl, titleEl, root, config, onEditSubtask, onDeleteSubtask, onChange, setEscapeHandler, dialogEscapeDefault) {
   const doc = containerEl.ownerDocument;
   const DRAG_DELAY = 200, MOVE_THRESHOLD = 6;
   let dirty = false;
@@ -2850,7 +2850,7 @@ function wireSubtaskTree(app, containerEl, titleEl, root, config, onEditSubtask,
   };
   containerEl.addEventListener("dblclick", onRowDblClick);
   let suppressToggleClick = false;
-  const onToggleClick = async (e) => {
+  const onToggleClick = (e) => {
     if (suppressToggleClick) {
       suppressToggleClick = false;
       return;
@@ -2861,13 +2861,19 @@ function wireSubtaskTree(app, containerEl, titleEl, root, config, onEditSubtask,
     const line = parseInt(target.dataset.line, 10);
     if (isNaN(line))
       return;
+    const node = findNode(root, line);
+    if (!node)
+      return;
     const marker = target.dataset.marker || null;
     const hasPredecessor = target.dataset.hasPredecessor === "true";
     const cycle = hasPredecessor ? [">", "^", null] : ["^", null];
     const idx = cycle.indexOf(marker);
     const newMarker = cycle[idx === -1 ? 0 : (idx + 1) % cycle.length];
-    await onToggleDependencyMarker(line, newMarker);
-    dialogEscapeDefault();
+    const parsed = parseTaskLine(node.raw);
+    parsed.dependsOn = newMarker;
+    node.raw = serializeTaskLine(parsed);
+    dirty = true;
+    render();
   };
   containerEl.addEventListener("click", onToggleClick);
   let dragId = null;
@@ -3099,7 +3105,7 @@ function wireSubtaskTree(app, containerEl, titleEl, root, config, onEditSubtask,
     }
   };
 }
-function showCardColorDialog(app, existingColor, title, cardLineNum, subtaskTree, config, onApply, onReorder, onDelete, onEditSubtask, onDeleteSubtask, onToggleDependencyMarker, onArchiveDoneSubtasks) {
+function showCardColorDialog(app, existingColor, title, cardLineNum, subtaskTree, config, onApply, onReorder, onDelete, onEditSubtask, onDeleteSubtask, onArchiveDoneSubtasks) {
   const { dialog, close, setEscapeHandler } = makeOverlay("kanban-card-color-dialog", app);
   dialog.style.maxWidth = "720px";
   const root = { id: cardLineNum, raw: "", trailingRaw: [], children: subtaskTree };
@@ -3147,7 +3153,7 @@ function showCardColorDialog(app, existingColor, title, cardLineNum, subtaskTree
     dirty = d;
     refreshDeleteVisibility();
   };
-  const treeCtl = subtaskColEl ? wireSubtaskTree(app, subtaskColEl, titleRowEl, root, config, onEditSubtask, onDeleteSubtask, onToggleDependencyMarker, onTreeChange, setEscapeHandler, () => closeAndCleanup()) : null;
+  const treeCtl = subtaskColEl ? wireSubtaskTree(app, subtaskColEl, titleRowEl, root, config, onEditSubtask, onDeleteSubtask, onTreeChange, setEscapeHandler, () => closeAndCleanup()) : null;
   subtaskSortBtn?.addEventListener("click", () => treeCtl?.sortOpenDone());
   subtaskArchiveDoneBtn?.addEventListener("click", () => {
     closeAndCleanup();
@@ -4327,10 +4333,6 @@ function attachListeners(boardEl, config, app, refresh) {
         if (ok)
           requestAnimationFrame(() => setTimeout(refresh, 50));
         return ok;
-      },
-      async (subLine, newMarker) => {
-        await toggleDependencyMarker(app, filePath, subLine, newMarker);
-        requestAnimationFrame(() => setTimeout(refresh, 50));
       },
       () => {
         archiveDoneSubtasks(app, filePath, lineNum, subs, config).then((result) => {
