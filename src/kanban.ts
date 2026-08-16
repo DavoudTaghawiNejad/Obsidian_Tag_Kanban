@@ -3733,39 +3733,85 @@ function sortTopLevelOpenDone(root: DialogNode): void {
   root.children = [...flatten(plain), ...flatten(open), ...flatten(done), ...deletedNodes];
 }
 
-// The "Archive done" button: for every checked, non-deleted node anywhere
-// in the tree (any depth, chain-dependent or not — a node's eligibility
-// depends only on its own checked state, never its descendants' or
-// siblings'), replaces a "#done" tag with "#archived", or just adds
-// "#archived" if it carries no "#done" tag at all — the common case, since
-// most subtasks are plain checkboxes with no kanban tag of their own; only
-// a promoted subtask would already carry "#done". A pure in-memory tree
-// mutation, exactly like a move or a marker toggle — nothing reaches disk
-// until Apply. Returns the number of nodes changed.
-function archiveCheckedSubtasks(root: DialogNode, config: KanbanConfig): number {
-  let count = 0;
+// Any unchecked, non-deleted descendant anywhere in node's own subtree (real
+// tree-nesting, via .children — not sibling/chain relationships, which
+// computeDependentBlockedIds below handles separately). A node with any such
+// descendant is not eligible for archiving — see archiveCheckedSubtasks.
+function dialogHasUnchecked(node: DialogNode): boolean {
+  for (const child of node.children) {
+    const parsed = parseTaskLine(child.raw);
+    if (parsed.tags.some(isDeletedTag)) continue;
+    if (parsed.checked === false) return true;
+    if (dialogHasUnchecked(child)) return true;
+  }
+  return false;
+}
+
+// A ">" dependency chain (see groupChainDependents) is one connected unit of
+// work, not a set of independent siblings: "test" depending on "do
+// marketing" depending on "implement model" means all three share one fate.
+// Returns the ids of every node, in `siblings`, that belongs to a
+// chain-group (head or any chain member) containing at least one unchecked,
+// non-deleted member — these are ineligible for archiving even if checked
+// themselves, since part of their own connected chain is still open.
+function computeDependentBlockedIds(siblings: DialogNode[]): Set<number> {
+  const blocked = new Set<number>();
+  for (const g of groupChainDependents(siblings)) {
+    if (g.deleted) continue;
+    const members = [g.head, ...g.chain];
+    const hasOpenMember = members.some((m) => {
+      const p = parseTaskLine(m.raw);
+      return !p.tags.some(isDeletedTag) && p.checked === false;
+    });
+    if (hasOpenMember) {
+      for (const m of members) blocked.add(m.id);
+    }
+  }
+  return blocked;
+}
+
+// The "Archive done" button: for every checked, non-deleted node anywhere in
+// the tree that has neither an open child (a tree-nested descendant that's
+// still unchecked) nor an open dependent (a ">" chain-mate — see
+// computeDependentBlockedIds — that's still unchecked), replaces a "#done"
+// tag with "#archived", or just adds "#archived" if it carries no "#done"
+// tag at all — the common case, since most subtasks are plain checkboxes
+// with no kanban tag of their own; only a promoted subtask would already
+// carry "#done". A pure in-memory tree mutation, exactly like a move or a
+// marker toggle — nothing reaches disk until Apply. Returns how many nodes
+// were archived and how many checked candidates were left alone because of
+// open work underneath — the caller surfaces the latter as a Notice rather
+// than silently skipping them.
+function archiveCheckedSubtasks(root: DialogNode, config: KanbanConfig): { archived: number; blocked: number } {
+  let archived = 0;
+  let blocked = 0;
   const visit = (node: DialogNode) => {
+    const dependentBlocked = computeDependentBlockedIds(node.children);
     for (const child of node.children) {
       const parsed = parseTaskLine(child.raw);
       const isDeleted = parsed.tags.some(isDeletedTag);
       if (parsed.checked === true && !isDeleted) {
-        const doneIdx = parsed.tags.findIndex((t) => normalizeTag(t) === config.normDone);
-        const alreadyArchived = parsed.tags.some((t) => normalizeTag(t) === normalizeTag(ARCHIVED_TAG));
-        if (doneIdx >= 0) {
-          parsed.tags[doneIdx] = ARCHIVED_TAG;
-          child.raw = serializeTaskLine(parsed);
-          count++;
-        } else if (!alreadyArchived) {
-          parsed.tags.push(ARCHIVED_TAG);
-          child.raw = serializeTaskLine(parsed);
-          count++;
+        if (dialogHasUnchecked(child) || dependentBlocked.has(child.id)) {
+          blocked++;
+        } else {
+          const doneIdx = parsed.tags.findIndex((t) => normalizeTag(t) === config.normDone);
+          const alreadyArchived = parsed.tags.some((t) => normalizeTag(t) === normalizeTag(ARCHIVED_TAG));
+          if (doneIdx >= 0) {
+            parsed.tags[doneIdx] = ARCHIVED_TAG;
+            child.raw = serializeTaskLine(parsed);
+            archived++;
+          } else if (!alreadyArchived) {
+            parsed.tags.push(ARCHIVED_TAG);
+            child.raw = serializeTaskLine(parsed);
+            archived++;
+          }
         }
       }
       visit(child);
     }
   };
   visit(root);
-  return count;
+  return { archived, blocked };
 }
 
 // Regenerates a card's whole subtask block from the final in-memory tree.
@@ -3846,7 +3892,7 @@ function wireSubtaskTree(
   // otherwise close/cancel the whole dialog) — see onRowDblClick below.
   setEscapeHandler: (fn: () => void) => void,
   dialogEscapeDefault: () => void
-): { sortOpenDone(): void; archiveDone(): number; addNode(isCheckboxNode: boolean): void; refreshClamping(): void; destroy(): void } {
+): { sortOpenDone(): void; archiveDone(): { archived: number; blocked: number }; addNode(isCheckboxNode: boolean): void; refreshClamping(): void; destroy(): void } {
   const doc = containerEl.ownerDocument;
   const DRAG_DELAY = 200, MOVE_THRESHOLD = 6;
 
@@ -4469,12 +4515,12 @@ function wireSubtaskTree(
       render();
     },
     archiveDone: () => {
-      const count = archiveCheckedSubtasks(root, config);
-      if (count) {
+      const result = archiveCheckedSubtasks(root, config);
+      if (result.archived) {
         dirty = true;
         render();
       }
-      return count;
+      return result;
     },
     addNode,
     refreshClamping: () => adjustClamping(),
@@ -4619,7 +4665,24 @@ function showCardColorDialog(
 
   subtaskSortBtn?.addEventListener("click", () => treeCtl?.sortOpenDone());
 
-  subtaskArchiveDoneBtn?.addEventListener("click", () => treeCtl?.archiveDone());
+  subtaskArchiveDoneBtn?.addEventListener("click", () => {
+    const result = treeCtl?.archiveDone();
+    if (!result) return;
+    // Silent when there's nothing to report (matches the "Open → Done"
+    // button, which also has no feedback when nothing changed) — but a
+    // checked subtask left alone because of open work underneath (see
+    // archiveCheckedSubtasks) is exactly the case that must NOT be silent,
+    // since silently skipping it (or silently archiving it anyway) is what
+    // this Notice exists to replace.
+    if (result.blocked > 0) {
+      const archivedPart = result.archived
+        ? `Archived ${result.archived} subtask${result.archived === 1 ? "" : "s"}. `
+        : "Nothing archived. ";
+      new Notice(`${archivedPart}${result.blocked} left unarchived — still ${result.blocked === 1 ? "has" : "have"} open work underneath.`);
+    } else if (result.archived > 0) {
+      new Notice(`Archived ${result.archived} subtask${result.archived === 1 ? "" : "s"}.`);
+    }
+  });
 
   // The dialog can only get taller/shorter via the window itself resizing
   // (no user-facing resize handle), so this only needs to run occasionally,
@@ -4702,10 +4765,22 @@ function isCheckedItem(s: any): boolean {
 function isDeletedItem(s: any): boolean {
   return (s.tags ?? []).some(isDeletedTag);
 }
+// A subtask marked #archived (see archiveCheckedSubtasks, the order-
+// subtasks dialog's "Archive done" button) is put away the same way a
+// deleted one is: invisible on the board, along with everything nested
+// beneath it, and excluded from every count below for the same reason
+// isDeletedItem already is — an archived branch (always checked, so it
+// never itself contributes an "unchecked" count) can still hide unchecked
+// descendants of its own that shouldn't leak into a parent card's styling
+// once that whole branch is put away.
+const isArchivedTag = (t: string) => normalizeTag(t) === normalizeTag(ARCHIVED_TAG);
+function isArchivedItem(s: any): boolean {
+  return (s.tags ?? []).some(isArchivedTag);
+}
 // Any unchecked checkbox descendant.
 function hasUnchecked(subs: any[]): boolean {
   for (const s of subs ?? []) {
-    if (isDeletedItem(s)) continue;
+    if (isDeletedItem(s) || isArchivedItem(s)) continue;
     if (isCheckboxItem(s) && !isCheckedItem(s)) return true;
     if (s.subs?.length && hasUnchecked(s.subs)) return true;
   }
@@ -4833,7 +4908,7 @@ function createCardHTML(
   // Any unchecked descendant that has a tag in the configured "active" column group.
   function hasActiveKanban(subs: any[]): boolean {
     for (const s of subs ?? []) {
-      if (isDeletedItem(s)) continue;
+      if (isDeletedItem(s) || isArchivedItem(s)) continue;
       if (isCheckboxItem(s) && !isCheckedItem(s)) {
         const tags: string[] = s.tags ?? [];
         if (tags.some((t: string) => config.normActive.includes(normalizeTag(t)))) return true;
@@ -4846,7 +4921,7 @@ function createCardHTML(
   // a descendant of a sub-task tagged Later/Recurrent (inheritedCovered).
   function allUncheckedInLaterOrRecurrent(subs: any[], inheritedCovered = false): boolean {
     for (const s of subs ?? []) {
-      if (isDeletedItem(s)) continue;
+      if (isDeletedItem(s) || isArchivedItem(s)) continue;
       const tags: string[] = s.tags ?? [];
       const selfCovered = tags.some((t: string) => {
         const norm = normalizeTag(t);
@@ -4908,7 +4983,7 @@ function createCardHTML(
 
   function renderSubTree(subs: any[], depth = 0): string {
     return (subs || [])
-      .filter((sub: any) => !isDeletedItem(sub))
+      .filter((sub: any) => !isDeletedItem(sub) && !isArchivedItem(sub))
       .map((sub: any) => renderSub(sub, depth) + renderSubTree(sub.subs, depth + 1))
       .join("");
   }

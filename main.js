@@ -2595,30 +2595,65 @@ function sortTopLevelOpenDone(root) {
   const flatten = (gs) => gs.flatMap((g) => [g.head, ...g.chain]);
   root.children = [...flatten(plain), ...flatten(open), ...flatten(done), ...deletedNodes];
 }
+function dialogHasUnchecked(node) {
+  for (const child of node.children) {
+    const parsed = parseTaskLine(child.raw);
+    if (parsed.tags.some(isDeletedTag))
+      continue;
+    if (parsed.checked === false)
+      return true;
+    if (dialogHasUnchecked(child))
+      return true;
+  }
+  return false;
+}
+function computeDependentBlockedIds(siblings) {
+  const blocked = /* @__PURE__ */ new Set();
+  for (const g of groupChainDependents(siblings)) {
+    if (g.deleted)
+      continue;
+    const members = [g.head, ...g.chain];
+    const hasOpenMember = members.some((m) => {
+      const p = parseTaskLine(m.raw);
+      return !p.tags.some(isDeletedTag) && p.checked === false;
+    });
+    if (hasOpenMember) {
+      for (const m of members)
+        blocked.add(m.id);
+    }
+  }
+  return blocked;
+}
 function archiveCheckedSubtasks(root, config) {
-  let count = 0;
+  let archived = 0;
+  let blocked = 0;
   const visit = (node) => {
+    const dependentBlocked = computeDependentBlockedIds(node.children);
     for (const child of node.children) {
       const parsed = parseTaskLine(child.raw);
       const isDeleted = parsed.tags.some(isDeletedTag);
       if (parsed.checked === true && !isDeleted) {
-        const doneIdx = parsed.tags.findIndex((t) => normalizeTag(t) === config.normDone);
-        const alreadyArchived = parsed.tags.some((t) => normalizeTag(t) === normalizeTag(ARCHIVED_TAG));
-        if (doneIdx >= 0) {
-          parsed.tags[doneIdx] = ARCHIVED_TAG;
-          child.raw = serializeTaskLine(parsed);
-          count++;
-        } else if (!alreadyArchived) {
-          parsed.tags.push(ARCHIVED_TAG);
-          child.raw = serializeTaskLine(parsed);
-          count++;
+        if (dialogHasUnchecked(child) || dependentBlocked.has(child.id)) {
+          blocked++;
+        } else {
+          const doneIdx = parsed.tags.findIndex((t) => normalizeTag(t) === config.normDone);
+          const alreadyArchived = parsed.tags.some((t) => normalizeTag(t) === normalizeTag(ARCHIVED_TAG));
+          if (doneIdx >= 0) {
+            parsed.tags[doneIdx] = ARCHIVED_TAG;
+            child.raw = serializeTaskLine(parsed);
+            archived++;
+          } else if (!alreadyArchived) {
+            parsed.tags.push(ARCHIVED_TAG);
+            child.raw = serializeTaskLine(parsed);
+            archived++;
+          }
         }
       }
       visit(child);
     }
   };
   visit(root);
-  return count;
+  return { archived, blocked };
 }
 function serializeDialogTree(root, depth = 1) {
   const out = [];
@@ -3151,12 +3186,12 @@ function wireSubtaskTree(app, containerEl, titleEl, root, config, onEditSubtask,
       render();
     },
     archiveDone: () => {
-      const count = archiveCheckedSubtasks(root, config);
-      if (count) {
+      const result = archiveCheckedSubtasks(root, config);
+      if (result.archived) {
         dirty = true;
         render();
       }
-      return count;
+      return result;
     },
     addNode,
     refreshClamping: () => adjustClamping(),
@@ -3232,7 +3267,17 @@ function showCardColorDialog(app, existingColor, title, cardLineNum, subtaskTree
   subtaskAddTaskBtn?.addEventListener("click", () => treeCtl?.addNode(true));
   subtaskAddCommentBtn?.addEventListener("click", () => treeCtl?.addNode(false));
   subtaskSortBtn?.addEventListener("click", () => treeCtl?.sortOpenDone());
-  subtaskArchiveDoneBtn?.addEventListener("click", () => treeCtl?.archiveDone());
+  subtaskArchiveDoneBtn?.addEventListener("click", () => {
+    const result = treeCtl?.archiveDone();
+    if (!result)
+      return;
+    if (result.blocked > 0) {
+      const archivedPart = result.archived ? `Archived ${result.archived} subtask${result.archived === 1 ? "" : "s"}. ` : "Nothing archived. ";
+      new import_obsidian.Notice(`${archivedPart}${result.blocked} left unarchived \u2014 still ${result.blocked === 1 ? "has" : "have"} open work underneath.`);
+    } else if (result.archived > 0) {
+      new import_obsidian.Notice(`Archived ${result.archived} subtask${result.archived === 1 ? "" : "s"}.`);
+    }
+  });
   const dialogWindow = dialog.ownerDocument.defaultView;
   const onWindowResize = () => treeCtl?.refreshClamping();
   dialogWindow?.addEventListener("resize", onWindowResize);
@@ -3302,9 +3347,13 @@ function isCheckedItem(s) {
 function isDeletedItem(s) {
   return (s.tags ?? []).some(isDeletedTag);
 }
+var isArchivedTag = (t) => normalizeTag(t) === normalizeTag(ARCHIVED_TAG);
+function isArchivedItem(s) {
+  return (s.tags ?? []).some(isArchivedTag);
+}
 function hasUnchecked(subs) {
   for (const s of subs ?? []) {
-    if (isDeletedItem(s))
+    if (isDeletedItem(s) || isArchivedItem(s))
       continue;
     if (isCheckboxItem(s) && !isCheckedItem(s))
       return true;
@@ -3355,7 +3404,7 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
   const isExpanded = item.state === "expanded";
   function hasActiveKanban(subs) {
     for (const s of subs ?? []) {
-      if (isDeletedItem(s))
+      if (isDeletedItem(s) || isArchivedItem(s))
         continue;
       if (isCheckboxItem(s) && !isCheckedItem(s)) {
         const tags = s.tags ?? [];
@@ -3369,7 +3418,7 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
   }
   function allUncheckedInLaterOrRecurrent(subs, inheritedCovered = false) {
     for (const s of subs ?? []) {
-      if (isDeletedItem(s))
+      if (isDeletedItem(s) || isArchivedItem(s))
         continue;
       const tags = s.tags ?? [];
       const selfCovered = tags.some((t) => {
@@ -3413,7 +3462,7 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
     return `<div class="kb-sub-row" data-sub-line="${sub.line}" data-sub-last-line="${subLastLine}" data-sub-raw="${subEditRaw.replace(/"/g, "&quot;")}" style="${subStyle}">${indent}${rendered}</div>`;
   }
   function renderSubTree(subs, depth = 0) {
-    return (subs || []).filter((sub) => !isDeletedItem(sub)).map((sub) => renderSub(sub, depth) + renderSubTree(sub.subs, depth + 1)).join("");
+    return (subs || []).filter((sub) => !isDeletedItem(sub) && !isArchivedItem(sub)).map((sub) => renderSub(sub, depth) + renderSubTree(sub.subs, depth + 1)).join("");
   }
   const addSubBtnStyle = `width:24px;height:24px;border-radius:50%;border:1px solid var(--background-modifier-border);background:none;cursor:pointer;font-size:1.1em;line-height:1;display:inline-flex;align-items:center;justify-content:center;color:inherit;`;
   const addSubBtn = `<button class="kb-add-sub" style="${addSubBtnStyle}">+</button>`;
