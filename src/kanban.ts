@@ -298,6 +298,10 @@ function extractTags(text: string): string[] {
 const DELETED_TAG = "#deleted";
 const isDeletedTag = (t: string) => normalizeTag(t) === normalizeTag(DELETED_TAG);
 
+// Tag stamped on a checked subtask by the order-subtasks dialog's "Archive
+// done" button — see archiveCheckedSubtasks.
+const ARCHIVED_TAG = "#archived";
+
 // ─── ORDER-COMMENT PARSING ────────────────────────────────────────────────────
 // Format: %% @<digits> %% or %% @-<digits> %% (a leading '-' places the card
 // below zero — see the ORDER ARITHMETIC section for why that's useful).
@@ -2007,14 +2011,13 @@ async function moveCardToNewDoc(
 
 const ARCHIVE_CALLOUT_HEADER = "> [!note]- Archived";
 
-// Shared by archiveToSection and archiveDoneSubtasks below: locates a
-// title-only copy of a card already sitting in the Archived callout (left
-// there by "Archive done" on the Order-subtasks panel), so a later full
-// archive can replace it in place instead of adding a duplicate entry for
-// the same card. Matches on indent + bare text (TaskLine.text, i.e. ignoring
-// tags/checkbox/dates) since ticking the real card changes those but not its
-// text; indent is checked too so a subtask that happens to share the card's
-// title text is never mistaken for the card's own placeholder line.
+// Used by archiveToSection: locates a title-only copy of a card already
+// sitting in the Archived callout, so a full archive can replace it in
+// place instead of adding a duplicate entry for the same card. Matches on
+// indent + bare text (TaskLine.text, i.e. ignoring tags/checkbox/dates)
+// since ticking the real card changes those but not its text; indent is
+// checked too so a subtask that happens to share the card's title text is
+// never mistaken for the card's own placeholder line.
 function findArchivedTitleLine(
   lines: string[],
   calloutIdx: number,
@@ -2165,105 +2168,6 @@ async function archiveToSection(
     return true;
   } catch (e: any) {
     console.error("archiveToSection failed:", e);
-    return false;
-  }
-}
-
-// "Archive done" (Order-subtasks panel of the card dialog): unlike
-// archiveToSection above, the card itself is NOT archived — it stays active
-// on the board. This only peels off top-level subtasks that are themselves
-// checked and have no open (or malformed/plain-bullet) descendant anywhere
-// in their own subtree, moving each such subtree verbatim into the Archived
-// callout, underneath a title-only copy of the card. That copy is created
-// the first time this runs and reused on every later click (see
-// findArchivedTitleLine) — so calling this repeatedly as more subtasks
-// finish just appends each new batch, right after the title, without ever
-// duplicating the card. When the card is eventually fully archived via the
-// normal Archive button, archiveToSection finds this same copy and replaces
-// it in place with the real card (see the existingTitleIdx branch above).
-async function archiveDoneSubtasks(
-  app: App,
-  filePath: string,
-  cardLineNum: number,
-  subs: any[],
-  config: KanbanConfig
-): Promise<{ moved: number; titleAdded: boolean } | false> {
-  try {
-    const { tFile, lines } = await readFileLines(app, filePath);
-    const cardIdx = cardLineNum - 1;
-    if (cardIdx < 0 || cardIdx >= lines.length) return false;
-
-    const cardParsed = parseTaskLine(lines[cardIdx]);
-    const plainTitle = cardParsed.text.trim();
-    if (!plainTitle) return false;
-
-    // Same tag/order normalization archiveToSection's archiveLine applies to
-    // every line it moves into the archive (recurrence handling is
-    // deliberately left out here — a subtask being carved out into the
-    // archive is finished for good, not cycling back like a recurring card).
-    const stripMeta = (raw: string): string => {
-      const p = parseTaskLine(raw);
-      p.tags = p.tags.filter((t) => !config.normKanban.includes(normalizeTag(t)));
-      p.orderDigits = null;
-      return serializeTaskLine(p);
-    };
-
-    // Candidates: top-level subtasks that are themselves checked, not
-    // deleted, and whose whole subtree has no open descendant — a subtask
-    // nested under a still-open sibling stays put until that sibling
-    // finishes too (see the "Recursion scope" decision for archive-done).
-    const chunks: { startIdx: number; endIdx: number }[] = [];
-    for (let i = 0; i < subs.length; i++) {
-      const s = subs[i];
-      const isDeleted = extractTags(s.text || "").some(isDeletedTag);
-      if (isDeleted || !isCheckboxItem(s) || !isCheckedItem(s) || hasUnchecked(s.subs || [])) continue;
-      const start = s.line;
-      const end = i < subs.length - 1
-        ? subs[i + 1].line - 1
-        : (maxSubLine(s.subs) || s.line);
-      chunks.push({ startIdx: start - 1, endIdx: end - 1 });
-    }
-
-    const calloutIdxBefore = lines.findIndex((l) => l.trim() === ARCHIVE_CALLOUT_HEADER);
-    const alreadyCopied = findArchivedTitleLine(lines, calloutIdxBefore, plainTitle, cardParsed.indent) >= 0;
-    if (!chunks.length && alreadyCopied) return { moved: 0, titleAdded: false };
-
-    // Capture + transform the moved text before touching the array, then
-    // remove chunks bottom-to-top so earlier chunks' indices stay valid.
-    const movedLines: string[] = chunks.flatMap((c) =>
-      lines.slice(c.startIdx, c.endIdx + 1).map((l) => `> ${stripMeta(l)}`)
-    );
-    for (let i = chunks.length - 1; i >= 0; i--) {
-      lines.splice(chunks[i].startIdx, chunks[i].endIdx - chunks[i].startIdx + 1);
-    }
-
-    // Re-locate (indices shifted by the removals above) — or create — the
-    // callout and this card's title-only entry within it. cardIdx itself is
-    // untouched by those removals: every candidate line lives after the
-    // card in the file, so nothing at or before cardIdx ever shifts.
-    const calloutIdx = lines.findIndex((l) => l.trim() === ARCHIVE_CALLOUT_HEADER);
-    let titleIdx = findArchivedTitleLine(lines, calloutIdx, plainTitle, cardParsed.indent);
-    let titleAdded = false;
-
-    if (titleIdx < 0) {
-      const titleLine = `> ${stripMeta(lines[cardIdx])}`;
-      if (calloutIdx >= 0) {
-        lines.splice(calloutIdx + 1, 0, titleLine);
-        titleIdx = calloutIdx + 1;
-      } else {
-        while (lines.length && lines[lines.length - 1].trim() === "") lines.pop();
-        lines.push("", ARCHIVE_CALLOUT_HEADER, titleLine);
-        titleIdx = lines.length - 1;
-      }
-      titleAdded = true;
-    }
-
-    if (movedLines.length) lines.splice(titleIdx + 1, 0, ...movedLines);
-
-    await writeFileLines(app, tFile, lines);
-    return { moved: chunks.length, titleAdded };
-  } catch (e: any) {
-    console.error("archiveDoneSubtasks failed:", e);
     return false;
   }
 }
@@ -3829,6 +3733,41 @@ function sortTopLevelOpenDone(root: DialogNode): void {
   root.children = [...flatten(plain), ...flatten(open), ...flatten(done), ...deletedNodes];
 }
 
+// The "Archive done" button: for every checked, non-deleted node anywhere
+// in the tree (any depth, chain-dependent or not — a node's eligibility
+// depends only on its own checked state, never its descendants' or
+// siblings'), replaces a "#done" tag with "#archived", or just adds
+// "#archived" if it carries no "#done" tag at all — the common case, since
+// most subtasks are plain checkboxes with no kanban tag of their own; only
+// a promoted subtask would already carry "#done". A pure in-memory tree
+// mutation, exactly like a move or a marker toggle — nothing reaches disk
+// until Apply. Returns the number of nodes changed.
+function archiveCheckedSubtasks(root: DialogNode, config: KanbanConfig): number {
+  let count = 0;
+  const visit = (node: DialogNode) => {
+    for (const child of node.children) {
+      const parsed = parseTaskLine(child.raw);
+      const isDeleted = parsed.tags.some(isDeletedTag);
+      if (parsed.checked === true && !isDeleted) {
+        const doneIdx = parsed.tags.findIndex((t) => normalizeTag(t) === config.normDone);
+        const alreadyArchived = parsed.tags.some((t) => normalizeTag(t) === normalizeTag(ARCHIVED_TAG));
+        if (doneIdx >= 0) {
+          parsed.tags[doneIdx] = ARCHIVED_TAG;
+          child.raw = serializeTaskLine(parsed);
+          count++;
+        } else if (!alreadyArchived) {
+          parsed.tags.push(ARCHIVED_TAG);
+          child.raw = serializeTaskLine(parsed);
+          count++;
+        }
+      }
+      visit(child);
+    }
+  };
+  visit(root);
+  return count;
+}
+
 // Regenerates a card's whole subtask block from the final in-memory tree.
 // Indentation is always recomputed from depth (tabs only, one per level —
 // INDENT_TAB_WIDTH's convention), never preserved from the original line,
@@ -3907,7 +3846,7 @@ function wireSubtaskTree(
   // otherwise close/cancel the whole dialog) — see onRowDblClick below.
   setEscapeHandler: (fn: () => void) => void,
   dialogEscapeDefault: () => void
-): { sortOpenDone(): void; addNode(isCheckboxNode: boolean): void; refreshClamping(): void; destroy(): void } {
+): { sortOpenDone(): void; archiveDone(): number; addNode(isCheckboxNode: boolean): void; refreshClamping(): void; destroy(): void } {
   const doc = containerEl.ownerDocument;
   const DRAG_DELAY = 200, MOVE_THRESHOLD = 6;
 
@@ -4529,6 +4468,14 @@ function wireSubtaskTree(
       dirty = true;
       render();
     },
+    archiveDone: () => {
+      const count = archiveCheckedSubtasks(root, config);
+      if (count) {
+        dirty = true;
+        render();
+      }
+      return count;
+    },
     addNode,
     refreshClamping: () => adjustClamping(),
     destroy: () => {
@@ -4570,16 +4517,12 @@ function showCardColorDialog(
   // Same immediate-save semantics as the board's own subtask editor: these
   // fire (and persist) right away, independent of Apply/Cancel, and close
   // the dialog on success (see wireSubtaskTree's matching params for why).
-  // The marker toggle has no equivalent callback here — it's a pure
-  // in-memory tree mutation handled entirely inside wireSubtaskTree, folded
-  // into `finalTree` like any other pending move.
+  // The marker toggle, checkbox, and "Archive done" have no equivalent
+  // callback here — each is a pure in-memory tree mutation handled entirely
+  // inside wireSubtaskTree, folded into `finalTree` like any other pending
+  // change.
   onEditSubtask: (line: number, newText: string) => Promise<string | null>,
-  onDeleteSubtask: (line: number) => Promise<boolean>,
-  // Same immediate-save semantics as onDelete below: fires right away and
-  // closes the dialog (moved/removed subtask lines make every line number
-  // this dialog captured at open time stale, so continuing to drag-reorder
-  // afterward wouldn't be safe).
-  onArchiveDoneSubtasks: () => void
+  onDeleteSubtask: (line: number) => Promise<boolean>
 ) {
   const { dialog, close, setEscapeHandler } = makeOverlay("kanban-card-color-dialog", app);
   dialog.style.maxWidth = "720px"; // 1.5x the original 480px
@@ -4625,7 +4568,7 @@ function showCardColorDialog(
         <button id="k-subtask-add-task" type="button" style="${sortBtnStyle}" title="Add a new subtask below all others">Add ☐</button>
         <button id="k-subtask-add-comment" type="button" style="${sortBtnStyle}" title="Add a new plain (non-checkbox) note below all others">Add •</button>
         <button id="k-subtask-sort" type="button" style="${sortBtnStyle}" title="Move all done subtasks below the open ones">Open → Done</button>
-        <button id="k-subtask-archive-done" type="button" style="${sortBtnStyle}" title="Copy this card's title to the archive (if not already there), then move its fully-done subtasks underneath it">Archive done</button>
+        <button id="k-subtask-archive-done" type="button" style="${sortBtnStyle}" title="Tag every checked subtask #archived (replacing #done if present)">Archive done</button>
       </div>
       <div id="k-subtask-col" style="flex:1;min-height:0;overflow-y:auto;padding:8px;border:1px solid var(--background-modifier-border);border-radius:8px;background:var(--background-secondary);display:flex;flex-direction:column;"></div>
     </div>`;
@@ -4676,10 +4619,7 @@ function showCardColorDialog(
 
   subtaskSortBtn?.addEventListener("click", () => treeCtl?.sortOpenDone());
 
-  subtaskArchiveDoneBtn?.addEventListener("click", () => {
-    closeAndCleanup();
-    onArchiveDoneSubtasks();
-  });
+  subtaskArchiveDoneBtn?.addEventListener("click", () => treeCtl?.archiveDone());
 
   // The dialog can only get taller/shorter via the window itself resizing
   // (no user-facing resize handle), so this only needs to run occasionally,
@@ -5266,10 +5206,10 @@ async function tagUntaggedRecurrentCards(app: App, paths: string[], config: Kanb
     const lines = (await getCachedFileLines(app, filePath)).slice();
     let changed = false;
     // Everything from the Archived callout onward is dead content (see
-    // archiveToSection/archiveDoneSubtasks) — a card's own "@recurrent" text
-    // surviving into its archived title-only placeholder, or into an archived
-    // subtask that was itself a triggered recurring subcard, must not get
-    // re-tagged #recurrent, or it resurfaces as a phantom card in Recurrent.
+    // archiveToSection) — a card's own "@recurrent" text surviving into its
+    // archived title-only placeholder, or into an archived subtask that was
+    // itself a triggered recurring subcard, must not get re-tagged
+    // #recurrent, or it resurfaces as a phantom card in Recurrent.
     const calloutIdx = lines.findIndex((l) => l.trim() === ARCHIVE_CALLOUT_HEADER);
     const scanLimit = calloutIdx >= 0 ? calloutIdx : lines.length;
     for (let i = 0; i < scanLimit; i++) {
@@ -6295,17 +6235,6 @@ export function attachListeners(
         const ok = await deleteCardOrSubtask(app, filePath, subLine, lastLine, config, false, false, [], false, hasDependents);
         if (ok) requestAnimationFrame(() => setTimeout(refresh, 50));
         return ok;
-      },
-      () => {
-        archiveDoneSubtasks(app, filePath, lineNum, subs, config).then((result) => {
-          if (!result) return;
-          const parts: string[] = [];
-          if (result.titleAdded) parts.push("Added card to archive.");
-          if (result.moved) parts.push(`Archived ${result.moved} done subtask${result.moved === 1 ? "" : "s"}.`);
-          if (!parts.length) parts.push("Nothing to archive.");
-          new Notice(parts.join(" "));
-          requestAnimationFrame(() => setTimeout(refresh, 50));
-        });
       }
     );
   }

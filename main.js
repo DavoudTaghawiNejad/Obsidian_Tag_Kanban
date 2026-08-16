@@ -177,6 +177,7 @@ function extractTags(text) {
 }
 var DELETED_TAG = "#deleted";
 var isDeletedTag = (t) => normalizeTag(t) === normalizeTag(DELETED_TAG);
+var ARCHIVED_TAG = "#archived";
 function parseOrderComment(text) {
   const m = text.match(/%% @(-?\d+)\w? %%/);
   if (!m)
@@ -1465,67 +1466,6 @@ async function archiveToSection(app, filePath, mainLineNum, subLines, config, _i
     return false;
   }
 }
-async function archiveDoneSubtasks(app, filePath, cardLineNum, subs, config) {
-  try {
-    const { tFile, lines } = await readFileLines(app, filePath);
-    const cardIdx = cardLineNum - 1;
-    if (cardIdx < 0 || cardIdx >= lines.length)
-      return false;
-    const cardParsed = parseTaskLine(lines[cardIdx]);
-    const plainTitle = cardParsed.text.trim();
-    if (!plainTitle)
-      return false;
-    const stripMeta = (raw) => {
-      const p = parseTaskLine(raw);
-      p.tags = p.tags.filter((t) => !config.normKanban.includes(normalizeTag(t)));
-      p.orderDigits = null;
-      return serializeTaskLine(p);
-    };
-    const chunks = [];
-    for (let i = 0; i < subs.length; i++) {
-      const s = subs[i];
-      const isDeleted = extractTags(s.text || "").some(isDeletedTag);
-      if (isDeleted || !isCheckboxItem(s) || !isCheckedItem(s) || hasUnchecked(s.subs || []))
-        continue;
-      const start = s.line;
-      const end = i < subs.length - 1 ? subs[i + 1].line - 1 : maxSubLine(s.subs) || s.line;
-      chunks.push({ startIdx: start - 1, endIdx: end - 1 });
-    }
-    const calloutIdxBefore = lines.findIndex((l) => l.trim() === ARCHIVE_CALLOUT_HEADER);
-    const alreadyCopied = findArchivedTitleLine(lines, calloutIdxBefore, plainTitle, cardParsed.indent) >= 0;
-    if (!chunks.length && alreadyCopied)
-      return { moved: 0, titleAdded: false };
-    const movedLines = chunks.flatMap(
-      (c) => lines.slice(c.startIdx, c.endIdx + 1).map((l) => `> ${stripMeta(l)}`)
-    );
-    for (let i = chunks.length - 1; i >= 0; i--) {
-      lines.splice(chunks[i].startIdx, chunks[i].endIdx - chunks[i].startIdx + 1);
-    }
-    const calloutIdx = lines.findIndex((l) => l.trim() === ARCHIVE_CALLOUT_HEADER);
-    let titleIdx = findArchivedTitleLine(lines, calloutIdx, plainTitle, cardParsed.indent);
-    let titleAdded = false;
-    if (titleIdx < 0) {
-      const titleLine = `> ${stripMeta(lines[cardIdx])}`;
-      if (calloutIdx >= 0) {
-        lines.splice(calloutIdx + 1, 0, titleLine);
-        titleIdx = calloutIdx + 1;
-      } else {
-        while (lines.length && lines[lines.length - 1].trim() === "")
-          lines.pop();
-        lines.push("", ARCHIVE_CALLOUT_HEADER, titleLine);
-        titleIdx = lines.length - 1;
-      }
-      titleAdded = true;
-    }
-    if (movedLines.length)
-      lines.splice(titleIdx + 1, 0, ...movedLines);
-    await writeFileLines(app, tFile, lines);
-    return { moved: chunks.length, titleAdded };
-  } catch (e) {
-    console.error("archiveDoneSubtasks failed:", e);
-    return false;
-  }
-}
 async function deleteCardOrSubtask(app, filePath, lineNum, lastLine, config, isCard, hasSubtasks, subs, isPromoted, hasDependents = false) {
   const markDeleted = async () => {
     await markLineDeleted(app, filePath, lineNum, config);
@@ -2655,6 +2595,31 @@ function sortTopLevelOpenDone(root) {
   const flatten = (gs) => gs.flatMap((g) => [g.head, ...g.chain]);
   root.children = [...flatten(plain), ...flatten(open), ...flatten(done), ...deletedNodes];
 }
+function archiveCheckedSubtasks(root, config) {
+  let count = 0;
+  const visit = (node) => {
+    for (const child of node.children) {
+      const parsed = parseTaskLine(child.raw);
+      const isDeleted = parsed.tags.some(isDeletedTag);
+      if (parsed.checked === true && !isDeleted) {
+        const doneIdx = parsed.tags.findIndex((t) => normalizeTag(t) === config.normDone);
+        const alreadyArchived = parsed.tags.some((t) => normalizeTag(t) === normalizeTag(ARCHIVED_TAG));
+        if (doneIdx >= 0) {
+          parsed.tags[doneIdx] = ARCHIVED_TAG;
+          child.raw = serializeTaskLine(parsed);
+          count++;
+        } else if (!alreadyArchived) {
+          parsed.tags.push(ARCHIVED_TAG);
+          child.raw = serializeTaskLine(parsed);
+          count++;
+        }
+      }
+      visit(child);
+    }
+  };
+  visit(root);
+  return count;
+}
 function serializeDialogTree(root, depth = 1) {
   const out = [];
   for (const node of root.children) {
@@ -3185,6 +3150,14 @@ function wireSubtaskTree(app, containerEl, titleEl, root, config, onEditSubtask,
       dirty = true;
       render();
     },
+    archiveDone: () => {
+      const count = archiveCheckedSubtasks(root, config);
+      if (count) {
+        dirty = true;
+        render();
+      }
+      return count;
+    },
     addNode,
     refreshClamping: () => adjustClamping(),
     destroy: () => {
@@ -3206,7 +3179,7 @@ function wireSubtaskTree(app, containerEl, titleEl, root, config, onEditSubtask,
     }
   };
 }
-function showCardColorDialog(app, existingColor, title, cardLineNum, subtaskTree, config, onApply, onReorder, onDelete, onEditSubtask, onDeleteSubtask, onArchiveDoneSubtasks) {
+function showCardColorDialog(app, existingColor, title, cardLineNum, subtaskTree, config, onApply, onReorder, onDelete, onEditSubtask, onDeleteSubtask) {
   const { dialog, close, setEscapeHandler } = makeOverlay("kanban-card-color-dialog", app);
   dialog.style.maxWidth = "720px";
   const root = { id: cardLineNum, raw: "", trailingRaw: [], children: subtaskTree };
@@ -3224,7 +3197,7 @@ function showCardColorDialog(app, existingColor, title, cardLineNum, subtaskTree
         <button id="k-subtask-add-task" type="button" style="${sortBtnStyle}" title="Add a new subtask below all others">Add \u2610</button>
         <button id="k-subtask-add-comment" type="button" style="${sortBtnStyle}" title="Add a new plain (non-checkbox) note below all others">Add \u2022</button>
         <button id="k-subtask-sort" type="button" style="${sortBtnStyle}" title="Move all done subtasks below the open ones">Open \u2192 Done</button>
-        <button id="k-subtask-archive-done" type="button" style="${sortBtnStyle}" title="Copy this card's title to the archive (if not already there), then move its fully-done subtasks underneath it">Archive done</button>
+        <button id="k-subtask-archive-done" type="button" style="${sortBtnStyle}" title="Tag every checked subtask #archived (replacing #done if present)">Archive done</button>
       </div>
       <div id="k-subtask-col" style="flex:1;min-height:0;overflow-y:auto;padding:8px;border:1px solid var(--background-modifier-border);border-radius:8px;background:var(--background-secondary);display:flex;flex-direction:column;"></div>
     </div>`;
@@ -3259,10 +3232,7 @@ function showCardColorDialog(app, existingColor, title, cardLineNum, subtaskTree
   subtaskAddTaskBtn?.addEventListener("click", () => treeCtl?.addNode(true));
   subtaskAddCommentBtn?.addEventListener("click", () => treeCtl?.addNode(false));
   subtaskSortBtn?.addEventListener("click", () => treeCtl?.sortOpenDone());
-  subtaskArchiveDoneBtn?.addEventListener("click", () => {
-    closeAndCleanup();
-    onArchiveDoneSubtasks();
-  });
+  subtaskArchiveDoneBtn?.addEventListener("click", () => treeCtl?.archiveDone());
   const dialogWindow = dialog.ownerDocument.defaultView;
   const onWindowResize = () => treeCtl?.refreshClamping();
   dialogWindow?.addEventListener("resize", onWindowResize);
@@ -4413,21 +4383,6 @@ function attachListeners(boardEl, config, app, refresh) {
         if (ok)
           requestAnimationFrame(() => setTimeout(refresh, 50));
         return ok;
-      },
-      () => {
-        archiveDoneSubtasks(app, filePath, lineNum, subs, config).then((result) => {
-          if (!result)
-            return;
-          const parts = [];
-          if (result.titleAdded)
-            parts.push("Added card to archive.");
-          if (result.moved)
-            parts.push(`Archived ${result.moved} done subtask${result.moved === 1 ? "" : "s"}.`);
-          if (!parts.length)
-            parts.push("Nothing to archive.");
-          new import_obsidian.Notice(parts.join(" "));
-          requestAnimationFrame(() => setTimeout(refresh, 50));
-        });
       }
     );
   }
