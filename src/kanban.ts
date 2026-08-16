@@ -3916,6 +3916,16 @@ function wireSubtaskTree(
   // fully normal, independently editable row otherwise, just without its
   // own drag handle, since its position only has meaning relative to its
   // predecessor.
+  // `draggable` is exactly "is this a group head" (a chain-dependent is
+  // never draggable — see appendUnit) — reused here to decide spacing: a
+  // group head gets a visible gap from whatever preceded it (the previous
+  // group, or the top of the list), while a chain-dependent sits flush
+  // (margin-top:0) directly against its predecessor, so the two read as one
+  // attached unit. Container-level `gap` is deliberately 0 everywhere (see
+  // renderInto/appendUnit) so this per-row margin is the only thing
+  // controlling spacing — a uniform flex `gap` can't express "0 between
+  // some children, a real gap between others."
+  const GROUP_GAP = "14px";
   const buildRow = (node: DialogNode, draggable: boolean, hasPredecessor: boolean): HTMLElement => {
     const row = doc.createElement("div");
     row.className = "kb-subtask-row";
@@ -3924,7 +3934,7 @@ function wireSubtaskTree(
     row.style.cssText =
       "display:flex;flex-direction:column;gap:8px;padding:14px 16px;background:var(--kb-card-bg,var(--background-primary));" +
       `border:1px solid var(--background-modifier-border);border-radius:10px;cursor:${draggable ? "grab" : "default"};text-align:left;` +
-      "box-shadow:0 1px 3px rgba(0,0,0,.08);";
+      `box-shadow:0 1px 3px rgba(0,0,0,.08);margin-top:${draggable ? GROUP_GAP : "0"};`;
     const mainLine = doc.createElement("div");
     mainLine.style.cssText = "display:flex;align-items:center;gap:10px;";
     if (draggable) {
@@ -3982,7 +3992,10 @@ function wireSubtaskTree(
     const row = buildRow(node, draggable, hasPredecessor);
     container.appendChild(row);
     const childWrap = doc.createElement("div");
-    childWrap.style.cssText = "display:flex;flex-direction:column;gap:8px;padding-left:26px;margin-top:8px;";
+    // gap:0 -- spacing between this row's own children is controlled
+    // per-row by buildRow's margin-top (see GROUP_GAP), not by a uniform
+    // container gap.
+    childWrap.style.cssText = "display:flex;flex-direction:column;padding-left:26px;margin-top:8px;";
     row.appendChild(childWrap);
     renderInto(childWrap, node);
   };

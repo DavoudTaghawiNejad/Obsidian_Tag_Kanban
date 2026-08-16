@@ -2689,13 +2689,14 @@ function wireSubtaskTree(app, containerEl, titleEl, root, config, onEditSubtask,
     slots.push({ el: s, parentId, index });
     return s;
   };
+  const GROUP_GAP = "14px";
   const buildRow = (node, draggable, hasPredecessor) => {
     const row = doc.createElement("div");
     row.className = "kb-subtask-row";
     row.dataset.id = String(node.id);
     if (draggable)
       row.dataset.draggable = "1";
-    row.style.cssText = `display:flex;flex-direction:column;gap:8px;padding:14px 16px;background:var(--kb-card-bg,var(--background-primary));border:1px solid var(--background-modifier-border);border-radius:10px;cursor:${draggable ? "grab" : "default"};text-align:left;box-shadow:0 1px 3px rgba(0,0,0,.08);`;
+    row.style.cssText = `display:flex;flex-direction:column;gap:8px;padding:14px 16px;background:var(--kb-card-bg,var(--background-primary));border:1px solid var(--background-modifier-border);border-radius:10px;cursor:${draggable ? "grab" : "default"};text-align:left;box-shadow:0 1px 3px rgba(0,0,0,.08);margin-top:${draggable ? GROUP_GAP : "0"};`;
     const mainLine = doc.createElement("div");
     mainLine.style.cssText = "display:flex;align-items:center;gap:10px;";
     if (draggable) {
@@ -2730,7 +2731,7 @@ function wireSubtaskTree(app, containerEl, titleEl, root, config, onEditSubtask,
     const row = buildRow(node, draggable, hasPredecessor);
     container.appendChild(row);
     const childWrap = doc.createElement("div");
-    childWrap.style.cssText = "display:flex;flex-direction:column;gap:8px;padding-left:26px;margin-top:8px;";
+    childWrap.style.cssText = "display:flex;flex-direction:column;padding-left:26px;margin-top:8px;";
     row.appendChild(childWrap);
     renderInto(childWrap, node);
   };
