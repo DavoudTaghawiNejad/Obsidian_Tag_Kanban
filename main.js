@@ -2697,13 +2697,14 @@ function wireSubtaskTree(app, containerEl, titleEl, root, config, onEditSubtask,
     return s;
   };
   const GROUP_GAP = "14px";
-  const buildRow = (node, draggable, hasPredecessor) => {
+  const CHAIN_INDENT_STEP = 12;
+  const buildRow = (node, draggable, hasPredecessor, chainDepth) => {
     const row = doc.createElement("div");
     row.className = "kb-subtask-row";
     row.dataset.id = String(node.id);
     if (draggable)
       row.dataset.draggable = "1";
-    row.style.cssText = `display:flex;flex-direction:column;gap:8px;padding:14px 16px;background:var(--kb-card-bg,var(--background-primary));border:1px solid var(--background-modifier-border);border-radius:10px;cursor:${draggable ? "grab" : "default"};text-align:left;box-shadow:0 1px 3px rgba(0,0,0,.08);margin-top:${draggable ? GROUP_GAP : "0"};`;
+    row.style.cssText = `display:flex;flex-direction:column;gap:8px;padding:14px 16px;background:var(--kb-card-bg,var(--background-primary));border:1px solid var(--background-modifier-border);border-radius:10px;cursor:${draggable ? "grab" : "default"};text-align:left;box-shadow:0 1px 3px rgba(0,0,0,.08);margin-top:${draggable ? GROUP_GAP : "0"};margin-left:${chainDepth * CHAIN_INDENT_STEP}px;`;
     const mainLine = doc.createElement("div");
     mainLine.style.cssText = "display:flex;align-items:center;gap:10px;";
     if (draggable) {
@@ -2727,15 +2728,14 @@ function wireSubtaskTree(app, containerEl, titleEl, root, config, onEditSubtask,
     const groups = groupChainDependents(parent.children).filter((g) => !g.deleted);
     container.appendChild(makeSlot(parent.id, 0));
     groups.forEach((g, i) => {
-      appendUnit(container, parent, g.head, true);
-      for (const chainNode of g.chain)
-        appendUnit(container, parent, chainNode, false);
+      appendUnit(container, parent, g.head, true, 0);
+      g.chain.forEach((chainNode, ci) => appendUnit(container, parent, chainNode, false, ci + 1));
       container.appendChild(makeSlot(parent.id, i + 1));
     });
   };
-  const appendUnit = (container, parent, node, draggable) => {
+  const appendUnit = (container, parent, node, draggable, chainDepth) => {
     const hasPredecessor = parent.children.findIndex((c) => c.id === node.id) > 0;
-    const row = buildRow(node, draggable, hasPredecessor);
+    const row = buildRow(node, draggable, hasPredecessor, chainDepth);
     container.appendChild(row);
     const childWrap = doc.createElement("div");
     childWrap.style.cssText = "display:flex;flex-direction:column;padding-left:26px;margin-top:8px;";

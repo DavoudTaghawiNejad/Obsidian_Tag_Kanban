@@ -3934,13 +3934,20 @@ function wireSubtaskTree(
   // never draggable — see appendUnit) — reused here to decide spacing: a
   // group head gets a visible gap from whatever preceded it (the previous
   // group, or the top of the list), while a chain-dependent sits flush
-  // (margin-top:0) directly against its predecessor, so the two read as one
-  // attached unit. Container-level `gap` is deliberately 0 everywhere (see
+  // (margin-top:0) directly against its predecessor and nudged in by
+  // CHAIN_INDENT_STEP * chainDepth (a small fraction of a real nesting
+  // level's own 26px — see appendUnit's childWrap — since this is "depends
+  // on," not "nested under"). `chainDepth` cascades — the Nth member of a
+  // chain (1-indexed: b depends on a, c depends on b, d depends on c, ...)
+  // sits N steps in, not a single flat step, so the indent itself reads as
+  // the dependency chain: each link one step deeper than the one it
+  // depends on. Container-level `gap` is deliberately 0 everywhere (see
   // renderInto/appendUnit) so this per-row margin is the only thing
   // controlling spacing — a uniform flex `gap` can't express "0 between
   // some children, a real gap between others."
   const GROUP_GAP = "14px";
-  const buildRow = (node: DialogNode, draggable: boolean, hasPredecessor: boolean): HTMLElement => {
+  const CHAIN_INDENT_STEP = 12;
+  const buildRow = (node: DialogNode, draggable: boolean, hasPredecessor: boolean, chainDepth: number): HTMLElement => {
     const row = doc.createElement("div");
     row.className = "kb-subtask-row";
     row.dataset.id = String(node.id);
@@ -3948,7 +3955,7 @@ function wireSubtaskTree(
     row.style.cssText =
       "display:flex;flex-direction:column;gap:8px;padding:14px 16px;background:var(--kb-card-bg,var(--background-primary));" +
       `border:1px solid var(--background-modifier-border);border-radius:10px;cursor:${draggable ? "grab" : "default"};text-align:left;` +
-      `box-shadow:0 1px 3px rgba(0,0,0,.08);margin-top:${draggable ? GROUP_GAP : "0"};`;
+      `box-shadow:0 1px 3px rgba(0,0,0,.08);margin-top:${draggable ? GROUP_GAP : "0"};margin-left:${chainDepth * CHAIN_INDENT_STEP}px;`;
     const mainLine = doc.createElement("div");
     mainLine.style.cssText = "display:flex;align-items:center;gap:10px;";
     if (draggable) {
@@ -3991,19 +3998,22 @@ function wireSubtaskTree(
     const groups = groupChainDependents(parent.children).filter((g) => !g.deleted);
     container.appendChild(makeSlot(parent.id, 0));
     groups.forEach((g, i) => {
-      appendUnit(container, parent, g.head, true);
-      for (const chainNode of g.chain) appendUnit(container, parent, chainNode, false);
+      appendUnit(container, parent, g.head, true, 0);
+      // 1-indexed, cascading: the first chain member (depends directly on
+      // the head) sits 1 step in, the second (depends on the first) sits 2
+      // steps in, and so on -- see buildRow's own doc comment.
+      g.chain.forEach((chainNode, ci) => appendUnit(container, parent, chainNode, false, ci + 1));
       container.appendChild(makeSlot(parent.id, i + 1));
     });
   };
 
-  const appendUnit = (container: HTMLElement, parent: DialogNode, node: DialogNode, draggable: boolean) => {
+  const appendUnit = (container: HTMLElement, parent: DialogNode, node: DialogNode, draggable: boolean, chainDepth: number) => {
     // "Has a real predecessor" = is not raw index 0 among `parent`'s own
     // children (deleted-but-present siblings still count — see
     // groupChainDependents' own doc comment) — the same test the
     // auto-correction sweep uses to decide a ">" is even a valid state here.
     const hasPredecessor = parent.children.findIndex((c) => c.id === node.id) > 0;
-    const row = buildRow(node, draggable, hasPredecessor);
+    const row = buildRow(node, draggable, hasPredecessor, chainDepth);
     container.appendChild(row);
     const childWrap = doc.createElement("div");
     // gap:0 -- spacing between this row's own children is controlled
