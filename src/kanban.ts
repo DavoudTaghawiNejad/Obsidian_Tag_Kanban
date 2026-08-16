@@ -3892,11 +3892,28 @@ function wireSubtaskTree(
   // otherwise close/cancel the whole dialog) — see onRowDblClick below.
   setEscapeHandler: (fn: () => void) => void,
   dialogEscapeDefault: () => void
-): { sortOpenDone(): void; archiveDone(): { archived: number; blocked: number }; addNode(isCheckboxNode: boolean): void; refreshClamping(): void; destroy(): void } {
+): {
+  sortOpenDone(): void;
+  archiveDone(): { archived: number; blocked: number };
+  addNode(isCheckboxNode: boolean): void;
+  setShowArchived(show: boolean): void;
+  refreshClamping(): void;
+  destroy(): void;
+} {
   const doc = containerEl.ownerDocument;
   const DRAG_DELAY = 200, MOVE_THRESHOLD = 6;
 
   let dirty = false;
+  // Archived subtasks default to hidden — see the order-subtasks section's
+  // own "Show archived" toggle. Purely a rendering concern: an archived
+  // node stays a real, structural tree node either way (never removed),
+  // exactly like a deleted one — see renderInto/appendUnit, the only place
+  // this is consulted. moveGroup's own group-index math is untouched by
+  // this (it still sees every non-deleted group, archived or not), since
+  // hiding only skips the row/subtree *rendering*, never the slot that
+  // marks its position — see renderInto's own comment.
+  let showArchived = false;
+  const nodeIsArchived = (n: DialogNode) => parseTaskLine(n.raw).tags.some(isArchivedTag);
   const rowEls = new Map<number, HTMLElement>();
   let slots: { el: HTMLElement; parentId: number; index: number }[] = [];
   // Synthetic ids for nodes added this session (see addNode) — negative, so
@@ -3983,16 +4000,30 @@ function wireSubtaskTree(
   // dropping something directly under it work through the same slot
   // mechanics as everywhere else, with no separate "reparent onto a row's
   // body" concept.
+  //
+  // Every group still gets its full set of slots (via the unconditional
+  // makeSlot calls below), archived or not — only the row (and, since
+  // appendUnit is simply never called for it, everything nested beneath it)
+  // is skipped when showArchived is off. This keeps slot indices identical
+  // to what groupChainDependents/moveGroup themselves compute (neither of
+  // which knows about "archived hidden" at all), so drag/drop math never
+  // has to special-case a hidden row's position.
   const renderInto = (container: HTMLElement, parent: DialogNode) => {
     container.innerHTML = "";
     const groups = groupChainDependents(parent.children).filter((g) => !g.deleted);
     container.appendChild(makeSlot(parent.id, 0));
     groups.forEach((g, i) => {
-      appendUnit(container, parent, g.head, true, 0);
+      if (showArchived || !nodeIsArchived(g.head)) {
+        appendUnit(container, parent, g.head, true, 0);
+      }
       // 1-indexed, cascading: the first chain member (depends directly on
       // the head) sits 1 step in, the second (depends on the first) sits 2
       // steps in, and so on -- see buildRow's own doc comment.
-      g.chain.forEach((chainNode, ci) => appendUnit(container, parent, chainNode, false, ci + 1));
+      g.chain.forEach((chainNode, ci) => {
+        if (showArchived || !nodeIsArchived(chainNode)) {
+          appendUnit(container, parent, chainNode, false, ci + 1);
+        }
+      });
       container.appendChild(makeSlot(parent.id, i + 1));
     });
   };
@@ -4523,6 +4554,11 @@ function wireSubtaskTree(
       return result;
     },
     addNode,
+    setShowArchived: (show: boolean) => {
+      if (show === showArchived) return;
+      showArchived = show;
+      render();
+    },
     refreshClamping: () => adjustClamping(),
     destroy: () => {
       containerEl.removeEventListener("mousedown", onMouseDown);
@@ -4610,11 +4646,19 @@ function showCardColorDialog(
   const subtaskSectionHtml = `
     <div id="k-subtask-section" style="margin-top:14px;text-align:left;flex:1 1 auto;min-height:0;display:flex;flex-direction:column;">
       <div style="font-size:.8em;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;flex-shrink:0;">Order subtasks</div>
-      <div id="k-subtask-btnrow" style="display:flex;gap:8px;flex-wrap:wrap;flex-shrink:0;">
+      <div id="k-subtask-btnrow" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;flex-shrink:0;">
         <button id="k-subtask-add-task" type="button" style="${sortBtnStyle}" title="Add a new subtask below all others">Add ☐</button>
         <button id="k-subtask-add-comment" type="button" style="${sortBtnStyle}" title="Add a new plain (non-checkbox) note below all others">Add •</button>
         <button id="k-subtask-sort" type="button" style="${sortBtnStyle}" title="Move all done subtasks below the open ones">Open → Done</button>
         <button id="k-subtask-archive-done" type="button" style="${sortBtnStyle}" title="Tag every checked subtask #archived (replacing #done if present)">Archive done</button>
+        <label id="k-subtask-show-archived-label" style="display:flex;align-items:center;gap:8px;margin-left:auto;font-size:.85em;color:var(--text-muted);cursor:pointer;user-select:none;">
+          <span style="position:relative;display:inline-block;width:32px;height:18px;flex-shrink:0;">
+            <input type="checkbox" id="k-subtask-show-archived" style="position:absolute;inset:0;opacity:0;margin:0;cursor:pointer;">
+            <span id="k-subtask-show-archived-track" style="position:absolute;inset:0;background:var(--background-modifier-border);border-radius:9px;transition:background .15s;"></span>
+            <span id="k-subtask-show-archived-thumb" style="position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--background-primary);box-shadow:0 1px 2px rgba(0,0,0,.3);transition:transform .15s;"></span>
+          </span>
+          Show archived
+        </label>
       </div>
       <div id="k-subtask-col" style="flex:1;min-height:0;overflow-y:auto;padding:8px;border:1px solid var(--background-modifier-border);border-radius:8px;background:var(--background-secondary);display:flex;flex-direction:column;"></div>
     </div>`;
@@ -4633,6 +4677,9 @@ function showCardColorDialog(
   const subtaskAddCommentBtn = dialog.querySelector<HTMLButtonElement>("#k-subtask-add-comment");
   const subtaskSortBtn = dialog.querySelector<HTMLButtonElement>("#k-subtask-sort");
   const subtaskArchiveDoneBtn = dialog.querySelector<HTMLButtonElement>("#k-subtask-archive-done");
+  const showArchivedCheckbox = dialog.querySelector<HTMLInputElement>("#k-subtask-show-archived");
+  const showArchivedTrack = dialog.querySelector<HTMLElement>("#k-subtask-show-archived-track");
+  const showArchivedThumb = dialog.querySelector<HTMLElement>("#k-subtask-show-archived-thumb");
   const deleteBtn = dialog.querySelector("#k-color-delete") as HTMLButtonElement;
 
   // The subtask section is always shown (not collapsible — see
@@ -4664,6 +4711,23 @@ function showCardColorDialog(
   subtaskAddCommentBtn?.addEventListener("click", () => treeCtl?.addNode(false));
 
   subtaskSortBtn?.addEventListener("click", () => treeCtl?.sortOpenDone());
+
+  // "Show archived" toggle — defaults off (unchecked), matching
+  // wireSubtaskTree's own showArchived default. Purely a display filter:
+  // archived subtasks (and everything nested beneath them, cascading the
+  // same way #deleted ones already do — see renderInto) stay real,
+  // structural tree nodes either way, just not rendered until switched on.
+  const applyShowArchivedVisual = () => {
+    if (!showArchivedCheckbox || !showArchivedTrack || !showArchivedThumb) return;
+    const on = showArchivedCheckbox.checked;
+    showArchivedTrack.style.background = on ? "var(--kb-accent)" : "var(--background-modifier-border)";
+    showArchivedThumb.style.transform = on ? "translateX(14px)" : "translateX(0)";
+  };
+  applyShowArchivedVisual();
+  showArchivedCheckbox?.addEventListener("change", () => {
+    applyShowArchivedVisual();
+    treeCtl?.setShowArchived(showArchivedCheckbox.checked);
+  });
 
   subtaskArchiveDoneBtn?.addEventListener("click", () => {
     const result = treeCtl?.archiveDone();
