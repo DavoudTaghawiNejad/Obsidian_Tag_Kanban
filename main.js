@@ -233,17 +233,26 @@ function parseTaskLine(raw) {
       rest = rest.slice(bm[0].length);
     }
   }
+  let dependsOn = null;
+  const gm = rest.match(/^([>^])\s+/);
+  if (gm) {
+    dependsOn = gm[1];
+    rest = rest.slice(gm[0].length);
+  }
   const tags = rest.match(/(?<!\w)#\w+/g) || [];
   const text = rest.replace(/\s*(?<!\w)#\w+/g, "").trim();
-  return { indent, bullet, checked, text, tags, date, doneDate, createdDate, deletedDate, orderDigits, skipDate, color };
+  return { indent, bullet, checked, text, tags, date, doneDate, createdDate, deletedDate, orderDigits, skipDate, color, dependsOn };
 }
 function serializeTaskLine(t) {
   const parts = [];
   if (t.bullet) {
     parts.push(t.checked !== null ? `${t.bullet} [${t.checked ? "x" : " "}]` : t.bullet);
   }
-  if (t.text)
+  if (t.dependsOn && t.text) {
+    parts.push(`${t.dependsOn} ${t.text}`);
+  } else if (t.text) {
     parts.push(t.text);
+  }
   parts.push(...t.tags);
   if (t.date)
     parts.push(t.date);
@@ -531,6 +540,21 @@ async function addTagToLine(app, filePath, lineNum, tag) {
   } catch {
   }
 }
+async function toggleDependencyMarker(app, filePath, lineNum, newMarker) {
+  try {
+    const { tFile, lines } = await readFileLines(app, filePath);
+    const idx = lineNum - 1;
+    if (idx < 0 || idx >= lines.length)
+      return;
+    const parsed = parseTaskLine(lines[idx]);
+    if (!parsed.dependsOn)
+      return;
+    parsed.dependsOn = newMarker;
+    lines[idx] = serializeTaskLine(parsed);
+    await writeFileLines(app, tFile, lines);
+  } catch {
+  }
+}
 async function triggerDatedLaterSubs(app, subs, filePath, config, today) {
   if (!subs || !subs.length)
     return false;
@@ -600,6 +624,56 @@ async function popOrphanedRecurrentSubs(app, items, config) {
     if (!isNoTrigger(i.item.text))
       continue;
     await popIfOrphaned(i.item.subs, i.filePath);
+  }
+  return changed;
+}
+function isDependedOn(node, subs, index) {
+  const next = subs[index + 1];
+  if (next && parseTaskLine(next.text).dependsOn === ">")
+    return true;
+  return (node.subs || []).some((c) => parseTaskLine(c.text).dependsOn === "^");
+}
+function findSiblingArrayContaining(subs, line) {
+  if (subs.some((s) => s.line === line))
+    return subs;
+  for (const s of subs) {
+    const found = findSiblingArrayContaining(s.subs || [], line);
+    if (found)
+      return found;
+  }
+  return null;
+}
+async function promoteDependentSubtasks(app, items, config) {
+  let changed = false;
+  const tryPromote = async (sub, filePath) => {
+    if (!isCheckboxItem(sub) || isCheckedItem(sub) || isDeletedItem(sub))
+      return false;
+    if (sub.tags.some((t) => config.normKanban.includes(normalizeTag(t))))
+      return false;
+    await addTagToLine(app, filePath, sub.line, config.dueColumn);
+    return true;
+  };
+  const evaluate = async (subs, parent, filePath) => {
+    for (let i = 0; i < subs.length; i++) {
+      const sub = subs[i];
+      const parsed = parseTaskLine(sub.text);
+      if (parsed.dependsOn) {
+        if (parsed.dependsOn === ">" && i === 0) {
+          await toggleDependencyMarker(app, filePath, sub.line, "^");
+          changed = true;
+          parsed.dependsOn = "^";
+        }
+        const target = parsed.dependsOn === ">" ? subs[i - 1] : parent;
+        const satisfied = isDeletedItem(target) || isCheckedItem(target);
+        if (satisfied && await tryPromote(sub, filePath))
+          changed = true;
+      }
+      if (sub.subs?.length)
+        await evaluate(sub.subs, sub, filePath);
+    }
+  };
+  for (const i of items) {
+    await evaluate(i.item.subs, i.item, i.filePath);
   }
   return changed;
 }
@@ -1471,14 +1545,14 @@ async function archiveDoneSubtasks(app, filePath, cardLineNum, subs, config) {
     return false;
   }
 }
-async function deleteCardOrSubtask(app, filePath, lineNum, lastLine, config, isCard, hasSubtasks, subs, isPromoted) {
+async function deleteCardOrSubtask(app, filePath, lineNum, lastLine, config, isCard, hasSubtasks, subs, isPromoted, hasDependents = false) {
   const markDeleted = async () => {
     await markLineDeleted(app, filePath, lineNum, config);
     if (isCard) {
       await archiveToSection(app, filePath, lineNum, subs, config, !isPromoted, false, false);
     }
   };
-  if (isCard && hasSubtasks) {
+  if (isCard && hasSubtasks || hasDependents) {
     await markDeleted();
     return true;
   }
@@ -3027,7 +3101,7 @@ function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
   );
   if (tagToRemove)
     display = display.split(/\s+/).filter((w) => w !== tagToRemove).join(" ").trim();
-  const rawText = display.replace(/^- \[[ xX]\] /, "").replace(/^[-*+]\s+/, "").trim();
+  const rawText = display.replace(/^- \[[ xX]\] /, "").replace(/^[-*+]\s+/, "").replace(/^[>^]\s+/, "").trim();
   const mainContent = formatInlineEmphasis(linksToHtml(formatCardDateAnnotation(formatTriggerAnnotations(rawText, config.normRecurrent)), vaultName), TITLE_FONT_WEIGHT);
   const hasSubs = item.item.subs.length > 0;
   const isExpanded = item.state === "expanded";
@@ -3648,6 +3722,8 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
     if (await popOrphanedRecurrentSubs(app, items, config))
       items = await collectItems(app, paths, config);
   }
+  if (await promoteDependentSubtasks(app, items, config))
+    items = await collectItems(app, paths, config);
   for (const i of items)
     pendingForceExpand.delete(forceExpandKey(i.filePath, i.item.line));
   const columns = groupByColumns(items, config);
@@ -4531,6 +4607,16 @@ function attachListeners(boardEl, config, app, refresh) {
       const newText = input.value.trim();
       if (save && !newText) {
         const lastLine = parseInt(subRow.dataset.subLastLine || `${lineNum}`, 10);
+        let hasDependents = false;
+        try {
+          const cardSubs = JSON.parse(card.dataset.subs || "[]");
+          const siblingArr = findSiblingArrayContaining(cardSubs, lineNum);
+          if (siblingArr) {
+            const idx = siblingArr.findIndex((s) => s.line === lineNum);
+            hasDependents = idx >= 0 && isDependedOn(siblingArr[idx], siblingArr, idx);
+          }
+        } catch {
+        }
         const changed = await deleteCardOrSubtask(
           app,
           filePath,
@@ -4540,7 +4626,8 @@ function attachListeners(boardEl, config, app, refresh) {
           false,
           false,
           [],
-          false
+          false,
+          hasDependents
         );
         if (changed)
           requestAnimationFrame(() => setTimeout(refresh, 50));

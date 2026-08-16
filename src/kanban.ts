@@ -339,6 +339,7 @@ interface TaskLine {
   orderDigits: string | null;
   skipDate: string | null;                     // "%% @skip:YYYY-MM-DD %%" comment
   color: string | null;                        // "%% @color:#RRGGBB %%" comment
+  dependsOn: ">" | "^" | null;                 // depends on preceding sibling / parent, or neither
 }
 
 function parseTaskLine(raw: string): TaskLine {
@@ -397,10 +398,21 @@ function parseTaskLine(raw: string): TaskLine {
     }
   }
 
+  // Dependent-subtask marker: ">" depends on the immediately preceding
+  // sibling, "^" on the parent. Requires real trailing content — deliberately
+  // does NOT match at end-of-string, so a bare "- [ ] >"/"- [ ] ^" isn't a
+  // marker at all, just literal punctuation with nothing to depend on.
+  let dependsOn: ">" | "^" | null = null;
+  const gm = rest.match(/^([>^])\s+/);
+  if (gm) {
+    dependsOn = gm[1] as ">" | "^";
+    rest = rest.slice(gm[0].length);
+  }
+
   const tags = (rest.match(/(?<!\w)#\w+/g) || []);
   const text = rest.replace(/\s*(?<!\w)#\w+/g, "").trim();
 
-  return { indent, bullet, checked, text, tags, date, doneDate, createdDate, deletedDate, orderDigits, skipDate, color };
+  return { indent, bullet, checked, text, tags, date, doneDate, createdDate, deletedDate, orderDigits, skipDate, color, dependsOn };
 }
 
 function serializeTaskLine(t: TaskLine): string {
@@ -409,7 +421,15 @@ function serializeTaskLine(t: TaskLine): string {
   if (t.bullet) {
     parts.push(t.checked !== null ? `${t.bullet} [${t.checked ? "x" : " "}]` : t.bullet);
   }
-  if (t.text) parts.push(t.text);
+  // Unlike every field below (a trailing token), the dependency marker must
+  // stay glued to the checkbox at the front of the line — that adjacency is
+  // the syntax itself. Dropped (not emitted bare) when there's no text, same
+  // as parseTaskLine refuses to read one back with nothing after it.
+  if (t.dependsOn && t.text) {
+    parts.push(`${t.dependsOn} ${t.text}`);
+  } else if (t.text) {
+    parts.push(t.text);
+  }
   parts.push(...t.tags);
   if (t.date) parts.push(t.date);
   if (t.doneDate) parts.push(`✅${t.doneDate}`);
@@ -753,6 +773,20 @@ async function addTagToLine(app: App, filePath: string, lineNum: number, tag: st
   } catch { /* ignore */ }
 }
 
+// Sets (or clears, for `null`) a line's leading ">"/"^" dependency marker.
+async function toggleDependencyMarker(app: App, filePath: string, lineNum: number, newMarker: ">" | "^" | null): Promise<void> {
+  try {
+    const { tFile, lines } = await readFileLines(app, filePath);
+    const idx = lineNum - 1;
+    if (idx < 0 || idx >= lines.length) return;
+    const parsed = parseTaskLine(lines[idx]);
+    if (!parsed.dependsOn) return;
+    parsed.dependsOn = newMarker;
+    lines[idx] = serializeTaskLine(parsed);
+    await writeFileLines(app, tFile, lines);
+  } catch { /* ignore */ }
+}
+
 // Adds the due tag and removes the date from every subtask of a #later card whose @YYYY-MM-DD has arrived.
 async function triggerDatedLaterSubs(
   app: App, subs: any[], filePath: string, config: KanbanConfig, today: Date
@@ -850,6 +884,77 @@ async function popOrphanedRecurrentSubs(app: App, items: any[], config: KanbanCo
     if (!i.item.tags.some((t: string) => normalizeTag(t) === config.normRecurrent)) continue;
     if (!isNoTrigger(i.item.text)) continue;
     await popIfOrphaned(i.item.subs, i.filePath);
+  }
+
+  return changed;
+}
+
+// True if `node` (at `index` within `subs`, its own sibling array) is relied
+// on by another line's dependency marker: either its immediate next sibling
+// depends on it as a predecessor (">"), or any of its own direct children
+// depends on it as a parent ("^"). Used to block permanently deleting a
+// subtask that something else's dependency targets.
+function isDependedOn(node: any, subs: any[], index: number): boolean {
+  const next = subs[index + 1];
+  if (next && parseTaskLine(next.text).dependsOn === ">") return true;
+  return (node.subs || []).some((c: any) => parseTaskLine(c.text).dependsOn === "^");
+}
+
+// Finds the sibling array (some node's own `.subs`, or a card's own
+// `.item.subs`) that directly contains a node with this line number — the
+// level isDependedOn needs to operate on. Returns null if no node in the
+// tree has that line.
+function findSiblingArrayContaining(subs: any[], line: number): any[] | null {
+  if (subs.some((s: any) => s.line === line)) return subs;
+  for (const s of subs) {
+    const found = findSiblingArrayContaining(s.subs || [], line);
+    if (found) return found;
+  }
+  return null;
+}
+
+// Sweeps every card's subtask tree for dependent subtasks (a ">" or "^"
+// marker) whose target is now checked or deleted, tagging each satisfied one
+// into the due column so it shows up as its own actionable card ("promoted"
+// out of the tree). ">" depends on the immediately preceding sibling (by raw
+// array position — a deleted-but-still-present predecessor still counts, and
+// satisfies the dependency); "^" always depends on the parent.
+//
+// A ">" with no preceding sibling (index 0) is not a valid stored state —
+// nothing precedes it — so it's auto-corrected to "^" (the same target it
+// would otherwise have to fall back to) right here, before it's evaluated,
+// so the correction and the promotion check use the same up-to-date marker
+// within this one pass rather than needing a second render cycle.
+async function promoteDependentSubtasks(app: App, items: any[], config: KanbanConfig): Promise<boolean> {
+  let changed = false;
+
+  const tryPromote = async (sub: any, filePath: string): Promise<boolean> => {
+    if (!isCheckboxItem(sub) || isCheckedItem(sub) || isDeletedItem(sub)) return false;
+    if (sub.tags.some((t: string) => config.normKanban.includes(normalizeTag(t)))) return false;
+    await addTagToLine(app, filePath, sub.line, config.dueColumn);
+    return true;
+  };
+
+  const evaluate = async (subs: any[], parent: any, filePath: string): Promise<void> => {
+    for (let i = 0; i < subs.length; i++) {
+      const sub = subs[i];
+      const parsed = parseTaskLine(sub.text);
+      if (parsed.dependsOn) {
+        if (parsed.dependsOn === ">" && i === 0) {
+          await toggleDependencyMarker(app, filePath, sub.line, "^");
+          changed = true;
+          parsed.dependsOn = "^";
+        }
+        const target = parsed.dependsOn === ">" ? subs[i - 1] : parent;
+        const satisfied = isDeletedItem(target) || isCheckedItem(target);
+        if (satisfied && (await tryPromote(sub, filePath))) changed = true;
+      }
+      if (sub.subs?.length) await evaluate(sub.subs, sub, filePath);
+    }
+  };
+
+  for (const i of items) {
+    await evaluate(i.item.subs, i.item, i.filePath);
   }
 
   return changed;
@@ -2151,7 +2256,14 @@ async function deleteCardOrSubtask(
   isCard: boolean,
   hasSubtasks: boolean,
   subs: any[],
-  isPromoted: boolean
+  isPromoted: boolean,
+  // True when some later sibling's ">" (or a direct child's "^") depends on
+  // this subtask — see isDependedOn. Permanently removing the line would
+  // corrupt that dependent's positional/parent bookkeeping, so only marking
+  // it deleted (never a physical remove) is offered. Only ever meaningful
+  // for a subtask, never a whole card — dependencies are always between
+  // sibling subtasks.
+  hasDependents: boolean = false
 ): Promise<boolean> {
   const markDeleted = async () => {
     await markLineDeleted(app, filePath, lineNum, config);
@@ -2160,7 +2272,7 @@ async function deleteCardOrSubtask(
     }
   };
 
-  if (isCard && hasSubtasks) {
+  if ((isCard && hasSubtasks) || hasDependents) {
     await markDeleted();
     return true;
   }
@@ -4218,6 +4330,10 @@ function createCardHTML(
   const rawText = display
     .replace(/^- \[[ xX]\] /, "")
     .replace(/^[-*+]\s+/, "")
+    // A promoted dependent subtask renders through this card-title path —
+    // its leading ">"/"^" marker is meaningful on a subtask row but not on
+    // a card title, so it's stripped here only.
+    .replace(/^[>^]\s+/, "")
     .trim();
   const mainContent = formatInlineEmphasis(linksToHtml(formatCardDateAnnotation(formatTriggerAnnotations(rawText, config.normRecurrent)), vaultName), TITLE_FONT_WEIGHT);
 
@@ -5099,6 +5215,10 @@ export async function buildBoard(
     // Step D: pop subtasks that will never fire (see popOrphanedRecurrentSubs) into Due
     if (await popOrphanedRecurrentSubs(app, items, config)) items = await collectItems(app, paths, config);
   }
+
+  // Step E: promote dependent subtasks (">"/"^" markers) whose predecessor/
+  // parent is done or deleted into Due (see promoteDependentSubtasks).
+  if (await promoteDependentSubtasks(app, items, config)) items = await collectItems(app, paths, config);
 
   // items is now settled for this build — consume any pending force-expand
   // flags against this final list (collectItems only peeked them, since it
@@ -6167,11 +6287,22 @@ export function attachListeners(
         // Clearing a subtask's text asks whether to mark it #deleted (it then
         // stays out of the board's rendering and counts, riding along
         // normally whenever its parent card is next archived) or remove it
-        // outright, along with anything nested under it.
+        // outright, along with anything nested under it — unless a later
+        // sibling's dependency reaches back to this one, in which case only
+        // marking it deleted is offered (see deleteCardOrSubtask).
         const lastLine = parseInt(subRow.dataset.subLastLine || `${lineNum}`, 10);
+        let hasDependents = false;
+        try {
+          const cardSubs = JSON.parse(card.dataset.subs || "[]");
+          const siblingArr = findSiblingArrayContaining(cardSubs, lineNum);
+          if (siblingArr) {
+            const idx = siblingArr.findIndex((s: any) => s.line === lineNum);
+            hasDependents = idx >= 0 && isDependedOn(siblingArr[idx], siblingArr, idx);
+          }
+        } catch { /* ignore malformed subs */ }
         const changed = await deleteCardOrSubtask(
           app, filePath, lineNum, lastLine, config,
-          false, false, [], false
+          false, false, [], false, hasDependents
         );
         if (changed) requestAnimationFrame(() => setTimeout(refresh, 50));
         else subRow.innerHTML = savedHTML;
