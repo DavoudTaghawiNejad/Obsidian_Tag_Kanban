@@ -888,7 +888,8 @@ function renderCheckbox(text, opts = {}) {
     promoted = false,
     subLine = null,
     parentTag = null,
-    parentDigits = null
+    parentDigits = null,
+    depToggle
   } = opts;
   let content = text.trim();
   let cbHtml = "";
@@ -906,12 +907,20 @@ function renderCheckbox(text, opts = {}) {
     content = content.replace(/^[-*+]\s+/, "");
     cbHtml = showCheckbox ? `<input type="checkbox" disabled style="width:1em;height:1em;margin-right:5px;vertical-align:middle;">` : "\u2022 ";
   }
+  let toggleHtml = "";
+  if (depToggle) {
+    const mm = content.match(/^([>^])\s+/);
+    const marker = mm ? mm[1] : null;
+    if (mm)
+      content = content.slice(mm[0].length);
+    toggleHtml = `<span class="kb-dep-toggle" data-line="${subLine ?? ""}" data-marker="${marker ?? ""}" data-has-predecessor="${depToggle.hasPredecessor}" style="cursor:pointer;font-weight:bold;pointer-events:auto;" title="Click to cycle predecessor/parent dependency">${marker ?? "_"}</span> `;
+  }
   if (vaultName)
     content = linksToHtml(content, vaultName);
   content = formatInlineEmphasis(content);
   const promoteHtml = enablePromotion && isSub && subLine && parentTag && parentDigits !== null ? `<span class="promote-icon" style="margin-left:6px;font-size:1.2em;cursor:pointer;color:var(--kb-accent);"
            data-line="${subLine}" data-parent-tag="${parentTag}" data-parent-digits="${parentDigits}">&#9655</span>` : promoted && isSub ? `<span class="promoted-icon" title="Already its own card" style="margin-left:6px;font-size:1.2em;color:var(--kb-accent);">&#9679;</span>` : "";
-  return `${cbHtml}${content}${promoteHtml}`;
+  return `${cbHtml}${toggleHtml}${content}${promoteHtml}`;
 }
 var fileLineCache = /* @__PURE__ */ new Map();
 var fileEntryCache = /* @__PURE__ */ new Map();
@@ -1016,34 +1025,6 @@ async function updateCardColor(app, filePath, lineNum, color) {
   const parsed = parseTaskLine(lines[lineNum - 1]);
   parsed.color = color;
   lines[lineNum - 1] = serializeTaskLine(parsed);
-  await writeFileLines(app, tFile, lines);
-}
-async function reorderSubtasks(app, filePath, subs, newVisibleOrder, deletedGoLast = false) {
-  if (subs.length < 2)
-    return;
-  const { tFile, lines } = await readFileLines(app, filePath);
-  const blocks = /* @__PURE__ */ new Map();
-  for (let i = 0; i < subs.length; i++) {
-    const start = subs[i].line;
-    const end = i < subs.length - 1 ? subs[i + 1].line - 1 : maxSubLine(subs[i].subs) || subs[i].line;
-    blocks.set(start, lines.slice(start - 1, end));
-  }
-  const originalOrder = subs.map((s) => s.line);
-  const visibleSet = new Set(newVisibleOrder);
-  let finalOrder;
-  if (deletedGoLast) {
-    const deletedLines = originalOrder.filter((line) => !visibleSet.has(line));
-    finalOrder = [...newVisibleOrder, ...deletedLines];
-  } else {
-    let cursor = 0;
-    finalOrder = originalOrder.map(
-      (line) => visibleSet.has(line) ? newVisibleOrder[cursor++] : line
-    );
-  }
-  const firstLine = originalOrder[0];
-  const totalLen = originalOrder.reduce((n, line) => n + (blocks.get(line)?.length ?? 0), 0);
-  const replacement = finalOrder.flatMap((line) => blocks.get(line) ?? []);
-  lines.splice(firstLine - 1, totalLen, ...replacement);
   await writeFileLines(app, tFile, lines);
 }
 async function updateCardTriggers(app, filePath, lineNum, normRecurrent, newTriggerStr) {
@@ -2572,41 +2553,200 @@ var CARD_COLOR_GRAY = "#888888";
 var CARD_COLOR_SATURATION = 65;
 var CARD_COLOR_LIGHTNESS = 55;
 var CARD_COLOR_NONE_SWATCH_BG = "repeating-linear-gradient(45deg, var(--background-modifier-border), var(--background-modifier-border) 3px, transparent 3px, transparent 7px)";
-function wireSubtaskDrag(app, col, subtasks, onEditSubtask, onDeleteSubtask, onOrderChange, setEscapeHandler, dialogEscapeDefault) {
-  const doc = col.ownerDocument;
+function computeTrailingMap(lines, subs) {
+  const allLines = /* @__PURE__ */ new Set();
+  collectSubLineNumbers(subs, allLines);
+  const sorted = Array.from(allLines).sort((a, b) => a - b);
+  const endLine = maxSubLine(subs) || 0;
+  const map = /* @__PURE__ */ new Map();
+  for (let i = 0; i < sorted.length; i++) {
+    const line = sorted[i];
+    const nextLine = i + 1 < sorted.length ? sorted[i + 1] : endLine + 1;
+    map.set(line, lines.slice(line, nextLine - 1));
+  }
+  return map;
+}
+function buildDialogTree(lines, subs) {
+  const trailingMap = computeTrailingMap(lines, subs);
+  const build = (s) => ({
+    id: s.line,
+    raw: s.text,
+    trailingRaw: trailingMap.get(s.line) || [],
+    children: (s.subs || []).map(build)
+  });
+  return subs.map(build);
+}
+function groupChainDependents(siblings) {
+  const groups = [];
+  let attachTo = null;
+  for (const s of siblings) {
+    const parsed = parseTaskLine(s.raw);
+    const deleted = parsed.tags.some(isDeletedTag);
+    const isChainDependent = !deleted && parsed.dependsOn === ">";
+    if (isChainDependent && attachTo) {
+      attachTo.chain.push(s);
+    } else {
+      const group = { head: s, chain: [], deleted };
+      groups.push(group);
+      if (!deleted)
+        attachTo = group;
+    }
+  }
+  return groups;
+}
+function findNode(root, id) {
+  if (root.id === id)
+    return root;
+  for (const c of root.children) {
+    const found = findNode(c, id);
+    if (found)
+      return found;
+  }
+  return null;
+}
+function findParentOf(root, id) {
+  for (const c of root.children) {
+    if (c.id === id)
+      return root;
+    const found = findParentOf(c, id);
+    if (found)
+      return found;
+  }
+  return null;
+}
+function isSelfOrDescendant(node, id) {
+  if (node.id === id)
+    return true;
+  return node.children.some((c) => isSelfOrDescendant(c, id));
+}
+function moveGroup(root, headId, newParentId, newGroupIndex) {
+  const oldParent = findParentOf(root, headId);
+  if (!oldParent)
+    return false;
+  const oldGroups = groupChainDependents(oldParent.children);
+  const group = oldGroups.find((g) => g.head.id === headId);
+  if (!group || group.deleted)
+    return false;
+  const unit = [group.head, ...group.chain];
+  const newParent = findNode(root, newParentId);
+  if (!newParent)
+    return false;
+  if (unit.some((n) => isSelfOrDescendant(n, newParentId)))
+    return false;
+  const unitIds = new Set(unit.map((n) => n.id));
+  oldParent.children = oldParent.children.filter((c) => !unitIds.has(c.id));
+  const parsed = parseTaskLine(group.head.raw);
+  if (parsed.dependsOn === ">") {
+    parsed.dependsOn = "^";
+    group.head.raw = serializeTaskLine(parsed);
+  }
+  const newGroups = groupChainDependents(newParent.children).filter((g) => !g.deleted);
+  const rawInsertIdx = newGroupIndex >= newGroups.length ? newParent.children.length : newParent.children.findIndex((c) => c.id === newGroups[newGroupIndex].head.id);
+  newParent.children.splice(rawInsertIdx, 0, ...unit);
+  return true;
+}
+function sortTopLevelOpenDone(root) {
+  const groups = groupChainDependents(root.children);
+  const real = groups.filter((g) => !g.deleted);
+  const deletedNodes = root.children.filter((c) => parseTaskLine(c.raw).tags.some(isDeletedTag));
+  const plain = real.filter((g) => parseTaskLine(g.head.raw).checked === null);
+  const open = real.filter((g) => parseTaskLine(g.head.raw).checked === false);
+  const done = real.filter((g) => parseTaskLine(g.head.raw).checked === true);
+  const flatten = (gs) => gs.flatMap((g) => [g.head, ...g.chain]);
+  root.children = [...flatten(plain), ...flatten(open), ...flatten(done), ...deletedNodes];
+}
+function serializeDialogTree(root, depth = 1) {
+  const out = [];
+  for (const node of root.children) {
+    out.push("	".repeat(depth) + node.raw);
+    out.push(...node.trailingRaw);
+    out.push(...serializeDialogTree(node, depth + 1));
+  }
+  return out;
+}
+async function applySubtaskTree(app, filePath, cardLineNum, root, config) {
+  const { tFile, lines } = await readFileLines(app, filePath);
+  const fileItems = parseFileEntries(lines, filePath, config);
+  const card = fileItems.find((f) => f.item.line === cardLineNum);
+  if (!card || !card.item.subs.length)
+    return;
+  const startLine = card.item.subs[0].line;
+  const endLine = maxSubLine(card.item.subs) || cardLineNum;
+  const newBlock = serializeDialogTree(root);
+  lines.splice(startLine - 1, endLine - startLine + 1, ...newBlock);
+  await writeFileLines(app, tFile, lines);
+}
+function wireSubtaskTree(app, containerEl, titleEl, root, config, onEditSubtask, onDeleteSubtask, onToggleDependencyMarker, onChange, setEscapeHandler, dialogEscapeDefault) {
+  const doc = containerEl.ownerDocument;
   const DRAG_DELAY = 200, MOVE_THRESHOLD = 6;
-  let order = subtasks.map((s) => s.line);
-  const rowMap = /* @__PURE__ */ new Map();
-  for (const s of subtasks) {
+  let dirty = false;
+  const rowEls = /* @__PURE__ */ new Map();
+  let slots = [];
+  const makeSlot = (parentId, index) => {
+    const s = doc.createElement("div");
+    s.className = "kb-subtask-slot";
+    s.style.cssText = "height:12px;margin:-6px 0;border-top:2px dashed transparent;width:100%;";
+    slots.push({ el: s, parentId, index });
+    return s;
+  };
+  const buildRow = (node, draggable, hasPredecessor) => {
     const row = doc.createElement("div");
     row.className = "kb-subtask-row";
-    row.dataset.subLine = String(s.line);
-    row.dataset.subRaw = s.raw;
-    row.style.cssText = "display:flex;align-items:center;gap:10px;padding:14px 16px;background:var(--kb-card-bg,var(--background-primary));border:1px solid var(--background-modifier-border);border-radius:10px;cursor:grab;text-align:left;box-shadow:0 1px 3px rgba(0,0,0,.08);";
-    const handle = doc.createElement("span");
-    handle.textContent = "\u283F";
-    handle.setAttribute("aria-hidden", "true");
-    handle.style.cssText = "color:var(--text-faint);font-size:1.2em;line-height:1;flex-shrink:0;user-select:none;";
+    row.dataset.id = String(node.id);
+    if (draggable)
+      row.dataset.draggable = "1";
+    row.style.cssText = `display:flex;flex-direction:column;gap:8px;padding:14px 16px;background:var(--kb-card-bg,var(--background-primary));border:1px solid var(--background-modifier-border);border-radius:10px;cursor:${draggable ? "grab" : "default"};text-align:left;box-shadow:0 1px 3px rgba(0,0,0,.08);`;
+    const mainLine = doc.createElement("div");
+    mainLine.style.cssText = "display:flex;align-items:center;gap:10px;";
+    if (draggable) {
+      const handle = doc.createElement("span");
+      handle.textContent = "\u283F";
+      handle.setAttribute("aria-hidden", "true");
+      handle.style.cssText = "color:var(--text-faint);font-size:1.2em;line-height:1;flex-shrink:0;user-select:none;";
+      mainLine.appendChild(handle);
+    }
     const label = doc.createElement("span");
     label.className = "kb-subtask-label";
     label.style.cssText = `flex:1;min-width:0;pointer-events:none;overflow-wrap:anywhere;font-weight:${TITLE_FONT_WEIGHT};line-height:1.4;`;
-    label.innerHTML = s.labelHtml;
-    row.append(handle, label);
-    rowMap.set(s.line, row);
-  }
-  const makeSlot = (idx) => {
-    const s = doc.createElement("div");
-    s.className = "kb-subtask-slot";
-    s.dataset.index = String(idx);
-    s.style.cssText = "height:12px;margin:-6px 0;border-top:2px dashed transparent;width:100%;";
-    return s;
+    label.innerHTML = renderSubtaskPreviewHTML({ text: node.raw, line: node.id }, config, hasPredecessor);
+    mainLine.appendChild(label);
+    row.appendChild(mainLine);
+    rowEls.set(node.id, row);
+    return row;
   };
-  const setClamp = (lines) => {
-    rowMap.forEach((row) => {
-      const label = row.querySelector(".kb-subtask-label");
+  const renderInto = (container, parent) => {
+    container.innerHTML = "";
+    const groups = groupChainDependents(parent.children).filter((g) => !g.deleted);
+    container.appendChild(makeSlot(parent.id, 0));
+    groups.forEach((g, i) => {
+      appendUnit(container, parent, g.head, true);
+      for (const chainNode of g.chain)
+        appendUnit(container, parent, chainNode, false);
+      container.appendChild(makeSlot(parent.id, i + 1));
+    });
+  };
+  const appendUnit = (container, parent, node, draggable) => {
+    const hasPredecessor = parent.children.findIndex((c) => c.id === node.id) > 0;
+    const row = buildRow(node, draggable, hasPredecessor);
+    container.appendChild(row);
+    const childWrap = doc.createElement("div");
+    childWrap.style.cssText = "display:flex;flex-direction:column;gap:8px;padding-left:26px;margin-top:8px;";
+    row.appendChild(childWrap);
+    renderInto(childWrap, node);
+  };
+  const render = () => {
+    rowEls.clear();
+    slots = [];
+    renderInto(containerEl, root);
+    adjustClamping();
+    onChange(dirty);
+  };
+  const setClamp = (n) => {
+    rowEls.forEach((row) => {
+      const label = row.querySelector(":scope > div > .kb-subtask-label");
       if (!label)
         return;
-      if (lines === 0) {
+      if (n === 0) {
         label.style.removeProperty("display");
         label.style.removeProperty("-webkit-box-orient");
         label.style.removeProperty("-webkit-line-clamp");
@@ -2614,14 +2754,14 @@ function wireSubtaskDrag(app, col, subtasks, onEditSubtask, onDeleteSubtask, onO
       } else {
         label.style.setProperty("display", "-webkit-box");
         label.style.setProperty("-webkit-box-orient", "vertical");
-        label.style.setProperty("-webkit-line-clamp", String(lines));
+        label.style.setProperty("-webkit-line-clamp", String(n));
         label.style.setProperty("overflow", "hidden");
       }
     });
   };
-  const fitsWithoutScroll = () => col.scrollHeight <= col.clientHeight + 1;
+  const fitsWithoutScroll = () => containerEl.scrollHeight <= containerEl.clientHeight + 1;
   const adjustClamping = () => {
-    if (col.clientHeight === 0)
+    if (containerEl.clientHeight === 0)
       return;
     setClamp(0);
     if (fitsWithoutScroll())
@@ -2631,33 +2771,21 @@ function wireSubtaskDrag(app, col, subtasks, onEditSubtask, onDeleteSubtask, onO
       return;
     setClamp(1);
   };
-  const rebuild = () => {
-    col.innerHTML = "";
-    col.appendChild(makeSlot(0));
-    order.forEach((line, i) => {
-      col.appendChild(rowMap.get(line));
-      col.appendChild(makeSlot(i + 1));
-    });
-    adjustClamping();
-    onOrderChange(order.slice());
-  };
-  rebuild();
-  const removeRow = (line) => {
-    order = order.filter((l) => l !== line);
-    rowMap.delete(line);
-    rebuild();
-  };
+  render();
   const onRowDblClick = async (e) => {
     const row = e.target.closest(".kb-subtask-row");
     if (!row)
       return;
     if (row.querySelector(".card-edit-input"))
       return;
-    const label = row.querySelector(".kb-subtask-label");
+    const label = row.querySelector(":scope > div > .kb-subtask-label");
     if (!label)
       return;
-    const line = parseInt(row.dataset.subLine, 10);
-    const raw = row.dataset.subRaw || "";
+    const line = parseInt(row.dataset.id, 10);
+    const node = findNode(root, line);
+    if (!node)
+      return;
+    const raw = node.raw;
     const savedHTML = label.innerHTML;
     const input = doc.createElement("textarea");
     input.value = raw;
@@ -2691,14 +2819,15 @@ function wireSubtaskDrag(app, col, subtasks, onEditSubtask, onDeleteSubtask, onO
       if (save && !newText) {
         const ok = await onDeleteSubtask(line);
         if (ok)
-          removeRow(line);
+          dialogEscapeDefault();
         else
           label.innerHTML = savedHTML;
       } else if (save && newText !== raw) {
-        row.dataset.subRaw = newText;
         const newLabelHtml = await onEditSubtask(line, newText);
-        label.innerHTML = newLabelHtml ?? savedHTML;
-        adjustClamping();
+        if (newLabelHtml !== null)
+          dialogEscapeDefault();
+        else
+          label.innerHTML = savedHTML;
       } else {
         label.innerHTML = savedHTML;
       }
@@ -2719,43 +2848,107 @@ function wireSubtaskDrag(app, col, subtasks, onEditSubtask, onDeleteSubtask, onO
       input.setSelectionRange(input.value.length, input.value.length);
     }));
   };
-  col.addEventListener("dblclick", onRowDblClick);
-  let dragLine = null;
+  containerEl.addEventListener("dblclick", onRowDblClick);
+  let suppressToggleClick = false;
+  const onToggleClick = async (e) => {
+    if (suppressToggleClick) {
+      suppressToggleClick = false;
+      return;
+    }
+    const target = e.target.closest(".kb-dep-toggle");
+    if (!target)
+      return;
+    const line = parseInt(target.dataset.line, 10);
+    if (isNaN(line))
+      return;
+    const marker = target.dataset.marker || null;
+    const hasPredecessor = target.dataset.hasPredecessor === "true";
+    const cycle = hasPredecessor ? [">", "^", null] : ["^", null];
+    const idx = cycle.indexOf(marker);
+    const newMarker = cycle[idx === -1 ? 0 : (idx + 1) % cycle.length];
+    await onToggleDependencyMarker(line, newMarker);
+    dialogEscapeDefault();
+  };
+  containerEl.addEventListener("click", onToggleClick);
+  let dragId = null;
   let ghost = null;
-  let insertIndex = -1;
+  let hoverSlot = null;
+  let hoverTargetEl = null;
   let activeMove = null;
   let activeUp = null;
-  const clearHighlight = () => col.querySelectorAll(".kb-subtask-slot").forEach((s) => s.style.borderTopColor = "transparent");
-  const highlightNearest = (clientY) => {
-    let nearest = null, minDist = Infinity;
-    col.querySelectorAll(".kb-subtask-slot").forEach((s) => {
-      const r = s.getBoundingClientRect();
+  const clearSlotHighlight = () => slots.forEach((s) => s.el.style.borderTopColor = "transparent");
+  const clearTargetHighlight = () => {
+    if (!hoverTargetEl)
+      return;
+    hoverTargetEl.style.outline = "";
+    hoverTargetEl.style.outlineOffset = "";
+    hoverTargetEl = null;
+  };
+  const updateHover = (clientX, clientY) => {
+    clearSlotHighlight();
+    clearTargetHighlight();
+    hoverSlot = null;
+    if (dragId === null)
+      return;
+    const oldParent = findParentOf(root, dragId);
+    if (!oldParent)
+      return;
+    const group = groupChainDependents(oldParent.children).find((g) => g.head.id === dragId);
+    if (!group)
+      return;
+    const unit = [group.head, ...group.chain];
+    let nearestSlot = null, minDist = Infinity;
+    for (const s of slots) {
+      if (unit.some((n) => isSelfOrDescendant(n, s.parentId)))
+        continue;
+      const r = s.el.getBoundingClientRect();
       const dist = Math.abs(r.top + r.height / 2 - clientY);
       if (dist < minDist) {
         minDist = dist;
-        nearest = s;
+        nearestSlot = s;
       }
-    });
-    clearHighlight();
-    if (nearest) {
-      nearest.style.borderTopColor = "var(--kb-accent)";
-      insertIndex = parseInt(nearest.dataset.index, 10);
+    }
+    const titleRect = titleEl.getBoundingClientRect();
+    const titleDist = Math.abs(titleRect.top + titleRect.height / 2 - clientY);
+    if (titleDist < minDist) {
+      hoverSlot = { parentId: root.id, index: 0 };
+      hoverTargetEl = titleEl;
+      titleEl.style.outline = "2px solid var(--kb-accent)";
+      titleEl.style.outlineOffset = "2px";
+      return;
+    }
+    if (nearestSlot) {
+      nearestSlot.el.style.borderTopColor = "var(--kb-accent)";
+      hoverSlot = { parentId: nearestSlot.parentId, index: nearestSlot.index };
+      if (nearestSlot.parentId !== oldParent.id && nearestSlot.parentId !== root.id) {
+        const ownerRow = rowEls.get(nearestSlot.parentId);
+        if (ownerRow) {
+          hoverTargetEl = ownerRow;
+          ownerRow.style.outline = "2px solid var(--kb-accent)";
+          ownerRow.style.outlineOffset = "2px";
+        }
+      }
     }
   };
   const makeGhost = (row) => {
     const r = row.getBoundingClientRect();
-    const g = row.cloneNode(true);
+    const mainLine = row.querySelector(":scope > div");
+    const g = doc.createElement("div");
+    g.style.cssText = row.style.cssText;
     Object.assign(g.style, {
       position: "fixed",
       left: `${r.left}px`,
       top: `${r.top}px`,
       width: `${r.width}px`,
-      opacity: ".85",
+      height: "auto",
+      opacity: ".9",
       pointerEvents: "none",
       zIndex: "10002",
       boxShadow: "0 8px 24px rgba(0,0,0,.25)",
       cursor: "grabbing"
     });
+    if (mainLine)
+      g.appendChild(mainLine.cloneNode(true));
     doc.body.appendChild(g);
     return g;
   };
@@ -2766,34 +2959,36 @@ function wireSubtaskDrag(app, col, subtasks, onEditSubtask, onDeleteSubtask, onO
     ghost.style.top = `${clientY - ghost.offsetHeight / 2}px`;
   };
   const startDrag = (row, clientX, clientY) => {
-    dragLine = parseInt(row.dataset.subLine, 10);
+    dragId = parseInt(row.dataset.id, 10);
     ghost = makeGhost(row);
     row.style.opacity = ".3";
     moveGhost(clientX, clientY);
   };
   const endDrag = () => {
-    if (dragLine !== null && insertIndex >= 0) {
-      const oldIdx = order.indexOf(dragLine);
-      const newOrder = order.filter((l) => l !== dragLine);
-      const target = oldIdx < insertIndex ? insertIndex - 1 : insertIndex;
-      newOrder.splice(target, 0, dragLine);
-      order = newOrder;
-      rebuild();
+    const draggedRowEl = dragId !== null ? rowEls.get(dragId) ?? null : null;
+    let moved = false;
+    if (dragId !== null && hoverSlot) {
+      if (moveGroup(root, dragId, hoverSlot.parentId, hoverSlot.index)) {
+        dirty = true;
+        moved = true;
+        render();
+      }
     }
     if (ghost) {
       ghost.remove();
       ghost = null;
     }
-    if (dragLine !== null)
-      rowMap.get(dragLine).style.opacity = "";
-    clearHighlight();
-    dragLine = null;
-    insertIndex = -1;
+    if (!moved)
+      draggedRowEl?.style.removeProperty("opacity");
+    clearSlotHighlight();
+    clearTargetHighlight();
+    dragId = null;
+    hoverSlot = null;
   };
   const onMouseDown = (e) => {
     if (e.target.closest(".card-edit-input"))
       return;
-    const row = e.target.closest(".kb-subtask-row");
+    const row = e.target.closest(".kb-subtask-row[data-draggable='1']");
     if (!row)
       return;
     const startX = e.clientX, startY = e.clientY;
@@ -2806,15 +3001,17 @@ function wireSubtaskDrag(app, col, subtasks, onEditSubtask, onDeleteSubtask, onO
         startDrag(row, me.clientX, me.clientY);
       }
       moveGhost(me.clientX, me.clientY);
-      highlightNearest(me.clientY);
+      updateHover(me.clientX, me.clientY);
     };
     const onUp = () => {
       doc.removeEventListener("mousemove", onMove);
       doc.removeEventListener("mouseup", onUp);
       activeMove = null;
       activeUp = null;
-      if (dragging)
+      if (dragging) {
+        suppressToggleClick = true;
         endDrag();
+      }
     };
     activeMove = onMove;
     activeUp = onUp;
@@ -2827,9 +3024,9 @@ function wireSubtaskDrag(app, col, subtasks, onEditSubtask, onDeleteSubtask, onO
   const onTouchStart = (e) => {
     if (e.touches.length !== 1)
       return;
-    if (col.querySelector(".card-edit-input"))
+    if (containerEl.querySelector(".card-edit-input"))
       return;
-    const row = e.target.closest(".kb-subtask-row");
+    const row = e.target.closest(".kb-subtask-row[data-draggable='1']");
     if (!row)
       return;
     touchRow = row;
@@ -2858,36 +3055,39 @@ function wireSubtaskDrag(app, col, subtasks, onEditSubtask, onDeleteSubtask, onO
       }
     }
     moveGhost(t.clientX, t.clientY);
-    highlightNearest(t.clientY);
+    updateHover(t.clientX, t.clientY);
     e.preventDefault();
   };
   const onTouchEnd = () => {
     if (touchTimer)
       clearTimeout(touchTimer);
-    if (touchDragging)
+    if (touchDragging) {
+      suppressToggleClick = true;
       endDrag();
+    }
     touchRow = null;
     touchDragging = false;
   };
-  col.addEventListener("mousedown", onMouseDown);
-  col.addEventListener("touchstart", onTouchStart, { passive: true });
-  col.addEventListener("touchmove", onTouchMove, { passive: false });
-  col.addEventListener("touchend", onTouchEnd);
-  col.addEventListener("touchcancel", onTouchEnd);
+  containerEl.addEventListener("mousedown", onMouseDown);
+  containerEl.addEventListener("touchstart", onTouchStart, { passive: true });
+  containerEl.addEventListener("touchmove", onTouchMove, { passive: false });
+  containerEl.addEventListener("touchend", onTouchEnd);
+  containerEl.addEventListener("touchcancel", onTouchEnd);
   return {
-    getOrder: () => order.slice(),
-    setOrder: (newOrder) => {
-      order = newOrder.slice();
-      rebuild();
+    sortOpenDone: () => {
+      sortTopLevelOpenDone(root);
+      dirty = true;
+      render();
     },
     refreshClamping: () => adjustClamping(),
     destroy: () => {
-      col.removeEventListener("mousedown", onMouseDown);
-      col.removeEventListener("touchstart", onTouchStart);
-      col.removeEventListener("touchmove", onTouchMove);
-      col.removeEventListener("touchend", onTouchEnd);
-      col.removeEventListener("touchcancel", onTouchEnd);
-      col.removeEventListener("dblclick", onRowDblClick);
+      containerEl.removeEventListener("mousedown", onMouseDown);
+      containerEl.removeEventListener("click", onToggleClick);
+      containerEl.removeEventListener("touchstart", onTouchStart);
+      containerEl.removeEventListener("touchmove", onTouchMove);
+      containerEl.removeEventListener("touchend", onTouchEnd);
+      containerEl.removeEventListener("touchcancel", onTouchEnd);
+      containerEl.removeEventListener("dblclick", onRowDblClick);
       if (activeMove)
         doc.removeEventListener("mousemove", activeMove);
       if (activeUp)
@@ -2899,9 +3099,10 @@ function wireSubtaskDrag(app, col, subtasks, onEditSubtask, onDeleteSubtask, onO
     }
   };
 }
-function showCardColorDialog(app, existingColor, title, subtasks, onApply, onReorder, onDelete, onEditSubtask, onDeleteSubtask, onArchiveDoneSubtasks) {
+function showCardColorDialog(app, existingColor, title, cardLineNum, subtaskTree, config, onApply, onReorder, onDelete, onEditSubtask, onDeleteSubtask, onToggleDependencyMarker, onArchiveDoneSubtasks) {
   const { dialog, close, setEscapeHandler } = makeOverlay("kanban-card-color-dialog", app);
   dialog.style.maxWidth = "720px";
+  const root = { id: cardLineNum, raw: "", trailingRaw: [], children: subtaskTree };
   const validExisting = existingColor && /^#[0-9a-fA-F]{6}$/.test(existingColor) ? existingColor : null;
   const existingHsl = validExisting ? hexToHsl(validExisting) : null;
   let selectedHue = !existingHsl ? -2 : existingHsl.l > 90 ? -2 : existingHsl.s < 10 ? -1 : CARD_COLOR_HUES.reduce((best, [, h]) => Math.abs(h - existingHsl.h) < Math.abs(best - existingHsl.h) ? h : best, CARD_COLOR_HUES[0][1]);
@@ -2909,7 +3110,7 @@ function showCardColorDialog(app, existingColor, title, subtasks, onApply, onReo
   const swatchesHtml = CARD_COLOR_HUES.map(([name, h]) => `<button type="button" class="kb-color-swatch" data-hue="${h}" title="${name}" style="${swatchBtnStyle(h, h === selectedHue)}"></button>`).join("") + `<button type="button" class="kb-color-swatch" data-hue="-1" title="Gray" style="${swatchBtnStyle(-1, selectedHue === -1)}"></button><button type="button" class="kb-color-swatch" data-hue="-2" title="Default (no color)" style="${swatchBtnStyle(-2, selectedHue === -2)}"></button>`;
   const deleteBtnStyle = "padding:8px 16px;background:var(--text-error, #e03e3e);border:none;border-radius:4px;cursor:pointer;color:#fff;";
   const sortBtnStyle = "align-self:flex-start;flex-shrink:0;margin-bottom:8px;padding:5px 12px;border-radius:6px;border:1px solid var(--background-modifier-border);background:var(--background-secondary);color:var(--text-normal);cursor:pointer;font-size:.85em;";
-  const subtaskSectionHtml = subtasks.length > 0 ? `
+  const subtaskSectionHtml = subtaskTree.length > 0 ? `
     <div id="k-subtask-section" style="margin-top:14px;text-align:left;flex:1;min-height:0;display:flex;flex-direction:column;">
       <div id="k-subtask-toggle" style="font-size:.8em;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;flex-shrink:0;cursor:pointer;display:flex;align-items:center;gap:5px;user-select:none;">
         <span id="k-subtask-arrow" style="font-size:1.1em;line-height:1;color:var(--kb-accent);">\u25BC</span>
@@ -2923,11 +3124,12 @@ function showCardColorDialog(app, existingColor, title, subtasks, onApply, onReo
     </div>` : "";
   dialog.innerHTML = `
     <div style="flex-shrink:0;">
-      <h3 style="margin:0 0 12px;font-size:1.1em;overflow-wrap:anywhere;">${title || "Card"}</h3>
+      <h3 id="k-card-title-row" style="margin:0 0 12px;font-size:1.1em;overflow-wrap:anywhere;border-radius:6px;">${title || "Card"}</h3>
       <div id="k-color-swatches" style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center;">${swatchesHtml}</div>
     </div>
     ${subtaskSectionHtml}
     <div id="k-color-actions" style="flex-shrink:0;margin-top:14px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap;align-items:center;">${buttonHtml("Apply", true)}${buttonHtml("Cancel", false)}<button id="k-color-delete" type="button" style="${deleteBtnStyle}">Delete</button></div>`;
+  const titleRowEl = dialog.querySelector("#k-card-title-row");
   const subtaskColEl = dialog.querySelector("#k-subtask-col");
   const subtaskSection = dialog.querySelector("#k-subtask-section");
   const subtaskToggle = dialog.querySelector("#k-subtask-toggle");
@@ -2937,26 +3139,16 @@ function showCardColorDialog(app, existingColor, title, subtasks, onApply, onReo
   const subtaskBtnRow = dialog.querySelector("#k-subtask-btnrow");
   const deleteBtn = dialog.querySelector("#k-color-delete");
   let subtasksExpanded = false;
-  const updateDeleteVisibility = (currentOrder) => {
-    const orderChanged = currentOrder.length !== subtasks.length || currentOrder.some((line, i) => line !== subtasks[i]?.line);
-    deleteBtn.style.display = subtasksExpanded || orderChanged ? "none" : "";
+  let dirty = false;
+  const refreshDeleteVisibility = () => {
+    deleteBtn.style.display = subtasksExpanded || dirty ? "none" : "";
   };
-  const dragCtl = subtaskColEl ? wireSubtaskDrag(app, subtaskColEl, subtasks, onEditSubtask, onDeleteSubtask, updateDeleteVisibility, setEscapeHandler, () => closeAndCleanup()) : null;
-  const infoByLine = new Map(subtasks.map((s) => [s.line, { hasCheckbox: s.hasCheckbox, checked: s.checked }]));
-  let deletedGoLast = false;
-  subtaskSortBtn?.addEventListener("click", () => {
-    if (!dragCtl)
-      return;
-    const current = dragCtl.getOrder();
-    const plain = current.filter((line) => !infoByLine.get(line)?.hasCheckbox);
-    const open = current.filter((line) => {
-      const info = infoByLine.get(line);
-      return !!info?.hasCheckbox && !info.checked;
-    });
-    const done = current.filter((line) => infoByLine.get(line)?.checked);
-    dragCtl.setOrder([...plain, ...open, ...done]);
-    deletedGoLast = true;
-  });
+  const onTreeChange = (d) => {
+    dirty = d;
+    refreshDeleteVisibility();
+  };
+  const treeCtl = subtaskColEl ? wireSubtaskTree(app, subtaskColEl, titleRowEl, root, config, onEditSubtask, onDeleteSubtask, onToggleDependencyMarker, onTreeChange, setEscapeHandler, () => closeAndCleanup()) : null;
+  subtaskSortBtn?.addEventListener("click", () => treeCtl?.sortOpenDone());
   subtaskArchiveDoneBtn?.addEventListener("click", () => {
     closeAndCleanup();
     onArchiveDoneSubtasks();
@@ -2974,8 +3166,8 @@ function showCardColorDialog(app, existingColor, title, subtasks, onApply, onReo
     dialog.style.flexDirection = subtasksExpanded ? "column" : "";
     dialog.style.overflow = subtasksExpanded ? "hidden" : "";
     if (subtasksExpanded)
-      dragCtl?.refreshClamping();
-    updateDeleteVisibility(dragCtl?.getOrder() ?? subtasks.map((s) => s.line));
+      treeCtl?.refreshClamping();
+    refreshDeleteVisibility();
   };
   applySubtaskExpanded();
   subtaskToggle?.addEventListener("click", () => {
@@ -2985,7 +3177,7 @@ function showCardColorDialog(app, existingColor, title, subtasks, onApply, onReo
   const dialogWindow = dialog.ownerDocument.defaultView;
   const onWindowResize = () => {
     if (subtasksExpanded)
-      dragCtl?.refreshClamping();
+      treeCtl?.refreshClamping();
   };
   dialogWindow?.addEventListener("resize", onWindowResize);
   const swatchWrap = dialog.querySelector("#k-color-swatches");
@@ -3001,17 +3193,17 @@ function showCardColorDialog(app, existingColor, title, subtasks, onApply, onReo
     });
   });
   const closeAndCleanup = () => {
-    dragCtl?.destroy();
+    treeCtl?.destroy();
     dialogWindow?.removeEventListener("resize", onWindowResize);
     close();
   };
   applyBtn.onclick = () => {
-    const finalOrder = dragCtl?.getOrder() ?? null;
+    const finalTree = root.children;
+    const wasDirty = dirty;
     closeAndCleanup();
     onApply(currentHex());
-    if (finalOrder && (deletedGoLast || finalOrder.some((line, i) => line !== subtasks[i].line))) {
-      onReorder(finalOrder, deletedGoLast);
-    }
+    if (wasDirty)
+      onReorder(finalTree);
   };
   cancelBtn.onclick = closeAndCleanup;
   deleteBtn.onclick = () => {
@@ -3088,10 +3280,10 @@ function cleanSubtaskText(subText, config) {
   const raw = formatted.replace(/^- \[[ xX]\] /, "").replace(/^[-*+]\s+/, "").trim();
   return { hasCheckbox, formatted, raw };
 }
-function renderSubtaskPreviewHTML(sub, config) {
+function renderSubtaskPreviewHTML(sub, config, hasPredecessor = true) {
   const { hasCheckbox, formatted } = cleanSubtaskText(sub.text, config);
   const subText = formatCardDateAnnotation(formatTriggerAnnotations(formatted, config.normRecurrent, false), true);
-  return renderCheckbox(subText, { isSub: false, showCheckbox: hasCheckbox });
+  return renderCheckbox(subText, { isSub: false, showCheckbox: hasCheckbox, subLine: sub.line, depToggle: { hasPredecessor } });
 }
 function createCardHTML(item, isMulti, currentNorm, config, vaultName) {
   let display = item.item.text;
@@ -4057,38 +4249,39 @@ function attachListeners(boardEl, config, app, refresh) {
   searchInputEl?.addEventListener("input", onSearchInput);
   searchClearEl?.addEventListener("click", onSearchClear);
   applyFilter();
-  function openCardColorDialog(card) {
+  async function openCardColorDialog(card) {
     const filePath = card.dataset.file;
     const lineNum = parseInt(card.dataset.line, 10);
     const existing = card.dataset.color || null;
     const vaultName = app.vault.getName();
     const title = buildParentPreviewHTML(card.dataset.raw || "", config, vaultName);
     let subs = [];
+    let tree = [];
     try {
-      subs = JSON.parse(card.dataset.subs || "[]");
+      const { lines } = await readFileLines(app, filePath);
+      const fileItems = parseFileEntries(lines, filePath, config);
+      const cardEntry = fileItems.find((f) => f.item.line === lineNum);
+      subs = cardEntry?.item.subs || [];
+      tree = buildDialogTree(lines, subs);
     } catch {
     }
-    const visibleSubtasks = subs.filter((s) => !extractTags(s.text || "").some(isDeletedTag)).map((s) => {
-      const { hasCheckbox, raw } = cleanSubtaskText(s.text, config);
-      return {
-        line: s.line,
-        labelHtml: renderSubtaskPreviewHTML(s, config),
-        checked: /^- \[[xX]\] /.test(s.text || ""),
-        hasCheckbox,
-        raw
-      };
-    });
     showCardColorDialog(
       app,
       existing,
       title,
-      visibleSubtasks,
+      lineNum,
+      tree,
+      config,
       async (hex) => {
         await updateCardColor(app, filePath, lineNum, hex);
         requestAnimationFrame(() => setTimeout(refresh, 50));
       },
-      async (newOrder, deletedGoLast) => {
-        await reorderSubtasks(app, filePath, subs, newOrder, deletedGoLast);
+      // The whole session's pending reorders/reparents, already folded into
+      // `finalTree` — applySubtaskTree re-derives the card's current line
+      // range fresh and replaces it in one splice (see its own doc comment
+      // for why re-deriving beats trusting this dialog's open-time lines).
+      async (finalTree) => {
+        await applySubtaskTree(app, filePath, lineNum, { id: lineNum, raw: "", trailingRaw: [], children: finalTree }, config);
         requestAnimationFrame(() => setTimeout(refresh, 50));
       },
       async () => {
@@ -4116,22 +4309,28 @@ function attachListeners(boardEl, config, app, refresh) {
         try {
           const { lines } = await readFileLines(app, filePath);
           const rawLine = (lines[subLine - 1] || "").replace(/^\s+/, "");
-          return renderSubtaskPreviewHTML({ text: rawLine }, config);
+          return renderSubtaskPreviewHTML({ text: rawLine, line: subLine }, config);
         } catch {
           return null;
         }
       },
-      // Clearing a subtask's text always marks it deleted (never removes the
-      // line outright, unlike the board's own clear-to-delete flow) — a
-      // physical removal would shift every later subtask's line number out
-      // from under `subs`, corrupting the reorder-on-Apply write above,
-      // which depends on those line numbers staying valid for the whole
-      // dialog session.
+      // Same soft-delete protection as the board's own subtask editor
+      // (onSubDblClick): a subtask something else depends on is always just
+      // marked deleted, never physically removed (see deleteCardOrSubtask).
       async (subLine) => {
-        const ok = await markLineDeleted(app, filePath, subLine, config);
+        const siblingArr = findSiblingArrayContaining(subs, subLine);
+        const idx = siblingArr?.findIndex((s) => s.line === subLine) ?? -1;
+        const node = idx >= 0 ? siblingArr[idx] : null;
+        const hasDependents = !!(node && siblingArr && isDependedOn(node, siblingArr, idx));
+        const lastLine = maxSubLine(node?.subs || []) || subLine;
+        const ok = await deleteCardOrSubtask(app, filePath, subLine, lastLine, config, false, false, [], false, hasDependents);
         if (ok)
           requestAnimationFrame(() => setTimeout(refresh, 50));
         return ok;
+      },
+      async (subLine, newMarker) => {
+        await toggleDependencyMarker(app, filePath, subLine, newMarker);
+        requestAnimationFrame(() => setTimeout(refresh, 50));
       },
       () => {
         archiveDoneSubtasks(app, filePath, lineNum, subs, config).then((result) => {

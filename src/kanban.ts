@@ -1219,6 +1219,15 @@ function renderCheckbox(
     subLine?: number | null;
     parentTag?: string | null;
     parentDigits?: string | null;
+    // Dialog-only: always renders a clickable ">"/"^"/"_" glyph at the front
+    // of the row — "_" stands for no marker — pulling a real leading ">"/"^"
+    // out of plain text when one is present. `hasPredecessor` says whether
+    // ">" is a reachable state for this row's toggle cycle (see the reorder
+    // dialog's marker-toggle click handler); it does not affect what's
+    // rendered, only what the next click can produce. The board's own
+    // renderSub never sets this, so a marker stays plain, unclickable text
+    // there.
+    depToggle?: { hasPredecessor: boolean };
   } = {}
 ): string {
   const {
@@ -1230,6 +1239,7 @@ function renderCheckbox(
     subLine = null,
     parentTag = null,
     parentDigits = null,
+    depToggle,
   } = opts;
 
   let content = text.trim();
@@ -1252,6 +1262,18 @@ function renderCheckbox(
       : "• ";
   }
 
+  let toggleHtml = "";
+  if (depToggle) {
+    const mm = content.match(/^([>^])\s+/);
+    const marker = mm ? (mm[1] as ">" | "^") : null;
+    if (mm) content = content.slice(mm[0].length);
+    // pointer-events:auto is load-bearing: the dialog wraps this whole
+    // label in pointer-events:none (so a click anywhere on the row starts a
+    // drag instead of being swallowed by inner content), which would
+    // otherwise make this span just as unclickable as everything else.
+    toggleHtml = `<span class="kb-dep-toggle" data-line="${subLine ?? ""}" data-marker="${marker ?? ""}" data-has-predecessor="${depToggle.hasPredecessor}" style="cursor:pointer;font-weight:bold;pointer-events:auto;" title="Click to cycle predecessor/parent dependency">${marker ?? "_"}</span> `;
+  }
+
   if (vaultName) content = linksToHtml(content, vaultName);
   content = formatInlineEmphasis(content);
 
@@ -1263,7 +1285,7 @@ function renderCheckbox(
         ? `<span class="promoted-icon" title="Already its own card" style="margin-left:6px;font-size:1.2em;color:var(--kb-accent);">&#9679;</span>`
         : "";
 
-  return `${cbHtml}${content}${promoteHtml}`;
+  return `${cbHtml}${toggleHtml}${content}${promoteHtml}`;
 }
 
 // ─── FILE OPERATIONS ──────────────────────────────────────────────────────────
@@ -3628,81 +3650,359 @@ const CARD_COLOR_LIGHTNESS = 55;
 const CARD_COLOR_NONE_SWATCH_BG =
   "repeating-linear-gradient(45deg, var(--background-modifier-border), var(--background-modifier-border) 3px, transparent 3px, transparent 7px)";
 
-// Self-contained drag-to-reorder for the subtask list inside the card
-// dialog — deliberately not the board's own drag machinery (attachListeners,
-// ~4109+), which is tightly coupled to cross-column/tag/order-digit logic
-// that doesn't apply to a single static list. Reordering here only ever
-// touches this list's own DOM/local state; nothing is written to disk until
-// the caller reads getOrder() (on Apply).
-function wireSubtaskDrag(
+// ─── SUBTASK TREE (dialog-owned, in-memory) ──────────────────────────────────
+// One in-memory tree backs the whole "Order Subtasks" dialog session: every
+// reorder and reparent mutates it directly, and nothing is written to disk
+// until Apply serializes the final tree in one pass (see applySubtaskTree).
+// This unifies same-level reorder and cross-card reparent into a single move
+// primitive (moveGroup) instead of two separate code paths, each with its
+// own position-awareness and its own idea of "moved" — which is what let a
+// reparent land in the wrong spot (always appended last) while an ordinary
+// reorder stayed correct.
+
+interface DialogNode {
+  id: number;             // original line number — a stable identity for the dialog session, not a live file position once anything has moved
+  raw: string;             // this node's own line text, without leading whitespace (indentation is recomputed from tree depth on write)
+  trailingRaw: string[];   // any non-list lines (blank lines, "%% ... %%" comments) that followed this node's own line in the original file, before the next node
+  children: DialogNode[];
+}
+
+// Every node's own line, paired with whatever raw lines lay between it and
+// the very next node in the ORIGINAL file (its own first child, if it has
+// one, or otherwise the next sibling — however many levels up that sibling
+// actually lives) — computed once, up front, from the full sorted list of
+// every line in the card's subtree, so buildDialogTree doesn't need to
+// reason about children vs. siblings itself.
+function computeTrailingMap(lines: string[], subs: any[]): Map<number, string[]> {
+  const allLines = new Set<number>();
+  collectSubLineNumbers(subs, allLines);
+  const sorted = Array.from(allLines).sort((a, b) => a - b);
+  const endLine = maxSubLine(subs) || 0;
+  const map = new Map<number, string[]>();
+  for (let i = 0; i < sorted.length; i++) {
+    const line = sorted[i];
+    const nextLine = i + 1 < sorted.length ? sorted[i + 1] : endLine + 1;
+    map.set(line, lines.slice(line, nextLine - 1));
+  }
+  return map;
+}
+
+// Parses a card's full subtask tree (parseFileEntries' `.subs`, deleted
+// entries included — they stay real, non-rendered nodes so ">"-predecessor
+// indexing never drifts from the file's actual semantics) into the dialog's
+// own mutable structure.
+function buildDialogTree(lines: string[], subs: any[]): DialogNode[] {
+  const trailingMap = computeTrailingMap(lines, subs);
+  const build = (s: any): DialogNode => ({
+    id: s.line,
+    raw: s.text,
+    trailingRaw: trailingMap.get(s.line) || [],
+    children: (s.subs || []).map(build),
+  });
+  return subs.map(build);
+}
+
+interface ChainGroup {
+  head: DialogNode;
+  chain: DialogNode[];
+  deleted: boolean;
+}
+
+// Groups a sibling array into reorder/display units so a ">" chain of
+// predecessor-dependents is never a separate draggable slot from its
+// predecessor — every consecutive run of ">" dependents (not deleted) folds
+// into whichever real, non-deleted entry precedes it; a dependent right
+// after a deleted entry attaches to whatever real entry precedes *that*,
+// matching promoteDependentSubtasks' own treatment of a deleted predecessor
+// as transparent. A ">" with no attachable predecessor at all (transient —
+// see the auto-correction sweep) is its own independent unit, same as "^".
+// Deleted nodes are always their own (non-rendered, non-draggable) unit.
+// Used identically for rendering, drop-slot hit-testing, and the move logic
+// itself, so a chain-dependent can never be treated as independently
+// draggable in one path and not another.
+function groupChainDependents(siblings: DialogNode[]): ChainGroup[] {
+  const groups: ChainGroup[] = [];
+  let attachTo: ChainGroup | null = null;
+  for (const s of siblings) {
+    const parsed = parseTaskLine(s.raw);
+    const deleted = parsed.tags.some(isDeletedTag);
+    const isChainDependent = !deleted && parsed.dependsOn === ">";
+    if (isChainDependent && attachTo) {
+      attachTo.chain.push(s);
+    } else {
+      const group: ChainGroup = { head: s, chain: [], deleted };
+      groups.push(group);
+      if (!deleted) attachTo = group;
+    }
+  }
+  return groups;
+}
+
+function findNode(root: DialogNode, id: number): DialogNode | null {
+  if (root.id === id) return root;
+  for (const c of root.children) {
+    const found = findNode(c, id);
+    if (found) return found;
+  }
+  return null;
+}
+
+function findParentOf(root: DialogNode, id: number): DialogNode | null {
+  for (const c of root.children) {
+    if (c.id === id) return root;
+    const found = findParentOf(c, id);
+    if (found) return found;
+  }
+  return null;
+}
+
+function isSelfOrDescendant(node: DialogNode, id: number): boolean {
+  if (node.id === id) return true;
+  return node.children.some((c) => isSelfOrDescendant(c, id));
+}
+
+// The single move primitive behind every reorder and reparent in the dialog
+// — see the design note above. Moves the group headed by `headId` (itself
+// plus its trailing ">" chain-dependents, and each member's own real
+// children, as one contiguous unit preserving relative order) so it becomes
+// the `newGroupIndex`-th group (0-indexed, post-removal) among
+// `newParentId`'s children — where `newParentId` may be the group's own
+// current parent (a same-level reorder), a different node at any depth
+// (moving down), an ancestor at any depth including the card itself (moving
+// up), or an unrelated card entirely. Converts the group head's own leading
+// ">" marker to "^" (its old predecessor is no longer physically adjacent
+// post-move); chain members keep their own markers untouched, since they
+// still refer to each other and that reference travels with the group
+// intact. Returns false (a silent no-op, nothing mutated) for an invalid
+// move: `headId` isn't actually a group head, `newParentId` doesn't exist,
+// or the drop is circular (onto the group's own subtree).
+function moveGroup(root: DialogNode, headId: number, newParentId: number, newGroupIndex: number): boolean {
+  const oldParent = findParentOf(root, headId);
+  if (!oldParent) return false;
+  const oldGroups = groupChainDependents(oldParent.children);
+  const group = oldGroups.find((g) => g.head.id === headId);
+  if (!group || group.deleted) return false;
+  const unit = [group.head, ...group.chain];
+
+  const newParent = findNode(root, newParentId);
+  if (!newParent) return false;
+  if (unit.some((n) => isSelfOrDescendant(n, newParentId))) return false;
+
+  const unitIds = new Set(unit.map((n) => n.id));
+  oldParent.children = oldParent.children.filter((c) => !unitIds.has(c.id));
+
+  const parsed = parseTaskLine(group.head.raw);
+  if (parsed.dependsOn === ">") {
+    parsed.dependsOn = "^";
+    group.head.raw = serializeTaskLine(parsed);
+  }
+
+  // newParent.children already reflects the removal above whether or not
+  // newParent === oldParent, so the group-index -> raw-array-index mapping
+  // below is unambiguous either way.
+  const newGroups = groupChainDependents(newParent.children).filter((g) => !g.deleted);
+  const rawInsertIdx = newGroupIndex >= newGroups.length
+    ? newParent.children.length
+    : newParent.children.findIndex((c) => c.id === newGroups[newGroupIndex].head.id);
+
+  newParent.children.splice(rawInsertIdx, 0, ...unit);
+  return true;
+}
+
+// The "Open → Done" button: reorders the top-level groups into plain
+// bullets, then open, then done (each bucket keeping its own original
+// relative order), with deleted entries pinned at the very end. Chain-
+// dependents always travel with their group's head.
+function sortTopLevelOpenDone(root: DialogNode): void {
+  const groups = groupChainDependents(root.children);
+  const real = groups.filter((g) => !g.deleted);
+  const deletedNodes = root.children.filter((c) => parseTaskLine(c.raw).tags.some(isDeletedTag));
+  const plain = real.filter((g) => parseTaskLine(g.head.raw).checked === null);
+  const open = real.filter((g) => parseTaskLine(g.head.raw).checked === false);
+  const done = real.filter((g) => parseTaskLine(g.head.raw).checked === true);
+  const flatten = (gs: ChainGroup[]) => gs.flatMap((g) => [g.head, ...g.chain]);
+  root.children = [...flatten(plain), ...flatten(open), ...flatten(done), ...deletedNodes];
+}
+
+// Regenerates a card's whole subtask block from the final in-memory tree.
+// Indentation is always recomputed from depth (tabs only, one per level —
+// INDENT_TAB_WIDTH's convention), never preserved from the original line,
+// since a node's depth may have changed.
+function serializeDialogTree(root: DialogNode, depth = 1): string[] {
+  const out: string[] = [];
+  for (const node of root.children) {
+    out.push("\t".repeat(depth) + node.raw);
+    out.push(...node.trailingRaw);
+    out.push(...serializeDialogTree(node, depth + 1));
+  }
+  return out;
+}
+
+// Applies a dialog session's final tree to disk in one read + one write,
+// replacing the card's entire original subtask line range (from its first
+// subtask's line to the last line of its last subtask's own subtree) — this
+// is the only place any of the dialog session's pending moves ever reach the
+// file. Re-derived fresh from the file rather than trusting the tree's own
+// dialog-open-time line numbers, since a DialogNode's `id` is only a stable
+// *identity* for the session, not a live file position once anything moved.
+async function applySubtaskTree(app: App, filePath: string, cardLineNum: number, root: DialogNode, config: KanbanConfig): Promise<void> {
+  const { tFile, lines } = await readFileLines(app, filePath);
+  const fileItems = parseFileEntries(lines, filePath, config);
+  const card = fileItems.find((f: any) => f.item.line === cardLineNum);
+  if (!card || !card.item.subs.length) return;
+  const startLine = card.item.subs[0].line;
+  const endLine = maxSubLine(card.item.subs) || cardLineNum;
+  const newBlock = serializeDialogTree(root);
+  lines.splice(startLine - 1, endLine - startLine + 1, ...newBlock);
+  await writeFileLines(app, tFile, lines);
+}
+
+// Self-contained drag/reorder/reparent for the "Order Subtasks" dialog —
+// deliberately not the board's own drag machinery (attachListeners), which
+// is tightly coupled to cross-column/tag/order-digit logic that doesn't
+// apply here. A single drag session spans the WHOLE tree — every level, and
+// every row's own (possibly still-empty) children list, however deep — with
+// one consistent hit-testing routine (updateHover) that always resolves to
+// "this list, at this index," rather than two separate concepts for
+// same-level reorder vs. reparent. Nothing is written to disk until the
+// caller reads `root` itself (on Apply); a chain-dependent (see
+// groupChainDependents) is never its own drag handle, only its group's head
+// is — but it's still a fully normal, independently editable row, with its
+// own real children rendered and reorderable exactly like anything else.
+function wireSubtaskTree(
   app: App,
-  col: HTMLElement,
-  subtasks: { line: number; labelHtml: string; raw: string }[],
-  // Same immediate-save semantics as the board's own subtask editor — see
-  // showCardColorDialog's matching params for why deletion is mark-only.
+  containerEl: HTMLElement,
+  titleEl: HTMLElement,
+  root: DialogNode,
+  config: KanbanConfig,
+  // Same immediate-save semantics as the board's own subtask editor. All
+  // three close the dialog on success (see their call sites in
+  // showCardColorDialog) — each can change which group a row belongs to, or
+  // shift line numbers this session's Apply-time write depends on, so the
+  // in-memory tree isn't safe to keep dragging afterward.
   onEditSubtask: (line: number, newText: string) => Promise<string | null>,
   onDeleteSubtask: (line: number) => Promise<boolean>,
-  // Fired with the current line order every time it changes (drag-drop,
-  // setOrder, or a row being removed) — including once, synchronously,
-  // during this initial setup.
-  onOrderChange: (currentOrder: number[]) => void,
+  onToggleDependencyMarker: (line: number, newMarker: ">" | "^" | null) => Promise<void>,
+  // Fired after every tree mutation (a completed move, a sort) with whether
+  // the tree now differs from what was first rendered — including once,
+  // synchronously, during this initial setup (dirty = false).
+  onChange: (dirty: boolean) => void,
   // Lets an in-progress row edit temporarily claim Escape for itself (cancel
   // just this edit) instead of the dialog's own Escape handler (which would
   // otherwise close/cancel the whole dialog) — see onRowDblClick below.
   setEscapeHandler: (fn: () => void) => void,
   dialogEscapeDefault: () => void
-): { getOrder(): number[]; setOrder(newOrder: number[]): void; refreshClamping(): void; destroy(): void } {
-  const doc = col.ownerDocument;
+): { sortOpenDone(): void; refreshClamping(): void; destroy(): void } {
+  const doc = containerEl.ownerDocument;
   const DRAG_DELAY = 200, MOVE_THRESHOLD = 6;
 
-  let order = subtasks.map((s) => s.line);
-  const rowMap = new Map<number, HTMLElement>();
-  for (const s of subtasks) {
+  let dirty = false;
+  const rowEls = new Map<number, HTMLElement>();
+  let slots: { el: HTMLElement; parentId: number; index: number }[] = [];
+
+  const makeSlot = (parentId: number, index: number): HTMLElement => {
+    const s = doc.createElement("div");
+    s.className = "kb-subtask-slot";
+    s.style.cssText = "height:12px;margin:-6px 0;border-top:2px dashed transparent;width:100%;";
+    slots.push({ el: s, parentId, index });
+    return s;
+  };
+
+  // A row styled like a real board card (createCardHTML) rather than a
+  // compact list row, matching the board's own look. `draggable` rows (a
+  // group's head) get a drag handle and grab cursor; a chain-dependent
+  // (folded into its predecessor — see groupChainDependents) renders as a
+  // fully normal, independently editable row otherwise, just without its
+  // own drag handle, since its position only has meaning relative to its
+  // predecessor.
+  const buildRow = (node: DialogNode, draggable: boolean, hasPredecessor: boolean): HTMLElement => {
     const row = doc.createElement("div");
     row.className = "kb-subtask-row";
-    row.dataset.subLine = String(s.line);
-    row.dataset.subRaw = s.raw;
-    // Styled like a real board card (createCardHTML) rather than a compact
-    // list row, per the user's request that these visibly read as cards.
+    row.dataset.id = String(node.id);
+    if (draggable) row.dataset.draggable = "1";
     row.style.cssText =
-      "display:flex;align-items:center;gap:10px;padding:14px 16px;background:var(--kb-card-bg,var(--background-primary));" +
-      "border:1px solid var(--background-modifier-border);border-radius:10px;cursor:grab;text-align:left;" +
+      "display:flex;flex-direction:column;gap:8px;padding:14px 16px;background:var(--kb-card-bg,var(--background-primary));" +
+      `border:1px solid var(--background-modifier-border);border-radius:10px;cursor:${draggable ? "grab" : "default"};text-align:left;` +
       "box-shadow:0 1px 3px rgba(0,0,0,.08);";
-    const handle = doc.createElement("span");
-    handle.textContent = "⠿";
-    handle.setAttribute("aria-hidden", "true");
-    handle.style.cssText = "color:var(--text-faint);font-size:1.2em;line-height:1;flex-shrink:0;user-select:none;";
+    const mainLine = doc.createElement("div");
+    mainLine.style.cssText = "display:flex;align-items:center;gap:10px;";
+    if (draggable) {
+      const handle = doc.createElement("span");
+      handle.textContent = "⠿";
+      handle.setAttribute("aria-hidden", "true");
+      handle.style.cssText = "color:var(--text-faint);font-size:1.2em;line-height:1;flex-shrink:0;user-select:none;";
+      mainLine.appendChild(handle);
+    }
     const label = doc.createElement("span");
     label.className = "kb-subtask-label";
     // pointer-events:none makes the whole row draggable everywhere,
     // including over the (non-interactive, disabled) checkbox glyph, which
-    // would otherwise swallow mousedown without bubbling. Temporarily
-    // switched to auto while editing (see onRowDblClick) so the textarea
-    // itself is interactive.
+    // would otherwise swallow mousedown without bubbling. The dep-toggle
+    // span inside carries its own pointer-events:auto (see renderCheckbox)
+    // so it stays independently clickable. Temporarily switched to auto
+    // while editing (see onRowDblClick) so the textarea itself is
+    // interactive.
     label.style.cssText =
       `flex:1;min-width:0;pointer-events:none;overflow-wrap:anywhere;font-weight:${TITLE_FONT_WEIGHT};line-height:1.4;`;
-    label.innerHTML = s.labelHtml;
-    row.append(handle, label);
-    rowMap.set(s.line, row);
-  }
+    label.innerHTML = renderSubtaskPreviewHTML({ text: node.raw, line: node.id }, config, hasPredecessor);
+    mainLine.appendChild(label);
+    row.appendChild(mainLine);
+    rowEls.set(node.id, row);
+    return row;
+  };
 
-  const makeSlot = (idx: number) => {
-    const s = doc.createElement("div");
-    s.className = "kb-subtask-slot";
-    s.dataset.index = String(idx);
-    s.style.cssText = "height:12px;margin:-6px 0;border-top:2px dashed transparent;width:100%;";
-    return s;
+  // Renders `parent`'s own children as one reorderable/reparentable list —
+  // one slot before, after, and between every group, but never inside one
+  // (so there's no drop target between a subtask and its own
+  // chain-dependents to silently reassign what they depend on). Every row,
+  // draggable or not, gets its own nested children list rendered the exact
+  // same way one level deeper — even a row with no real children yet still
+  // gets an (empty, single-slot) list of its own, which is what lets
+  // dropping something directly under it work through the same slot
+  // mechanics as everywhere else, with no separate "reparent onto a row's
+  // body" concept.
+  const renderInto = (container: HTMLElement, parent: DialogNode) => {
+    container.innerHTML = "";
+    const groups = groupChainDependents(parent.children).filter((g) => !g.deleted);
+    container.appendChild(makeSlot(parent.id, 0));
+    groups.forEach((g, i) => {
+      appendUnit(container, parent, g.head, true);
+      for (const chainNode of g.chain) appendUnit(container, parent, chainNode, false);
+      container.appendChild(makeSlot(parent.id, i + 1));
+    });
+  };
+
+  const appendUnit = (container: HTMLElement, parent: DialogNode, node: DialogNode, draggable: boolean) => {
+    // "Has a real predecessor" = is not raw index 0 among `parent`'s own
+    // children (deleted-but-present siblings still count — see
+    // groupChainDependents' own doc comment) — the same test the
+    // auto-correction sweep uses to decide a ">" is even a valid state here.
+    const hasPredecessor = parent.children.findIndex((c) => c.id === node.id) > 0;
+    const row = buildRow(node, draggable, hasPredecessor);
+    container.appendChild(row);
+    const childWrap = doc.createElement("div");
+    childWrap.style.cssText = "display:flex;flex-direction:column;gap:8px;padding-left:26px;margin-top:8px;";
+    row.appendChild(childWrap);
+    renderInto(childWrap, node);
+  };
+
+  const render = () => {
+    rowEls.clear();
+    slots = [];
+    renderInto(containerEl, root);
+    adjustClamping();
+    onChange(dirty);
   };
 
   // When every card can't fit without the column scrolling, clamp each
   // label to 2 lines (ellipsis); if that's still not enough, drop to 1 line.
   // Uses setProperty/removeProperty (not cssText) so this only ever touches
   // the clamp-specific properties, never clobbering the row's base style.
-  const setClamp = (lines: 0 | 1 | 2) => {
-    rowMap.forEach((row) => {
-      const label = row.querySelector<HTMLElement>(".kb-subtask-label");
+  const setClamp = (n: 0 | 1 | 2) => {
+    rowEls.forEach((row) => {
+      const label = row.querySelector<HTMLElement>(":scope > div > .kb-subtask-label");
       if (!label) return;
-      if (lines === 0) {
+      if (n === 0) {
         label.style.removeProperty("display");
         label.style.removeProperty("-webkit-box-orient");
         label.style.removeProperty("-webkit-line-clamp");
@@ -3710,15 +4010,15 @@ function wireSubtaskDrag(
       } else {
         label.style.setProperty("display", "-webkit-box");
         label.style.setProperty("-webkit-box-orient", "vertical");
-        label.style.setProperty("-webkit-line-clamp", String(lines));
+        label.style.setProperty("-webkit-line-clamp", String(n));
         label.style.setProperty("overflow", "hidden");
       }
     });
   };
-  const fitsWithoutScroll = () => col.scrollHeight <= col.clientHeight + 1;
+  const fitsWithoutScroll = () => containerEl.scrollHeight <= containerEl.clientHeight + 1;
   const adjustClamping = () => {
     // Collapsed (display:none) or not yet laid out — nothing to measure.
-    if (col.clientHeight === 0) return;
+    if (containerEl.clientHeight === 0) return;
     setClamp(0);
     if (fitsWithoutScroll()) return;
     setClamp(2);
@@ -3726,36 +4026,23 @@ function wireSubtaskDrag(
     setClamp(1);
   };
 
-  const rebuild = () => {
-    col.innerHTML = "";
-    col.appendChild(makeSlot(0));
-    order.forEach((line, i) => {
-      col.appendChild(rowMap.get(line)!);
-      col.appendChild(makeSlot(i + 1));
-    });
-    adjustClamping();
-    onOrderChange(order.slice());
-  };
-  rebuild();
+  render();
 
-  const removeRow = (line: number) => {
-    order = order.filter((l) => l !== line);
-    rowMap.delete(line);
-    rebuild();
-  };
-
-  // Double-click a row to edit its text inline, exactly like a subtask on
-  // the board itself (onSubDblClick) — same textarea styling, same
-  // Enter-saves/Escape-cancels/blur-saves behavior. Persists immediately via
-  // the callbacks above, independent of this dialog's own Apply/Cancel gate.
+  // Double-click a row (at any depth) to edit its text inline, exactly like
+  // a subtask on the board itself (onSubDblClick) — same textarea styling,
+  // same Enter-saves/Escape-cancels/blur-saves behavior. Persists
+  // immediately via the callbacks above, and closes the dialog on success —
+  // see this function's own doc comment for why.
   const onRowDblClick = async (e: MouseEvent) => {
     const row = (e.target as Element).closest(".kb-subtask-row") as HTMLElement | null;
     if (!row) return;
     if (row.querySelector(".card-edit-input")) return;
-    const label = row.querySelector<HTMLElement>(".kb-subtask-label");
+    const label = row.querySelector<HTMLElement>(":scope > div > .kb-subtask-label");
     if (!label) return;
-    const line = parseInt(row.dataset.subLine!, 10);
-    const raw = row.dataset.subRaw || "";
+    const line = parseInt(row.dataset.id!, 10);
+    const node = findNode(root, line);
+    if (!node) return;
+    const raw = node.raw;
 
     const savedHTML = label.innerHTML;
     const input = doc.createElement("textarea");
@@ -3785,20 +4072,17 @@ function wireSubtaskDrag(
       if (finished || !label.contains(input)) return;
       finished = true;
       popModEnterScope();
-      // Hands Escape back to the dialog's own Cancel-equivalent action, now
-      // that this row edit (which claimed it below) is done.
       setEscapeHandler(dialogEscapeDefault);
       label.style.pointerEvents = "none";
       const newText = input.value.trim();
       if (save && !newText) {
         const ok = await onDeleteSubtask(line);
-        if (ok) removeRow(line);
+        if (ok) dialogEscapeDefault();
         else label.innerHTML = savedHTML;
       } else if (save && newText !== raw) {
-        row.dataset.subRaw = newText;
         const newLabelHtml = await onEditSubtask(line, newText);
-        label.innerHTML = newLabelHtml ?? savedHTML;
-        adjustClamping();
+        if (newLabelHtml !== null) dialogEscapeDefault();
+        else label.innerHTML = savedHTML;
       } else {
         label.innerHTML = savedHTML;
       }
@@ -3822,39 +4106,124 @@ function wireSubtaskDrag(
       input.setSelectionRange(input.value.length, input.value.length);
     }));
   };
-  col.addEventListener("dblclick", onRowDblClick);
+  containerEl.addEventListener("dblclick", onRowDblClick);
 
-  let dragLine: number | null = null;
+  // Click on the ">"/"^"/"_" toggle span (see renderCheckbox's depToggle
+  // option) — cycles a row's marker ">" -> "^" -> "_" (no marker) -> ">" ...,
+  // except ">" is skipped entirely for a row with no real predecessor (see
+  // appendUnit's hasPredecessor), where it isn't a valid state at all — for
+  // such a row the cycle is just "^" -> "_" -> "^" ... Immediate-commit and
+  // closes the dialog, same reasoning as edit/delete above. A gesture that
+  // starts on the toggle glyph is NOT excluded from drag-tracking below
+  // (unlike an earlier version of this dialog, which is exactly what made a
+  // real drag attempt starting on the glyph silently do nothing except fire
+  // a spurious trailing click that cycled the marker instead) — it
+  // participates in the same move-threshold disambiguation as the rest of
+  // the row. suppressToggleClick swallows that trailing native "click" a
+  // real drag still fires on release, so it doesn't also cycle the marker
+  // on top of whatever the drag itself did.
+  let suppressToggleClick = false;
+  const onToggleClick = async (e: MouseEvent) => {
+    if (suppressToggleClick) { suppressToggleClick = false; return; }
+    const target = (e.target as Element).closest(".kb-dep-toggle") as HTMLElement | null;
+    if (!target) return;
+    const line = parseInt(target.dataset.line!, 10);
+    if (isNaN(line)) return;
+    const marker = (target.dataset.marker || null) as ">" | "^" | null;
+    const hasPredecessor = target.dataset.hasPredecessor === "true";
+    const cycle: (">" | "^" | null)[] = hasPredecessor ? [">", "^", null] : ["^", null];
+    const idx = cycle.indexOf(marker);
+    const newMarker = cycle[idx === -1 ? 0 : (idx + 1) % cycle.length];
+    await onToggleDependencyMarker(line, newMarker);
+    dialogEscapeDefault();
+  };
+  containerEl.addEventListener("click", onToggleClick);
+
+  let dragId: number | null = null;
   let ghost: HTMLElement | null = null;
-  let insertIndex = -1;
+  let hoverSlot: { parentId: number; index: number } | null = null;
+  let hoverTargetEl: HTMLElement | null = null; // the row (or title) owning the hovered slot's list, when reparenting
   let activeMove: ((e: MouseEvent) => void) | null = null;
   let activeUp: ((e: MouseEvent) => void) | null = null;
 
-  const clearHighlight = () =>
-    col.querySelectorAll<HTMLElement>(".kb-subtask-slot").forEach((s) => (s.style.borderTopColor = "transparent"));
+  const clearSlotHighlight = () => slots.forEach((s) => (s.el.style.borderTopColor = "transparent"));
+  const clearTargetHighlight = () => {
+    if (!hoverTargetEl) return;
+    hoverTargetEl.style.outline = "";
+    hoverTargetEl.style.outlineOffset = "";
+    hoverTargetEl = null;
+  };
 
-  const highlightNearest = (clientY: number) => {
-    let nearest: HTMLElement | null = null, minDist = Infinity;
-    col.querySelectorAll<HTMLElement>(".kb-subtask-slot").forEach((s) => {
-      const r = s.getBoundingClientRect();
+  // Resolves the drag to exactly one (targetParentId, targetIndex) — the
+  // single hit-testing routine that covers same-level reorder and
+  // reparent-to-any-depth alike, rather than two separate concepts. Slots
+  // belonging to the dragged group's own subtree (including any chain
+  // member's own children) are excluded so the highlight — and the
+  // eventual drop — can never land somewhere circular. The dialog's own
+  // title row is one more candidate, resolved to "become the card's own
+  // first child" (index 0), since dropping there means promoting all the
+  // way back up to the card.
+  const updateHover = (clientX: number, clientY: number) => {
+    clearSlotHighlight();
+    clearTargetHighlight();
+    hoverSlot = null;
+    if (dragId === null) return;
+    const oldParent = findParentOf(root, dragId);
+    if (!oldParent) return;
+    const group = groupChainDependents(oldParent.children).find((g) => g.head.id === dragId);
+    if (!group) return;
+    const unit = [group.head, ...group.chain];
+
+    let nearestSlot: (typeof slots)[number] | null = null, minDist = Infinity;
+    for (const s of slots) {
+      if (unit.some((n) => isSelfOrDescendant(n, s.parentId))) continue;
+      const r = s.el.getBoundingClientRect();
       const dist = Math.abs(r.top + r.height / 2 - clientY);
-      if (dist < minDist) { minDist = dist; nearest = s; }
-    });
-    clearHighlight();
-    if (nearest) {
-      (nearest as HTMLElement).style.borderTopColor = "var(--kb-accent)";
-      insertIndex = parseInt((nearest as HTMLElement).dataset.index!, 10);
+      if (dist < minDist) { minDist = dist; nearestSlot = s; }
+    }
+
+    const titleRect = titleEl.getBoundingClientRect();
+    const titleDist = Math.abs(titleRect.top + titleRect.height / 2 - clientY);
+    if (titleDist < minDist) {
+      hoverSlot = { parentId: root.id, index: 0 };
+      hoverTargetEl = titleEl;
+      titleEl.style.outline = "2px solid var(--kb-accent)";
+      titleEl.style.outlineOffset = "2px";
+      return;
+    }
+
+    if (nearestSlot) {
+      nearestSlot.el.style.borderTopColor = "var(--kb-accent)";
+      hoverSlot = { parentId: nearestSlot.parentId, index: nearestSlot.index };
+      // Reparenting into a different list (not the dragged group's own
+      // current parent) also outlines the row that owns that list — the
+      // card's own top level has no such row (its owner is the title,
+      // handled above) — giving distinct feedback from a plain reorder.
+      if (nearestSlot.parentId !== oldParent.id && nearestSlot.parentId !== root.id) {
+        const ownerRow = rowEls.get(nearestSlot.parentId);
+        if (ownerRow) {
+          hoverTargetEl = ownerRow;
+          ownerRow.style.outline = "2px solid var(--kb-accent)";
+          ownerRow.style.outlineOffset = "2px";
+        }
+      }
     }
   };
 
-  const makeGhost = (row: HTMLElement) => {
+  const makeGhost = (row: HTMLElement): HTMLElement => {
     const r = row.getBoundingClientRect();
-    const g = row.cloneNode(true) as HTMLElement;
+    // Only the row's own header line is cloned — not its (possibly large)
+    // nested children list — so the ghost stays a compact, single-row
+    // preview no matter how much the dragged row is carrying along with it.
+    const mainLine = row.querySelector<HTMLElement>(":scope > div");
+    const g = doc.createElement("div");
+    g.style.cssText = row.style.cssText;
     Object.assign(g.style, {
-      position: "fixed", left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`,
-      opacity: ".85", pointerEvents: "none", zIndex: "10002",
+      position: "fixed", left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: "auto",
+      opacity: ".9", pointerEvents: "none", zIndex: "10002",
       boxShadow: "0 8px 24px rgba(0,0,0,.25)", cursor: "grabbing",
     });
+    if (mainLine) g.appendChild(mainLine.cloneNode(true));
     doc.body.appendChild(g);
     return g;
   };
@@ -3866,31 +4235,42 @@ function wireSubtaskDrag(
   };
 
   const startDrag = (row: HTMLElement, clientX: number, clientY: number) => {
-    dragLine = parseInt(row.dataset.subLine!, 10);
+    dragId = parseInt(row.dataset.id!, 10);
     ghost = makeGhost(row);
     row.style.opacity = ".3";
     moveGhost(clientX, clientY);
   };
 
+  // A rejected/no-op drop (nothing under the pointer, or a genuinely
+  // circular target — see moveGroup) just leaves the tree untouched; since
+  // the DOM is never mutated mid-drag (only the tree, and only once a move
+  // actually lands), the dragged row is already still exactly where it
+  // was — nothing to visually "snap back." A successful move instead
+  // re-renders the WHOLE tree from scratch, so the moved row comes back as
+  // a completely normal, freshly-built row — draggable again immediately,
+  // indistinguishable from a row that was always there. No separate
+  // "pending" or "preview" state, ever.
   const endDrag = () => {
-    if (dragLine !== null && insertIndex >= 0) {
-      const oldIdx = order.indexOf(dragLine);
-      const newOrder = order.filter((l) => l !== dragLine);
-      const target = oldIdx < insertIndex ? insertIndex - 1 : insertIndex;
-      newOrder.splice(target, 0, dragLine);
-      order = newOrder;
-      rebuild();
+    const draggedRowEl = dragId !== null ? rowEls.get(dragId) ?? null : null;
+    let moved = false;
+    if (dragId !== null && hoverSlot) {
+      if (moveGroup(root, dragId, hoverSlot.parentId, hoverSlot.index)) {
+        dirty = true;
+        moved = true;
+        render();
+      }
     }
     if (ghost) { ghost.remove(); ghost = null; }
-    if (dragLine !== null) rowMap.get(dragLine)!.style.opacity = "";
-    clearHighlight();
-    dragLine = null;
-    insertIndex = -1;
+    if (!moved) draggedRowEl?.style.removeProperty("opacity");
+    clearSlotHighlight();
+    clearTargetHighlight();
+    dragId = null;
+    hoverSlot = null;
   };
 
   const onMouseDown = (e: MouseEvent) => {
     if ((e.target as Element).closest(".card-edit-input")) return;
-    const row = (e.target as Element).closest(".kb-subtask-row") as HTMLElement | null;
+    const row = (e.target as Element).closest(".kb-subtask-row[data-draggable='1']") as HTMLElement | null;
     if (!row) return;
     const startX = e.clientX, startY = e.clientY;
     let dragging = false;
@@ -3901,13 +4281,13 @@ function wireSubtaskDrag(
         startDrag(row, me.clientX, me.clientY);
       }
       moveGhost(me.clientX, me.clientY);
-      highlightNearest(me.clientY);
+      updateHover(me.clientX, me.clientY);
     };
     const onUp = () => {
       doc.removeEventListener("mousemove", onMove);
       doc.removeEventListener("mouseup", onUp);
       activeMove = null; activeUp = null;
-      if (dragging) endDrag();
+      if (dragging) { suppressToggleClick = true; endDrag(); }
     };
     activeMove = onMove; activeUp = onUp;
     doc.addEventListener("mousemove", onMove);
@@ -3920,8 +4300,8 @@ function wireSubtaskDrag(
 
   const onTouchStart = (e: TouchEvent) => {
     if (e.touches.length !== 1) return;
-    if (col.querySelector(".card-edit-input")) return;
-    const row = (e.target as Element).closest(".kb-subtask-row") as HTMLElement | null;
+    if (containerEl.querySelector(".card-edit-input")) return;
+    const row = (e.target as Element).closest(".kb-subtask-row[data-draggable='1']") as HTMLElement | null;
     if (!row) return;
     touchRow = row;
     touchDragging = false;
@@ -3944,36 +4324,37 @@ function wireSubtaskDrag(
       }
     }
     moveGhost(t.clientX, t.clientY);
-    highlightNearest(t.clientY);
+    updateHover(t.clientX, t.clientY);
     e.preventDefault();
   };
   const onTouchEnd = () => {
     if (touchTimer) clearTimeout(touchTimer);
-    if (touchDragging) endDrag();
+    if (touchDragging) { suppressToggleClick = true; endDrag(); }
     touchRow = null;
     touchDragging = false;
   };
 
-  col.addEventListener("mousedown", onMouseDown);
-  col.addEventListener("touchstart", onTouchStart, { passive: true });
-  col.addEventListener("touchmove", onTouchMove, { passive: false });
-  col.addEventListener("touchend", onTouchEnd);
-  col.addEventListener("touchcancel", onTouchEnd);
+  containerEl.addEventListener("mousedown", onMouseDown);
+  containerEl.addEventListener("touchstart", onTouchStart, { passive: true });
+  containerEl.addEventListener("touchmove", onTouchMove, { passive: false });
+  containerEl.addEventListener("touchend", onTouchEnd);
+  containerEl.addEventListener("touchcancel", onTouchEnd);
 
   return {
-    getOrder: () => order.slice(),
-    setOrder: (newOrder: number[]) => {
-      order = newOrder.slice();
-      rebuild();
+    sortOpenDone: () => {
+      sortTopLevelOpenDone(root);
+      dirty = true;
+      render();
     },
     refreshClamping: () => adjustClamping(),
     destroy: () => {
-      col.removeEventListener("mousedown", onMouseDown);
-      col.removeEventListener("touchstart", onTouchStart);
-      col.removeEventListener("touchmove", onTouchMove);
-      col.removeEventListener("touchend", onTouchEnd);
-      col.removeEventListener("touchcancel", onTouchEnd);
-      col.removeEventListener("dblclick", onRowDblClick);
+      containerEl.removeEventListener("mousedown", onMouseDown);
+      containerEl.removeEventListener("click", onToggleClick);
+      containerEl.removeEventListener("touchstart", onTouchStart);
+      containerEl.removeEventListener("touchmove", onTouchMove);
+      containerEl.removeEventListener("touchend", onTouchEnd);
+      containerEl.removeEventListener("touchcancel", onTouchEnd);
+      containerEl.removeEventListener("dblclick", onRowDblClick);
       if (activeMove) doc.removeEventListener("mousemove", activeMove);
       if (activeUp) doc.removeEventListener("mouseup", activeUp);
       if (touchTimer) clearTimeout(touchTimer);
@@ -3986,17 +4367,28 @@ function showCardColorDialog(
   app: App,
   existingColor: string | null,
   title: string,
-  subtasks: { line: number; labelHtml: string; checked: boolean; hasCheckbox: boolean; raw: string }[],
+  // The card's own line — stamped onto the title element below so it's also
+  // a valid drop target for the subtask-reorder reparent gesture (dropping a
+  // subtask directly onto the title promotes it all the way back to being a
+  // direct child of the card, same as dropping onto any other row one level
+  // in — see wireSubtaskTree's updateHover).
+  cardLineNum: number,
+  subtaskTree: DialogNode[],
+  config: KanbanConfig,
   onApply: (hex: string | null) => void,
-  onReorder: (newOrder: number[], deletedGoLast: boolean) => void,
+  // Fired only when the subtask tree actually changed by the time Apply was
+  // clicked — see wireSubtaskTree's `dirty` tracking. Everything about the
+  // move (every reorder and every reparent from this whole session) is
+  // already folded into `finalTree`; the caller's only job is to serialize
+  // it (see applySubtaskTree).
+  onReorder: (finalTree: DialogNode[]) => void,
   onDelete: () => void,
   // Same immediate-save semantics as the board's own subtask editor: these
-  // fire (and persist) right away, independent of Apply/Cancel. Clearing a
-  // subtask's text marks it deleted (never a physical line removal) so line
-  // numbers the dialog captured at open time always stay valid for the
-  // eventual reorder-on-Apply write.
+  // fire (and persist) right away, independent of Apply/Cancel, and close
+  // the dialog on success (see wireSubtaskTree's matching params for why).
   onEditSubtask: (line: number, newText: string) => Promise<string | null>,
   onDeleteSubtask: (line: number) => Promise<boolean>,
+  onToggleDependencyMarker: (line: number, newMarker: ">" | "^" | null) => Promise<void>,
   // Same immediate-save semantics as onDelete below: fires right away and
   // closes the dialog (moved/removed subtask lines make every line number
   // this dialog captured at open time stale, so continuing to drag-reorder
@@ -4005,6 +4397,7 @@ function showCardColorDialog(
 ) {
   const { dialog, close, setEscapeHandler } = makeOverlay("kanban-card-color-dialog", app);
   dialog.style.maxWidth = "720px"; // 1.5x the original 480px
+  const root: DialogNode = { id: cardLineNum, raw: "", trailingRaw: [], children: subtaskTree };
 
   const validExisting = existingColor && /^#[0-9a-fA-F]{6}$/.test(existingColor)
     ? existingColor
@@ -4037,7 +4430,7 @@ function showCardColorDialog(
   // be collapsed independently of them (see applySubtaskExpanded below). The
   // sort button lives inside the collapsible body (with the column), not the
   // always-visible toggle header.
-  const subtaskSectionHtml = subtasks.length > 0 ? `
+  const subtaskSectionHtml = subtaskTree.length > 0 ? `
     <div id="k-subtask-section" style="margin-top:14px;text-align:left;flex:1;min-height:0;display:flex;flex-direction:column;">
       <div id="k-subtask-toggle" style="font-size:.8em;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;flex-shrink:0;cursor:pointer;display:flex;align-items:center;gap:5px;user-select:none;">
         <span id="k-subtask-arrow" style="font-size:1.1em;line-height:1;color:var(--kb-accent);">▼</span>
@@ -4052,12 +4445,13 @@ function showCardColorDialog(
 
   dialog.innerHTML = `
     <div style="flex-shrink:0;">
-      <h3 style="margin:0 0 12px;font-size:1.1em;overflow-wrap:anywhere;">${title || "Card"}</h3>
+      <h3 id="k-card-title-row" style="margin:0 0 12px;font-size:1.1em;overflow-wrap:anywhere;border-radius:6px;">${title || "Card"}</h3>
       <div id="k-color-swatches" style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center;">${swatchesHtml}</div>
     </div>
     ${subtaskSectionHtml}
     <div id="k-color-actions" style="flex-shrink:0;margin-top:14px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap;align-items:center;">${buttonHtml("Apply", true)}${buttonHtml("Cancel", false)}<button id="k-color-delete" type="button" style="${deleteBtnStyle}">Delete</button></div>`;
 
+  const titleRowEl = dialog.querySelector<HTMLElement>("#k-card-title-row")!;
   const subtaskColEl = dialog.querySelector<HTMLElement>("#k-subtask-col");
   const subtaskSection = dialog.querySelector<HTMLElement>("#k-subtask-section");
   const subtaskToggle = dialog.querySelector<HTMLElement>("#k-subtask-toggle");
@@ -4077,39 +4471,17 @@ function showCardColorDialog(
   // section is simply open, so the user's focus is on subtasks rather than
   // the card itself) is both easy to hit by mistake and hard to undo, so the
   // Delete button hides itself for the duration.
-  const updateDeleteVisibility = (currentOrder: number[]) => {
-    const orderChanged =
-      currentOrder.length !== subtasks.length ||
-      currentOrder.some((line, i) => line !== subtasks[i]?.line);
-    deleteBtn.style.display = (subtasksExpanded || orderChanged) ? "none" : "";
+  let dirty = false;
+  const refreshDeleteVisibility = () => {
+    deleteBtn.style.display = (subtasksExpanded || dirty) ? "none" : "";
   };
+  const onTreeChange = (d: boolean) => { dirty = d; refreshDeleteVisibility(); };
 
-  const dragCtl = subtaskColEl
-    ? wireSubtaskDrag(app, subtaskColEl, subtasks, onEditSubtask, onDeleteSubtask, updateDeleteVisibility, setEscapeHandler, () => closeAndCleanup())
+  const treeCtl = subtaskColEl
+    ? wireSubtaskTree(app, subtaskColEl, titleRowEl, root, config, onEditSubtask, onDeleteSubtask, onToggleDependencyMarker, onTreeChange, setEscapeHandler, () => closeAndCleanup())
     : null;
-  const infoByLine = new Map(subtasks.map((s) => [s.line, { hasCheckbox: s.hasCheckbox, checked: s.checked }]));
 
-  // Deleted children are never shown/draggable here, so this sort can only
-  // ever reorder the visible list into plain-bullets-then-open-then-done —
-  // but it also flags that deleted children should move to the very end on
-  // Apply, rather than staying pinned at their original slot
-  // (reorderSubtasks' normal default for a plain drag).
-  let deletedGoLast = false;
-  subtaskSortBtn?.addEventListener("click", () => {
-    if (!dragCtl) return;
-    const current = dragCtl.getOrder();
-    // Plain bullets (no checkbox at all) are usually descriptive/context
-    // lines rather than actual tasks, so they stay pinned above both open
-    // and done checkboxes instead of being treated as "open".
-    const plain = current.filter((line) => !infoByLine.get(line)?.hasCheckbox);
-    const open = current.filter((line) => {
-      const info = infoByLine.get(line);
-      return !!info?.hasCheckbox && !info.checked;
-    });
-    const done = current.filter((line) => infoByLine.get(line)?.checked);
-    dragCtl.setOrder([...plain, ...open, ...done]);
-    deletedGoLast = true;
-  });
+  subtaskSortBtn?.addEventListener("click", () => treeCtl?.sortOpenDone());
 
   subtaskArchiveDoneBtn?.addEventListener("click", () => {
     closeAndCleanup();
@@ -4129,8 +4501,8 @@ function showCardColorDialog(
     // Re-measure now that the column's visibility/size just changed — a
     // reading of scrollHeight/clientHeight always forces a synchronous
     // layout, so this reflects every style change made above.
-    if (subtasksExpanded) dragCtl?.refreshClamping();
-    updateDeleteVisibility(dragCtl?.getOrder() ?? subtasks.map((s) => s.line));
+    if (subtasksExpanded) treeCtl?.refreshClamping();
+    refreshDeleteVisibility();
   };
   applySubtaskExpanded();
   subtaskToggle?.addEventListener("click", () => {
@@ -4142,7 +4514,7 @@ function showCardColorDialog(
   // (no user-facing resize handle), so this only needs to run occasionally,
   // not on every animation frame.
   const dialogWindow = dialog.ownerDocument.defaultView;
-  const onWindowResize = () => { if (subtasksExpanded) dragCtl?.refreshClamping(); };
+  const onWindowResize = () => { if (subtasksExpanded) treeCtl?.refreshClamping(); };
   dialogWindow?.addEventListener("resize", onWindowResize);
 
   const swatchWrap = dialog.querySelector("#k-color-swatches") as HTMLElement;
@@ -4163,18 +4535,17 @@ function showCardColorDialog(
   });
 
   const closeAndCleanup = () => {
-    dragCtl?.destroy();
+    treeCtl?.destroy();
     dialogWindow?.removeEventListener("resize", onWindowResize);
     close();
   };
 
   applyBtn.onclick = () => {
-    const finalOrder = dragCtl?.getOrder() ?? null;
+    const finalTree = root.children;
+    const wasDirty = dirty;
     closeAndCleanup();
     onApply(currentHex());
-    if (finalOrder && (deletedGoLast || finalOrder.some((line, i) => line !== subtasks[i].line))) {
-      onReorder(finalOrder, deletedGoLast);
-    }
+    if (wasDirty) onReorder(finalTree);
   };
   cancelBtn.onclick = closeAndCleanup;
   deleteBtn.onclick = () => { closeAndCleanup(); onDelete(); };
@@ -4302,10 +4673,15 @@ function cleanSubtaskText(subText: string, config: KanbanConfig): { hasCheckbox:
   return { hasCheckbox, formatted, raw };
 }
 
-function renderSubtaskPreviewHTML(sub: any, config: KanbanConfig): string {
+// `hasPredecessor` (default true — permissive, only real callers that know
+// otherwise pass false) drives whether the reorder dialog's clickable
+// ">"/"^"/"_" toggle offers ">" as a cycle destination: never valid for a
+// row with no real predecessor, where it would recreate the invalid,
+// auto-corrected state the render-time sweep exists to fix.
+function renderSubtaskPreviewHTML(sub: any, config: KanbanConfig, hasPredecessor: boolean = true): string {
   const { hasCheckbox, formatted } = cleanSubtaskText(sub.text, config);
   const subText = formatCardDateAnnotation(formatTriggerAnnotations(formatted, config.normRecurrent, false), true);
-  return renderCheckbox(subText, { isSub: false, showCheckbox: hasCheckbox });
+  return renderCheckbox(subText, { isSub: false, showCheckbox: hasCheckbox, subLine: sub.line, depToggle: { hasPredecessor } });
 }
 
 function createCardHTML(
@@ -5673,37 +6049,44 @@ export function attachListeners(
   applyFilter();
 
   // Shared by the desktop blank-margin click and the mobile card-menu sheet.
-  function openCardColorDialog(card: HTMLElement) {
+  async function openCardColorDialog(card: HTMLElement) {
     const filePath = card.dataset.file!;
     const lineNum = parseInt(card.dataset.line!, 10);
     const existing = card.dataset.color || null;
     const vaultName = app.vault.getName();
     const title = buildParentPreviewHTML(card.dataset.raw || "", config, vaultName);
+
+    // Built from a fresh read (not the DOM's own data-subs snapshot, which
+    // may be stale by however long the board's been open) so the dialog's
+    // in-memory tree — and every trailingRaw boundary/line number it
+    // captures — is guaranteed to match what's actually on disk right now.
     let subs: any[] = [];
-    try { subs = JSON.parse(card.dataset.subs || "[]"); } catch { /* ignore malformed subs */ }
-    const visibleSubtasks = subs
-      .filter((s: any) => !extractTags(s.text || "").some(isDeletedTag))
-      .map((s: any) => {
-        const { hasCheckbox, raw } = cleanSubtaskText(s.text, config);
-        return {
-          line: s.line,
-          labelHtml: renderSubtaskPreviewHTML(s, config),
-          checked: /^- \[[xX]\] /.test(s.text || ""),
-          hasCheckbox,
-          raw,
-        };
-      });
+    let tree: DialogNode[] = [];
+    try {
+      const { lines } = await readFileLines(app, filePath);
+      const fileItems = parseFileEntries(lines, filePath, config);
+      const cardEntry = fileItems.find((f: any) => f.item.line === lineNum);
+      subs = cardEntry?.item.subs || [];
+      tree = buildDialogTree(lines, subs);
+    } catch { /* ignore — dialog opens with no subtasks */ }
+
     showCardColorDialog(
       app,
       existing,
       title,
-      visibleSubtasks,
+      lineNum,
+      tree,
+      config,
       async (hex) => {
         await updateCardColor(app, filePath, lineNum, hex);
         requestAnimationFrame(() => setTimeout(refresh, 50));
       },
-      async (newOrder, deletedGoLast) => {
-        await reorderSubtasks(app, filePath, subs, newOrder, deletedGoLast);
+      // The whole session's pending reorders/reparents, already folded into
+      // `finalTree` — applySubtaskTree re-derives the card's current line
+      // range fresh and replaces it in one splice (see its own doc comment
+      // for why re-deriving beats trusting this dialog's open-time lines).
+      async (finalTree) => {
+        await applySubtaskTree(app, filePath, lineNum, { id: lineNum, raw: "", trailingRaw: [], children: finalTree }, config);
         requestAnimationFrame(() => setTimeout(refresh, 50));
       },
       async () => {
@@ -5723,19 +6106,25 @@ export function attachListeners(
         try {
           const { lines } = await readFileLines(app, filePath);
           const rawLine = (lines[subLine - 1] || "").replace(/^\s+/, "");
-          return renderSubtaskPreviewHTML({ text: rawLine }, config);
+          return renderSubtaskPreviewHTML({ text: rawLine, line: subLine }, config);
         } catch { return null; }
       },
-      // Clearing a subtask's text always marks it deleted (never removes the
-      // line outright, unlike the board's own clear-to-delete flow) — a
-      // physical removal would shift every later subtask's line number out
-      // from under `subs`, corrupting the reorder-on-Apply write above,
-      // which depends on those line numbers staying valid for the whole
-      // dialog session.
+      // Same soft-delete protection as the board's own subtask editor
+      // (onSubDblClick): a subtask something else depends on is always just
+      // marked deleted, never physically removed (see deleteCardOrSubtask).
       async (subLine) => {
-        const ok = await markLineDeleted(app, filePath, subLine, config);
+        const siblingArr = findSiblingArrayContaining(subs, subLine);
+        const idx = siblingArr?.findIndex((s: any) => s.line === subLine) ?? -1;
+        const node = idx >= 0 ? siblingArr![idx] : null;
+        const hasDependents = !!(node && siblingArr && isDependedOn(node, siblingArr, idx));
+        const lastLine = maxSubLine(node?.subs || []) || subLine;
+        const ok = await deleteCardOrSubtask(app, filePath, subLine, lastLine, config, false, false, [], false, hasDependents);
         if (ok) requestAnimationFrame(() => setTimeout(refresh, 50));
         return ok;
+      },
+      async (subLine, newMarker) => {
+        await toggleDependencyMarker(app, filePath, subLine, newMarker);
+        requestAnimationFrame(() => setTimeout(refresh, 50));
       },
       () => {
         archiveDoneSubtasks(app, filePath, lineNum, subs, config).then((result) => {
