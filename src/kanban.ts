@@ -709,6 +709,20 @@ function addRepeatInterval(base: Date, spec: RepeatSpec): Date {
   return d;
 }
 
+// The next future occurrence: one interval past `base`, then rolled forward by
+// whole intervals until it lands after today. The roll-forward matters when
+// `base` (the last completion) is already several intervals stale — a chore
+// missed for cycles schedules its *next* due date, it doesn't come due once per
+// missed cycle. In the normal case (completed today/yesterday) the loop never
+// runs, so "count from completion, not from archival" still holds.
+function nextRepeatDate(base: Date, spec: RepeatSpec): Date {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  let d = addRepeatInterval(base, spec);
+  while (d <= today) d = addRepeatInterval(d, spec);
+  return d;
+}
+
 function lastDayOfMonth(date: Date): number {
   return new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
 }
@@ -1807,6 +1821,22 @@ async function moveToColumn(
     if (parsed.checked !== null) parsed.checked = isDone;
     if (clearDate) parsed.date = null;
     if (dateStrToAppend) parsed.date = dateStrToAppend;
+    // A recurring card/subcard returning to Recurrent from another column
+    // advances its own "@repeat" interval to the next future occurrence — same
+    // rule as completion+archive (see archiveLine). Applied after the
+    // clearDate/dateStrToAppend handling above so it's the authoritative
+    // next-fire date. Skipped on an intra-Recurrent reorder (it was already
+    // there) so the date isn't pushed out on every drag.
+    if (
+      config.normRecurrent && normalizeTag(targetTag) === config.normRecurrent &&
+      !originalTags.some((t) => normalizeTag(t) === config.normRecurrent)
+    ) {
+      const repeatSpec = extractRepeatSpec(lines[idx]);
+      if (repeatSpec) {
+        const completedOn = parsed.doneDate ? new Date(parsed.doneDate + "T00:00:00") : new Date();
+        parsed.date = formatDateAnnotation(nextRepeatDate(completedOn, repeatSpec));
+      }
+    }
     if (isDone) {
       const n = new Date();
       const todayStr = `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,"0")}-${String(n.getDate()).padStart(2,"0")}`;
@@ -1875,6 +1905,16 @@ async function uncheckSubtasks(app: App, filePath: string, subs: any[], config: 
           const hadOwnKanbanTag = parsed.tags.some((t) => config.normKanban.includes(normalizeTag(t)));
           let lineChanged = false;
           if (parsed.checked === true) {
+            // A recurring subtask (its own "@repeat:N<unit>") cycles here just
+            // like the completion+archive path (see archiveLine): advance its
+            // next-fire date off the occurrence that just finished, then reset.
+            // Only checked subtasks reach this, so an intra-Recurrent reorder
+            // (whose subtasks are already unchecked) never re-advances a date.
+            const repeatSpec = extractRepeatSpec(lines[idx]);
+            if (repeatSpec) {
+              const completedOn = parsed.doneDate ? new Date(parsed.doneDate + "T00:00:00") : new Date();
+              parsed.date = formatDateAnnotation(nextRepeatDate(completedOn, repeatSpec));
+            }
             parsed.checked = false;
             parsed.doneDate = null;
             lineChanged = true;
@@ -2138,21 +2178,39 @@ async function archiveToSection(
       const hadOwnKanbanTag = parsed.tags.some((t) => config.normKanban.includes(normalizeTag(t)));
       parsed.tags = parsed.tags.filter((t) => !config.normKanban.includes(normalizeTag(t)));
       parsed.orderDigits = null;
-      if (_isTopLevel && keepRecurring && config.normRecurrent && hasRecurrentAnnotation(lines[idx], config.normRecurrent)) {
+      const repeatSpec = extractRepeatSpec(lines[idx]);
+      // Re-arm this line on archive when it's "@recurrent" AND either a
+      // top-level card (any trigger kind) or it carries its own "@repeat:N<unit>"
+      // interval — a recurring subtask (promoted to its own card when it fires)
+      // included. Commit c80bc6b had gated the whole thing on _isTopLevel, which
+      // left completed recurring subtasks stuck [x] with a stale past date; the
+      // "@repeat" clause is what lets them cycle again at any nesting depth.
+      // (A weekday-only "@recurrent @tue" *subtask* archived on its own still
+      // isn't re-armed here — no interval to advance — matching c80bc6b's
+      // conservatism for non-interval subtasks.)
+      if (
+        keepRecurring && config.normRecurrent &&
+        hasRecurrentAnnotation(lines[idx], config.normRecurrent) &&
+        (_isTopLevel || repeatSpec !== null)
+      ) {
         hasRecurrentInBlock = true;
         // Interval-based recurrence: push the next-fire date out by the repeat interval,
         // counted from the day the card was actually completed (not from whenever it
         // happens to get archived).
-        const repeatSpec = extractRepeatSpec(lines[idx]);
         const completedOn = parsed.doneDate ? new Date(parsed.doneDate + "T00:00:00") : new Date();
-        // Reset recurrent card: uncheck, restore #recurrent tag. The done-date
-        // from the occurrence that just finished is deliberately kept (not
-        // cleared) — it records when the card was last completed while it
-        // sits in Recurrent, and is only cleared once the card fires again
-        // into Due (see moveToColumn).
+        // Reset recurrent item: uncheck, and (top-level card only) restore the
+        // #recurrent column tag. The done-date from the occurrence that just
+        // finished is deliberately kept (not cleared) — it records when the
+        // card was last completed while it sits in Recurrent, and is only
+        // cleared once the card fires again into Due (see moveToColumn).
         if (parsed.checked !== null) parsed.checked = false;
-        parsed.tags.push(config.recurrentColumn);
-        parsed.date = repeatSpec ? formatDateAnnotation(addRepeatInterval(completedOn, repeatSpec)) : null;
+        // Only a genuine top-level card joins the Recurrent COLUMN. A recurring
+        // subtask stays nested under its container — the #recurrent tag is what
+        // made a leftover-"@recurrent" subtask resurface as a phantom card
+        // (c80bc6b); triggerRecurrentSubs re-fires a real one in place off its
+        // freshly-advanced @date.
+        if (_isTopLevel) parsed.tags.push(config.recurrentColumn);
+        parsed.date = repeatSpec ? formatDateAnnotation(nextRepeatDate(completedOn, repeatSpec)) : null;
         // Skip date is intentionally left untouched here: it was already stamped with
         // today when the card fired into Due, and that stamp is what stops same-day
         // re-firing once it returns to Recurrent (see moveToColumn). Restamping it to

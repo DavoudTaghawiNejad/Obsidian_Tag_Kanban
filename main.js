@@ -442,6 +442,14 @@ function addRepeatInterval(base, spec) {
   }
   return d;
 }
+function nextRepeatDate(base, spec) {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  let d = addRepeatInterval(base, spec);
+  while (d <= today)
+    d = addRepeatInterval(d, spec);
+  return d;
+}
 function lastDayOfMonth(date) {
   return new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
 }
@@ -1222,6 +1230,13 @@ async function moveToColumn(app, filePath, lineNum, originalTags, targetTag, isD
       parsed.date = null;
     if (dateStrToAppend)
       parsed.date = dateStrToAppend;
+    if (config.normRecurrent && normalizeTag(targetTag) === config.normRecurrent && !originalTags.some((t) => normalizeTag(t) === config.normRecurrent)) {
+      const repeatSpec = extractRepeatSpec(lines[idx]);
+      if (repeatSpec) {
+        const completedOn = parsed.doneDate ? new Date(parsed.doneDate + "T00:00:00") : new Date();
+        parsed.date = formatDateAnnotation(nextRepeatDate(completedOn, repeatSpec));
+      }
+    }
     if (isDone) {
       const n2 = new Date();
       const todayStr = `${n2.getFullYear()}-${String(n2.getMonth() + 1).padStart(2, "0")}-${String(n2.getDate()).padStart(2, "0")}`;
@@ -1264,6 +1279,11 @@ async function uncheckSubtasks(app, filePath, subs, config) {
           const hadOwnKanbanTag = parsed.tags.some((t) => config.normKanban.includes(normalizeTag(t)));
           let lineChanged = false;
           if (parsed.checked === true) {
+            const repeatSpec = extractRepeatSpec(lines[idx]);
+            if (repeatSpec) {
+              const completedOn = parsed.doneDate ? new Date(parsed.doneDate + "T00:00:00") : new Date();
+              parsed.date = formatDateAnnotation(nextRepeatDate(completedOn, repeatSpec));
+            }
             parsed.checked = false;
             parsed.doneDate = null;
             lineChanged = true;
@@ -1442,14 +1462,15 @@ async function archiveToSection(app, filePath, mainLineNum, subLines, config, _i
       const hadOwnKanbanTag = parsed.tags.some((t) => config.normKanban.includes(normalizeTag(t)));
       parsed.tags = parsed.tags.filter((t) => !config.normKanban.includes(normalizeTag(t)));
       parsed.orderDigits = null;
-      if (_isTopLevel && keepRecurring && config.normRecurrent && hasRecurrentAnnotation(lines[idx], config.normRecurrent)) {
+      const repeatSpec = extractRepeatSpec(lines[idx]);
+      if (keepRecurring && config.normRecurrent && hasRecurrentAnnotation(lines[idx], config.normRecurrent) && (_isTopLevel || repeatSpec !== null)) {
         hasRecurrentInBlock = true;
-        const repeatSpec = extractRepeatSpec(lines[idx]);
         const completedOn = parsed.doneDate ? new Date(parsed.doneDate + "T00:00:00") : new Date();
         if (parsed.checked !== null)
           parsed.checked = false;
-        parsed.tags.push(config.recurrentColumn);
-        parsed.date = repeatSpec ? formatDateAnnotation(addRepeatInterval(completedOn, repeatSpec)) : null;
+        if (_isTopLevel)
+          parsed.tags.push(config.recurrentColumn);
+        parsed.date = repeatSpec ? formatDateAnnotation(nextRepeatDate(completedOn, repeatSpec)) : null;
         parsed.createdDate = null;
         lines[idx] = serializeTaskLine(parsed);
       } else if (tickBox && parsed.checked !== null) {
