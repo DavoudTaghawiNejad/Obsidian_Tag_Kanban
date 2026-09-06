@@ -302,6 +302,29 @@ const isDeletedTag = (t: string) => normalizeTag(t) === normalizeTag(DELETED_TAG
 // done" button — see archiveCheckedSubtasks.
 const ARCHIVED_TAG = "#archived";
 
+// ─── UNCOUNTED (statistics exclusion) ────────────────────────────────────────
+// Two independent markers, both stamped as "%% @… %%" comments so Obsidian's
+// reading view never shows them (see TaskLine.uncounted/uncountedChildren):
+//   %% @uncounted %%          — this exact line is excluded from statistics.
+//   %% @uncounted_children %% — every descendant of this line, any depth, is
+//                                excluded; the line itself still counts.
+//   %% @ucc %%                — typing shorthand for @uncounted_children,
+//                                normalized to the long form by
+//                                expandUncountedShorthand on every scan.
+// The two are composable: a line carrying both drops itself and its whole
+// subtree. Deliberately lenient on internal whitespace on read (unlike most
+// other "%% @… %%" comments here); always written back in canonical form.
+const UNCOUNTED_RE = /%%\s*@uncounted\s*%%/;
+const UNCOUNTED_CHILDREN_RE = /%%\s*@(?:uncounted_children|ucc)\s*%%/;
+
+export function isUncountedText(text: string): boolean {
+  return UNCOUNTED_RE.test(text ?? "");
+}
+
+export function isUncountedChildrenText(text: string): boolean {
+  return UNCOUNTED_CHILDREN_RE.test(text ?? "");
+}
+
 // ─── ORDER-COMMENT PARSING ────────────────────────────────────────────────────
 // Format: %% @<digits> %% or %% @-<digits> %% (a leading '-' places the card
 // below zero — see the ORDER ARITHMETIC section for why that's useful).
@@ -344,6 +367,8 @@ interface TaskLine {
   skipDate: string | null;                     // "%% @skip:YYYY-MM-DD %%" comment
   color: string | null;                        // "%% @color:#RRGGBB %%" comment
   dependsOn: ">" | "^" | null;                 // depends on preceding sibling / parent, or neither
+  uncounted: boolean;                          // "%% @uncounted %%" comment
+  uncountedChildren: boolean;                  // "%% @uncounted_children %%"/"%% @ucc %%" comment
 }
 
 function parseTaskLine(raw: string): TaskLine {
@@ -372,6 +397,11 @@ function parseTaskLine(raw: string): TaskLine {
   let deletedDate: string | null = null;
   const dlm = rest.match(/%% @deleted:(\d{4}-\d{2}-\d{2}) %%/);
   if (dlm) deletedDate = dlm[1];
+  // Uncounted markers — preserve across parse/serialize round-trips (see the
+  // UNCOUNTED section above; "@ucc" is normalized to uncountedChildren here,
+  // same as this parse already tolerates the legacy order-comment letter).
+  const uncounted = UNCOUNTED_RE.test(rest);
+  const uncountedChildren = UNCOUNTED_CHILDREN_RE.test(rest);
   rest = rest.replace(/\s*%%[\s\S]*?%%\s*/g, " ").trim();
 
   // Date annotation (@YYYY-MM-DD)
@@ -416,7 +446,7 @@ function parseTaskLine(raw: string): TaskLine {
   const tags = (rest.match(/(?<!\w)#\w+/g) || []);
   const text = rest.replace(/\s*(?<!\w)#\w+/g, "").trim();
 
-  return { indent, bullet, checked, text, tags, date, doneDate, createdDate, deletedDate, orderDigits, skipDate, color, dependsOn };
+  return { indent, bullet, checked, text, tags, date, doneDate, createdDate, deletedDate, orderDigits, skipDate, color, dependsOn, uncounted, uncountedChildren };
 }
 
 function serializeTaskLine(t: TaskLine): string {
@@ -447,6 +477,14 @@ function serializeTaskLine(t: TaskLine): string {
   }
   if (t.color) {
     parts.push(`%% @color:${t.color} %%`);
+  }
+  // Always written in canonical long form — this is what normalizes a
+  // hand-typed "%% @ucc %%" the moment the line is next parsed/serialized.
+  if (t.uncounted) {
+    parts.push("%% @uncounted %%");
+  }
+  if (t.uncountedChildren) {
+    parts.push("%% @uncounted_children %%");
   }
 
   return t.indent + parts.join(" ");
@@ -1465,6 +1503,26 @@ async function updateCardColor(app: App, filePath: string, lineNum: number, colo
   await writeFileLines(app, tFile, lines);
 }
 
+// Sets both uncounted markers on a line at once (the edit-card dialog's two
+// checkboxes apply together on a single Apply click) — see the UNCOUNTED
+// section above. Skips the write when neither flag actually changes, same
+// guard updateFileOrderComment uses, to avoid a pointless vault.modify.
+async function setLineUncountedFlags(
+  app: App,
+  filePath: string,
+  lineNum: number,
+  opts: { uncounted: boolean; uncountedChildren: boolean }
+): Promise<void> {
+  const { tFile, lines } = await readFileLines(app, filePath);
+  if (lineNum < 1 || lineNum > lines.length) return;
+  const parsed = parseTaskLine(lines[lineNum - 1]);
+  if (parsed.uncounted === opts.uncounted && parsed.uncountedChildren === opts.uncountedChildren) return;
+  parsed.uncounted = opts.uncounted;
+  parsed.uncountedChildren = opts.uncountedChildren;
+  lines[lineNum - 1] = serializeTaskLine(parsed);
+  await writeFileLines(app, tFile, lines);
+}
+
 // Subtasks have no persisted order field — a subtask's order *is* its
 // physical line position in the file. `subs` is every direct child of a
 // card, in original file order (deleted-but-still-present ones included, so
@@ -1583,6 +1641,10 @@ async function editCardText(
     const orderComment = orderMatch ? orderMatch[0] : "";
     const colorMatch = original.match(/%% @color:#[0-9a-fA-F]{6} %%/);
     const colorComment = colorMatch ? colorMatch[0] : "";
+    // Re-emitted in canonical long form regardless of which spelling was on
+    // disk — same normalization serializeTaskLine does elsewhere.
+    const uncountedComment = UNCOUNTED_RE.test(original) ? "%% @uncounted %%" : "";
+    const uncountedChildrenComment = UNCOUNTED_CHILDREN_RE.test(original) ? "%% @uncounted_children %%" : "";
 
     // Ctrl+Enter while inline-editing inserts a literal newline instead of
     // committing, so this line's text can spawn new child subtasks right
@@ -1604,6 +1666,8 @@ async function editCardText(
     if (createdComment) parts.push(createdComment);
     if (orderComment) parts.push(orderComment);
     if (colorComment) parts.push(colorComment);
+    if (uncountedComment) parts.push(uncountedComment);
+    if (uncountedChildrenComment) parts.push(uncountedChildrenComment);
     lines.splice(lineNum - 1, 1, parts.join(" "), ...childLines);
 
     await writeFileLines(app, tFile, lines);
@@ -1874,7 +1938,8 @@ async function addNewItem(
   config: KanbanConfig,
   notesText = "",
   docName = "",
-  defaultDocName = ""
+  defaultDocName = "",
+  uncounted = false
 ): Promise<boolean> {
   try {
     if (!userText?.trim()) return false;
@@ -1917,6 +1982,7 @@ async function addNewItem(
         newLine = setSkipDate(newLine, skipStr);
       }
     }
+    if (uncounted) newLine += " %% @uncounted %%";
     const projLines = (await app.vault.read(projFile)).split("\n");
     const insertAt = afterLeadingHeading(projLines, afterFrontMatter(projLines));
     projLines.splice(insertAt, 0, newLine, ...noteLines);
@@ -2907,6 +2973,14 @@ function checklistButtonHtml(id: string, title: string) {
   return `<button type="button" id="${id}" title="${title}" style="${style}">Insert &#9744;</button>`;
 }
 
+// A plain (unstyled) checkbox + label, shared by the add-card dialogs and the
+// edit-card dialog for toggling the "%% @uncounted %%"/"%% @uncounted_children %%"
+// markers — see the UNCOUNTED section near DELETED_TAG/ARCHIVED_TAG.
+function uncountedCheckboxHtml(id: string, label: string, checked: boolean): string {
+  const style = "display:flex;align-items:center;gap:6px;font-size:.9em;color:var(--text-muted);margin-bottom:10px;cursor:pointer;";
+  return `<label style="${style}"><input type="checkbox" id="${id}"${checked ? " checked" : ""}> ${label}</label>`;
+}
+
 // The doc-name field's "▾" browse button: reveals the file-suggest popover
 // (see wireDocNameField) without needing to press an arrow/Tab key first.
 function docBrowseBtnStyle() {
@@ -3171,7 +3245,7 @@ function wireDocNameField(app: App, dialog: HTMLElement, defaultDocName: string,
   return () => docNameInput.value.trim();
 }
 
-function showInputDialog(title: string, app: App, defaultDocName: string, onSubmit: (v: string, notes: string, docName: string) => void) {
+function showInputDialog(title: string, app: App, defaultDocName: string, onSubmit: (v: string, notes: string, docName: string, uncounted: boolean) => void) {
   const { dialog, close, setEscapeHandler } = makeOverlay("kanban-input-dialog", app);
   dialog.innerHTML = `<h3 style="margin:0 0 10px;font-size:1.1em;">${title}</h3>
     <input id="k-text" type="text" placeholder="Enter new item text..." style="${inputStyle()}" autofocus>
@@ -3180,6 +3254,7 @@ function showInputDialog(title: string, app: App, defaultDocName: string, onSubm
       <textarea id="k-notes" placeholder="Subtasks..." style="${textareaStyle()}margin-top:10px;"></textarea>
       <div style="text-align:left;">${checklistButtonHtml("k-notes-checklist", "Insert checklist item")}</div>
     </details>
+    <div style="text-align:left;">${uncountedCheckboxHtml("k-uncounted", "Don't count this card in statistics", false)}</div>
     ${docNameFieldHtml()}
     <div id="k-actions" style="display:flex;gap:10px;justify-content:center;">${buttonHtml("Add", true)}${buttonHtml("Cancel", false)}</div>`;
 
@@ -3187,14 +3262,16 @@ function showInputDialog(title: string, app: App, defaultDocName: string, onSubm
   const input = dialog.querySelector("#k-text") as HTMLInputElement;
   const notesInput = dialog.querySelector("#k-notes") as HTMLTextAreaElement;
   const checklistBtn = dialog.querySelector("#k-notes-checklist") as HTMLButtonElement;
+  const uncountedInput = dialog.querySelector("#k-uncounted") as HTMLInputElement;
   let submit: () => void;
   const getDocName = wireDocNameField(app, dialog, defaultDocName, () => submit(), close, setEscapeHandler);
   submit = () => {
     const v = input.value.trim();
     const notes = notesInput.value;
     const docName = getDocName();
+    const uncounted = uncountedInput.checked;
     close();
-    if (v) onSubmit(v, notes, docName);
+    if (v) onSubmit(v, notes, docName, uncounted);
   };
   addBtn.onclick = submit;
   cancelBtn.onclick = close;
@@ -3212,7 +3289,7 @@ function showDateDialog(
   title: string,
   defaultDate: string,
   app: App,
-  onSubmit: (dateStr: string | null, text?: string, notes?: string, docName?: string) => void,
+  onSubmit: (dateStr: string | null, text?: string, notes?: string, docName?: string, uncounted?: boolean) => void,
   opts: { withText?: boolean; defaultDocName?: string } = {}
 ) {
   const { withText, defaultDocName } = opts;
@@ -3234,7 +3311,8 @@ function showDateDialog(
       <summary style="cursor:pointer;color:var(--text-muted);">Add subtasks</summary>
       <textarea id="k-notes" placeholder="Subtasks..." style="${textareaStyle()}margin-top:10px;"></textarea>
       <div style="text-align:left;">${checklistButtonHtml("k-notes-checklist", "Insert checklist item")}</div>
-    </details>` : ""}
+    </details>
+    <div style="text-align:left;">${uncountedCheckboxHtml("k-uncounted", "Don't count this card in statistics", false)}</div>` : ""}
     <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:center;margin-bottom:8px;">${presetBtnsHtml}</div>
     <input id="k-date" type="date" value="${defaultDate}" style="${dateInputStyle()}" ${withText ? "" : "autofocus"}>
     ${withText ? docNameFieldHtml() : ""}
@@ -3244,6 +3322,7 @@ function showDateDialog(
   const textInput = withText ? (dialog.querySelector("#k-text") as HTMLInputElement) : null;
   const notesInput = withText ? (dialog.querySelector("#k-notes") as HTMLTextAreaElement) : null;
   const checklistBtn = withText ? (dialog.querySelector("#k-notes-checklist") as HTMLButtonElement) : null;
+  const uncountedInput = withText ? (dialog.querySelector("#k-uncounted") as HTMLInputElement) : null;
   const dateInput = dialog.querySelector("#k-date") as HTMLInputElement;
   let submit: (useDate: boolean) => void;
   const getDocName = withText ? wireDocNameField(app, dialog, defaultDocName ?? "", () => submit(true), close, setEscapeHandler) : null;
@@ -3268,8 +3347,9 @@ function showDateDialog(
     const d = useDate ? dateInput.value : "";
     const notes = notesInput?.value ?? "";
     const docName = getDocName?.();
+    const uncounted = uncountedInput?.checked ?? false;
     close();
-    onSubmit(d ? "@" + d : null, withText ? t : undefined, withText ? notes : undefined, docName);
+    onSubmit(d ? "@" + d : null, withText ? t : undefined, withText ? notes : undefined, docName, withText ? uncounted : undefined);
   };
   actionBtn.onclick = () => submit(true);
   noDateBtn.onclick = () => submit(false);
@@ -4588,7 +4668,15 @@ function showCardColorDialog(
   cardLineNum: number,
   subtaskTree: DialogNode[],
   config: KanbanConfig,
+  // The card's own current "%% @uncounted %%"/"%% @uncounted_children %%"
+  // state — see the UNCOUNTED section near DELETED_TAG/ARCHIVED_TAG.
+  existingUncounted: boolean,
+  existingUncountedChildren: boolean,
   onApply: (hex: string | null) => void,
+  // Fired only when either uncounted checkbox differs from its existing*
+  // value at Apply time — a plain field set, not folded into onApply/hex
+  // since it's independent of the color.
+  onSetUncountedFlags: (uncounted: boolean, uncountedChildren: boolean) => void,
   // Fired only when the subtask tree actually changed by the time Apply was
   // clicked — see wireSubtaskTree's `dirty` tracking. Everything about the
   // move (every reorder and every reparent from this whole session) is
@@ -4663,10 +4751,22 @@ function showCardColorDialog(
       <div id="k-subtask-col" style="flex:1;min-height:0;overflow-y:auto;padding:8px;border:1px solid var(--background-modifier-border);border-radius:8px;background:var(--background-secondary);display:flex;flex-direction:column;"></div>
     </div>`;
 
+  // The "don't count its subtasks" toggle is only offered when there's
+  // something for it to actually do — a card with no subtasks yet has
+  // nothing to exclude. Still offered despite an empty tree if the flag is
+  // somehow already set (e.g. every subtask was since removed, or "@ucc" was
+  // hand-typed onto the card line itself) — hiding it then would leave no
+  // way to clear it from this dialog.
+  const hasSubtasks = subtaskTree.length > 0 || existingUncountedChildren;
+
   dialog.innerHTML = `
     <div style="flex-shrink:0;">
       <h3 id="k-card-title-row" style="margin:0 0 12px;font-size:1.1em;overflow-wrap:anywhere;border-radius:6px;">${title || "Card"}</h3>
       <div id="k-color-swatches" style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center;">${swatchesHtml}</div>
+      <div style="display:flex;flex-direction:column;align-items:flex-start;margin-top:10px;">
+        ${uncountedCheckboxHtml("k-card-uncounted", "Don't count this card in statistics", existingUncounted)}
+        ${hasSubtasks ? uncountedCheckboxHtml("k-card-uncounted-children", "Don't count its subtasks in statistics", existingUncountedChildren) : ""}
+      </div>
     </div>
     ${subtaskSectionHtml}
     <div id="k-color-actions" style="flex-shrink:0;margin-top:14px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap;align-items:center;">${buttonHtml("Apply", true)}${buttonHtml("Cancel", false)}<button id="k-color-delete" type="button" style="${deleteBtnStyle}">Delete</button></div>`;
@@ -4757,6 +4857,11 @@ function showCardColorDialog(
 
   const swatchWrap = dialog.querySelector("#k-color-swatches") as HTMLElement;
   const [applyBtn, cancelBtn] = dialog.querySelectorAll<HTMLButtonElement>("#k-color-actions button");
+  const uncountedCheckbox = dialog.querySelector<HTMLInputElement>("#k-card-uncounted")!;
+  // Absent from the DOM entirely when !hasSubtasks (see above) — Apply then
+  // just keeps existingUncountedChildren (false, since that's the only way
+  // hasSubtasks can be false) unchanged.
+  const uncountedChildrenCheckbox = dialog.querySelector<HTMLInputElement>("#k-card-uncounted-children");
 
   const currentHex = (): string | null =>
     selectedHue === -2 ? null :
@@ -4781,9 +4886,14 @@ function showCardColorDialog(
   applyBtn.onclick = () => {
     const finalTree = root.children;
     const wasDirty = dirty;
+    const newUncounted = uncountedCheckbox.checked;
+    const newUncountedChildren = uncountedChildrenCheckbox?.checked ?? existingUncountedChildren;
     closeAndCleanup();
     onApply(currentHex());
     if (wasDirty) onReorder(finalTree);
+    if (newUncounted !== existingUncounted || newUncountedChildren !== existingUncountedChildren) {
+      onSetUncountedFlags(newUncounted, newUncountedChildren);
+    }
   };
   cancelBtn.onclick = closeAndCleanup;
   deleteBtn.onclick = () => { closeAndCleanup(); onDelete(); };
@@ -5495,6 +5605,31 @@ export async function stampMissingCreatedDates(app: App, paths: string[], config
   }
 }
 
+// Normalizes the "%% @ucc %%" shorthand to its canonical long form,
+// "%% @uncounted_children %%", directly in each target file — see the
+// UNCOUNTED section above. parseTaskLine/serializeTaskLine already treat the
+// two spellings identically, so statistics are correct even before this runs;
+// this pass just keeps the on-disk text self-documenting. A plain string
+// replace (not a parseTaskLine/serializeTaskLine round-trip) so a line with no
+// other structural comment isn't otherwise touched. Only writes a file when
+// something on it actually changed, same as every other normalizing pass here.
+export async function expandUncountedShorthand(app: App, paths: string[]): Promise<void> {
+  for (const filePath of paths) {
+    const tFile = app.vault.getAbstractFileByPath(filePath) as TFile | null;
+    if (!tFile) continue;
+    const lines = (await getCachedFileLines(app, filePath)).slice();
+    let changed = false;
+    for (let i = 0; i < lines.length; i++) {
+      const next = lines[i].replace(/%%\s*@ucc\s*%%/g, "%% @uncounted_children %%");
+      if (next !== lines[i]) {
+        lines[i] = next;
+        changed = true;
+      }
+    }
+    if (changed) await vaultModify(app, tFile, lines.join("\n"));
+  }
+}
+
 export const KANBAN_NARROW_BREAKPOINT = 700;
 
 export function isNarrowLayout(width: number): boolean {
@@ -5770,6 +5905,9 @@ export async function buildBoard(
 
   // Step A1b: backfill "%% @created %%" onto any card/subtask found without one
   await stampMissingCreatedDates(app, paths, config);
+
+  // Step A1c: normalize "%% @ucc %%" → "%% @uncounted_children %%" on disk
+  await expandUncountedShorthand(app, paths);
 
   let items = await collectItems(app, paths, config);
 
@@ -6313,14 +6451,21 @@ export function attachListeners(
     // may be stale by however long the board's been open) so the dialog's
     // in-memory tree — and every trailingRaw boundary/line number it
     // captures — is guaranteed to match what's actually on disk right now.
+    // Also the only place the card's own uncounted markers are read from:
+    // card.dataset.raw has its "%% … %%" comments already stripped (see
+    // createCardHTML), so it can't answer this.
     let subs: any[] = [];
     let tree: DialogNode[] = [];
+    let uncounted = false;
+    let uncountedChildren = false;
     try {
       const { lines } = await readFileLines(app, filePath);
       const fileItems = parseFileEntries(lines, filePath, config);
       const cardEntry = fileItems.find((f: any) => f.item.line === lineNum);
       subs = cardEntry?.item.subs || [];
       tree = buildDialogTree(lines, subs);
+      uncounted = isUncountedText(cardEntry?.item.text ?? "");
+      uncountedChildren = isUncountedChildrenText(cardEntry?.item.text ?? "");
     } catch { /* ignore — dialog opens with no subtasks */ }
 
     showCardColorDialog(
@@ -6330,8 +6475,14 @@ export function attachListeners(
       lineNum,
       tree,
       config,
+      uncounted,
+      uncountedChildren,
       async (hex) => {
         await updateCardColor(app, filePath, lineNum, hex);
+        requestAnimationFrame(() => setTimeout(refresh, 50));
+      },
+      async (newUncounted, newUncountedChildren) => {
+        await setLineUncountedFlags(app, filePath, lineNum, { uncounted: newUncounted, uncountedChildren: newUncountedChildren });
         requestAnimationFrame(() => setTimeout(refresh, 50));
       },
       // The whole session's pending reorders/reparents, already folded into
@@ -7475,12 +7626,12 @@ export function attachListeners(
 
     if (norm === config.normLater) {
       const defDate = getDefaultDate().toISOString().split("T")[0];
-      showDateDialog(title, defDate, app, async (dateStr, text, notes, docName) => {
-        if (text && await addNewItem(app, tag, text, dateStr, config, notes, docName, defaultDocName))
+      showDateDialog(title, defDate, app, async (dateStr, text, notes, docName, uncounted) => {
+        if (text && await addNewItem(app, tag, text, dateStr, config, notes, docName, defaultDocName, uncounted))
           requestAnimationFrame(() => setTimeout(refresh, 50));
       }, { withText: true, defaultDocName });
     } else if (config.normRecurrent && norm === config.normRecurrent) {
-      showInputDialog(title, app, defaultDocName, (text: string, notes: string, docName: string) => {
+      showInputDialog(title, app, defaultDocName, (text: string, notes: string, docName: string, uncounted: boolean) => {
         showRecurrentTriggerDialog(app, async (triggerStr) => {
           const n = new Date();
           const skipStr = `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;
@@ -7489,13 +7640,13 @@ export function attachListeners(
           // brand-new empty container isn't immediately swept into Due.
           const recurrentPart = triggerStr ? ` @${config.normRecurrent} ${triggerStr}` : '';
           const annotated = `${text}${recurrentPart} %% @skip:${skipStr} %%`;
-          if (await addNewItem(app, tag, annotated, null, config, notes, docName, defaultDocName))
+          if (await addNewItem(app, tag, annotated, null, config, notes, docName, defaultDocName, uncounted))
             requestAnimationFrame(() => setTimeout(refresh, 50));
         });
       });
     } else {
-      showInputDialog(title, app, defaultDocName, async (text: string, notes: string, docName: string) => {
-        if (await addNewItem(app, tag, text, null, config, notes, docName, defaultDocName))
+      showInputDialog(title, app, defaultDocName, async (text: string, notes: string, docName: string, uncounted: boolean) => {
+        if (await addNewItem(app, tag, text, null, config, notes, docName, defaultDocName, uncounted))
           requestAnimationFrame(() => setTimeout(refresh, 50));
       });
     }

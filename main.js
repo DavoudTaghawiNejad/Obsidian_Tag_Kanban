@@ -178,6 +178,14 @@ function extractTags(text) {
 var DELETED_TAG = "#deleted";
 var isDeletedTag = (t) => normalizeTag(t) === normalizeTag(DELETED_TAG);
 var ARCHIVED_TAG = "#archived";
+var UNCOUNTED_RE = /%%\s*@uncounted\s*%%/;
+var UNCOUNTED_CHILDREN_RE = /%%\s*@(?:uncounted_children|ucc)\s*%%/;
+function isUncountedText(text) {
+  return UNCOUNTED_RE.test(text ?? "");
+}
+function isUncountedChildrenText(text) {
+  return UNCOUNTED_CHILDREN_RE.test(text ?? "");
+}
 function parseOrderComment(text) {
   const m = text.match(/%% @(-?\d+)\w? %%/);
   if (!m)
@@ -209,6 +217,8 @@ function parseTaskLine(raw) {
   const dlm = rest.match(/%% @deleted:(\d{4}-\d{2}-\d{2}) %%/);
   if (dlm)
     deletedDate = dlm[1];
+  const uncounted = UNCOUNTED_RE.test(rest);
+  const uncountedChildren = UNCOUNTED_CHILDREN_RE.test(rest);
   rest = rest.replace(/\s*%%[\s\S]*?%%\s*/g, " ").trim();
   let date = null;
   const dm = rest.match(/(^|\s)(@\d{4}-\d{2}-\d{2})\b/);
@@ -242,7 +252,7 @@ function parseTaskLine(raw) {
   }
   const tags = rest.match(/(?<!\w)#\w+/g) || [];
   const text = rest.replace(/\s*(?<!\w)#\w+/g, "").trim();
-  return { indent, bullet, checked, text, tags, date, doneDate, createdDate, deletedDate, orderDigits, skipDate, color, dependsOn };
+  return { indent, bullet, checked, text, tags, date, doneDate, createdDate, deletedDate, orderDigits, skipDate, color, dependsOn, uncounted, uncountedChildren };
 }
 function serializeTaskLine(t) {
   const parts = [];
@@ -271,6 +281,12 @@ function serializeTaskLine(t) {
   }
   if (t.color) {
     parts.push(`%% @color:${t.color} %%`);
+  }
+  if (t.uncounted) {
+    parts.push("%% @uncounted %%");
+  }
+  if (t.uncountedChildren) {
+    parts.push("%% @uncounted_children %%");
   }
   return t.indent + parts.join(" ");
 }
@@ -1028,6 +1044,18 @@ async function updateCardColor(app, filePath, lineNum, color) {
   lines[lineNum - 1] = serializeTaskLine(parsed);
   await writeFileLines(app, tFile, lines);
 }
+async function setLineUncountedFlags(app, filePath, lineNum, opts) {
+  const { tFile, lines } = await readFileLines(app, filePath);
+  if (lineNum < 1 || lineNum > lines.length)
+    return;
+  const parsed = parseTaskLine(lines[lineNum - 1]);
+  if (parsed.uncounted === opts.uncounted && parsed.uncountedChildren === opts.uncountedChildren)
+    return;
+  parsed.uncounted = opts.uncounted;
+  parsed.uncountedChildren = opts.uncountedChildren;
+  lines[lineNum - 1] = serializeTaskLine(parsed);
+  await writeFileLines(app, tFile, lines);
+}
 async function updateCardTriggers(app, filePath, lineNum, normRecurrent, newTriggerStr) {
   const { tFile, lines } = await readFileLines(app, filePath);
   if (lineNum < 1 || lineNum > lines.length)
@@ -1081,6 +1109,8 @@ async function editCardText(app, filePath, lineNum, newText) {
     const orderComment = orderMatch ? orderMatch[0] : "";
     const colorMatch = original.match(/%% @color:#[0-9a-fA-F]{6} %%/);
     const colorComment = colorMatch ? colorMatch[0] : "";
+    const uncountedComment = UNCOUNTED_RE.test(original) ? "%% @uncounted %%" : "";
+    const uncountedChildrenComment = UNCOUNTED_CHILDREN_RE.test(original) ? "%% @uncounted_children %%" : "";
     const rawLines = newText.replace(/\r\n/g, "\n").split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
     const firstText = rawLines.length ? rawLines[0] : newText.trim();
     const childIndent = indent + "	";
@@ -1097,6 +1127,10 @@ async function editCardText(app, filePath, lineNum, newText) {
       parts.push(orderComment);
     if (colorComment)
       parts.push(colorComment);
+    if (uncountedComment)
+      parts.push(uncountedComment);
+    if (uncountedChildrenComment)
+      parts.push(uncountedChildrenComment);
     lines.splice(lineNum - 1, 1, parts.join(" "), ...childLines);
     await writeFileLines(app, tFile, lines);
     return true;
@@ -1282,7 +1316,7 @@ async function ensureParentFolder(app, path) {
     await app.vault.createFolder(dir);
   }
 }
-async function addNewItem(app, columnTag, userText, dateStr, config, notesText = "", docName = "", defaultDocName = "") {
+async function addNewItem(app, columnTag, userText, dateStr, config, notesText = "", docName = "", defaultDocName = "", uncounted = false) {
   try {
     if (!userText?.trim())
       return false;
@@ -1314,6 +1348,8 @@ async function addNewItem(app, columnTag, userText, dateStr, config, notesText =
         newLine = setSkipDate(newLine, skipStr);
       }
     }
+    if (uncounted)
+      newLine += " %% @uncounted %%";
     const projLines = (await app.vault.read(projFile)).split("\n");
     const insertAt = afterLeadingHeading(projLines, afterFrontMatter(projLines));
     projLines.splice(insertAt, 0, newLine, ...noteLines);
@@ -1936,6 +1972,10 @@ function checklistButtonHtml(id, title) {
   const style = "padding:3px 10px;border-radius:12px;border:1px solid var(--background-modifier-border);background:none;cursor:pointer;font-size:1em;line-height:1;display:inline-flex;align-items:center;gap:6px;color:inherit;margin-bottom:10px;";
   return `<button type="button" id="${id}" title="${title}" style="${style}">Insert &#9744;</button>`;
 }
+function uncountedCheckboxHtml(id, label, checked) {
+  const style = "display:flex;align-items:center;gap:6px;font-size:.9em;color:var(--text-muted);margin-bottom:10px;cursor:pointer;";
+  return `<label style="${style}"><input type="checkbox" id="${id}"${checked ? " checked" : ""}> ${label}</label>`;
+}
 function docBrowseBtnStyle() {
   return "padding:0 10px;border:1px solid var(--background-modifier-border);border-radius:4px;background:var(--background-secondary);color:var(--text-normal);cursor:pointer;font-size:1em;line-height:1;";
 }
@@ -2166,21 +2206,24 @@ function showInputDialog(title, app, defaultDocName, onSubmit) {
       <textarea id="k-notes" placeholder="Subtasks..." style="${textareaStyle()}margin-top:10px;"></textarea>
       <div style="text-align:left;">${checklistButtonHtml("k-notes-checklist", "Insert checklist item")}</div>
     </details>
+    <div style="text-align:left;">${uncountedCheckboxHtml("k-uncounted", "Don't count this card in statistics", false)}</div>
     ${docNameFieldHtml()}
     <div id="k-actions" style="display:flex;gap:10px;justify-content:center;">${buttonHtml("Add", true)}${buttonHtml("Cancel", false)}</div>`;
   const [addBtn, cancelBtn] = dialog.querySelectorAll("#k-actions button");
   const input = dialog.querySelector("#k-text");
   const notesInput = dialog.querySelector("#k-notes");
   const checklistBtn = dialog.querySelector("#k-notes-checklist");
+  const uncountedInput = dialog.querySelector("#k-uncounted");
   let submit;
   const getDocName = wireDocNameField(app, dialog, defaultDocName, () => submit(), close, setEscapeHandler);
   submit = () => {
     const v = input.value.trim();
     const notes = notesInput.value;
     const docName = getDocName();
+    const uncounted = uncountedInput.checked;
     close();
     if (v)
-      onSubmit(v, notes, docName);
+      onSubmit(v, notes, docName, uncounted);
   };
   addBtn.onclick = submit;
   cancelBtn.onclick = close;
@@ -2205,7 +2248,8 @@ function showDateDialog(title, defaultDate, app, onSubmit, opts = {}) {
       <summary style="cursor:pointer;color:var(--text-muted);">Add subtasks</summary>
       <textarea id="k-notes" placeholder="Subtasks..." style="${textareaStyle()}margin-top:10px;"></textarea>
       <div style="text-align:left;">${checklistButtonHtml("k-notes-checklist", "Insert checklist item")}</div>
-    </details>` : ""}
+    </details>
+    <div style="text-align:left;">${uncountedCheckboxHtml("k-uncounted", "Don't count this card in statistics", false)}</div>` : ""}
     <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:center;margin-bottom:8px;">${presetBtnsHtml}</div>
     <input id="k-date" type="date" value="${defaultDate}" style="${dateInputStyle()}" ${withText ? "" : "autofocus"}>
     ${withText ? docNameFieldHtml() : ""}
@@ -2214,6 +2258,7 @@ function showDateDialog(title, defaultDate, app, onSubmit, opts = {}) {
   const textInput = withText ? dialog.querySelector("#k-text") : null;
   const notesInput = withText ? dialog.querySelector("#k-notes") : null;
   const checklistBtn = withText ? dialog.querySelector("#k-notes-checklist") : null;
+  const uncountedInput = withText ? dialog.querySelector("#k-uncounted") : null;
   const dateInput = dialog.querySelector("#k-date");
   let submit;
   const getDocName = withText ? wireDocNameField(app, dialog, defaultDocName ?? "", () => submit(true), close, setEscapeHandler) : null;
@@ -2238,8 +2283,9 @@ function showDateDialog(title, defaultDate, app, onSubmit, opts = {}) {
     const d = useDate ? dateInput.value : "";
     const notes = notesInput?.value ?? "";
     const docName = getDocName?.();
+    const uncounted = uncountedInput?.checked ?? false;
     close();
-    onSubmit(d ? "@" + d : null, withText ? t : void 0, withText ? notes : void 0, docName);
+    onSubmit(d ? "@" + d : null, withText ? t : void 0, withText ? notes : void 0, docName, withText ? uncounted : void 0);
   };
   actionBtn.onclick = () => submit(true);
   noDateBtn.onclick = () => submit(false);
@@ -3228,7 +3274,7 @@ function wireSubtaskTree(app, containerEl, titleEl, root, config, onEditSubtask,
     }
   };
 }
-function showCardColorDialog(app, existingColor, title, cardLineNum, subtaskTree, config, onApply, onReorder, onDelete, onEditSubtask, onDeleteSubtask) {
+function showCardColorDialog(app, existingColor, title, cardLineNum, subtaskTree, config, existingUncounted, existingUncountedChildren, onApply, onSetUncountedFlags, onReorder, onDelete, onEditSubtask, onDeleteSubtask) {
   const { dialog, close, setEscapeHandler } = makeOverlay("kanban-card-color-dialog", app);
   dialog.style.maxWidth = "720px";
   const root = { id: cardLineNum, raw: "", trailingRaw: [], children: subtaskTree };
@@ -3258,10 +3304,15 @@ function showCardColorDialog(app, existingColor, title, cardLineNum, subtaskTree
       </div>
       <div id="k-subtask-col" style="flex:1;min-height:0;overflow-y:auto;padding:8px;border:1px solid var(--background-modifier-border);border-radius:8px;background:var(--background-secondary);display:flex;flex-direction:column;"></div>
     </div>`;
+  const hasSubtasks = subtaskTree.length > 0 || existingUncountedChildren;
   dialog.innerHTML = `
     <div style="flex-shrink:0;">
       <h3 id="k-card-title-row" style="margin:0 0 12px;font-size:1.1em;overflow-wrap:anywhere;border-radius:6px;">${title || "Card"}</h3>
       <div id="k-color-swatches" style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center;">${swatchesHtml}</div>
+      <div style="display:flex;flex-direction:column;align-items:flex-start;margin-top:10px;">
+        ${uncountedCheckboxHtml("k-card-uncounted", "Don't count this card in statistics", existingUncounted)}
+        ${hasSubtasks ? uncountedCheckboxHtml("k-card-uncounted-children", "Don't count its subtasks in statistics", existingUncountedChildren) : ""}
+      </div>
     </div>
     ${subtaskSectionHtml}
     <div id="k-color-actions" style="flex-shrink:0;margin-top:14px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap;align-items:center;">${buttonHtml("Apply", true)}${buttonHtml("Cancel", false)}<button id="k-color-delete" type="button" style="${deleteBtnStyle}">Delete</button></div>`;
@@ -3320,6 +3371,8 @@ function showCardColorDialog(app, existingColor, title, cardLineNum, subtaskTree
   dialogWindow?.addEventListener("resize", onWindowResize);
   const swatchWrap = dialog.querySelector("#k-color-swatches");
   const [applyBtn, cancelBtn] = dialog.querySelectorAll("#k-color-actions button");
+  const uncountedCheckbox = dialog.querySelector("#k-card-uncounted");
+  const uncountedChildrenCheckbox = dialog.querySelector("#k-card-uncounted-children");
   const currentHex = () => selectedHue === -2 ? null : selectedHue === -1 ? CARD_COLOR_GRAY : hslToHex(selectedHue, CARD_COLOR_SATURATION, CARD_COLOR_LIGHTNESS);
   swatchWrap.addEventListener("click", (e) => {
     const btn = e.target.closest(".kb-color-swatch");
@@ -3338,10 +3391,15 @@ function showCardColorDialog(app, existingColor, title, cardLineNum, subtaskTree
   applyBtn.onclick = () => {
     const finalTree = root.children;
     const wasDirty = dirty;
+    const newUncounted = uncountedCheckbox.checked;
+    const newUncountedChildren = uncountedChildrenCheckbox?.checked ?? existingUncountedChildren;
     closeAndCleanup();
     onApply(currentHex());
     if (wasDirty)
       onReorder(finalTree);
+    if (newUncounted !== existingUncounted || newUncountedChildren !== existingUncountedChildren) {
+      onSetUncountedFlags(newUncounted, newUncountedChildren);
+    }
   };
   cancelBtn.onclick = closeAndCleanup;
   deleteBtn.onclick = () => {
@@ -3821,6 +3879,24 @@ async function stampMissingCreatedDates(app, paths, config) {
       await vaultModify(app, tFile, lines.join("\n"));
   }
 }
+async function expandUncountedShorthand(app, paths) {
+  for (const filePath of paths) {
+    const tFile = app.vault.getAbstractFileByPath(filePath);
+    if (!tFile)
+      continue;
+    const lines = (await getCachedFileLines(app, filePath)).slice();
+    let changed = false;
+    for (let i = 0; i < lines.length; i++) {
+      const next = lines[i].replace(/%%\s*@ucc\s*%%/g, "%% @uncounted_children %%");
+      if (next !== lines[i]) {
+        lines[i] = next;
+        changed = true;
+      }
+    }
+    if (changed)
+      await vaultModify(app, tFile, lines.join("\n"));
+  }
+}
 var KANBAN_NARROW_BREAKPOINT = 700;
 function isNarrowLayout(width) {
   const isPhone = /iPhone|iPod|(Android.*Mobile)/i.test(navigator.userAgent);
@@ -3991,6 +4067,7 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
   }
   await moveCheckedCardsToDone(app, paths, config);
   await stampMissingCreatedDates(app, paths, config);
+  await expandUncountedShorthand(app, paths);
   let items = await collectItems(app, paths, config);
   const todayStrLater = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
   const laterToMove = items.filter((i) => {
@@ -4399,12 +4476,16 @@ function attachListeners(boardEl, config, app, refresh) {
     const title = buildParentPreviewHTML(card.dataset.raw || "", config, vaultName);
     let subs = [];
     let tree = [];
+    let uncounted = false;
+    let uncountedChildren = false;
     try {
       const { lines } = await readFileLines(app, filePath);
       const fileItems = parseFileEntries(lines, filePath, config);
       const cardEntry = fileItems.find((f) => f.item.line === lineNum);
       subs = cardEntry?.item.subs || [];
       tree = buildDialogTree(lines, subs);
+      uncounted = isUncountedText(cardEntry?.item.text ?? "");
+      uncountedChildren = isUncountedChildrenText(cardEntry?.item.text ?? "");
     } catch {
     }
     showCardColorDialog(
@@ -4414,8 +4495,14 @@ function attachListeners(boardEl, config, app, refresh) {
       lineNum,
       tree,
       config,
+      uncounted,
+      uncountedChildren,
       async (hex) => {
         await updateCardColor(app, filePath, lineNum, hex);
+        requestAnimationFrame(() => setTimeout(refresh, 50));
+      },
+      async (newUncounted, newUncountedChildren) => {
+        await setLineUncountedFlags(app, filePath, lineNum, { uncounted: newUncounted, uncountedChildren: newUncountedChildren });
         requestAnimationFrame(() => setTimeout(refresh, 50));
       },
       // The whole session's pending reorders/reparents, already folded into
@@ -5459,24 +5546,24 @@ function attachListeners(boardEl, config, app, refresh) {
     const defaultDocName = computeDefaultDocName(config.newTaskInsert, tag, config);
     if (norm === config.normLater) {
       const defDate = getDefaultDate().toISOString().split("T")[0];
-      showDateDialog(title, defDate, app, async (dateStr, text, notes, docName) => {
-        if (text && await addNewItem(app, tag, text, dateStr, config, notes, docName, defaultDocName))
+      showDateDialog(title, defDate, app, async (dateStr, text, notes, docName, uncounted) => {
+        if (text && await addNewItem(app, tag, text, dateStr, config, notes, docName, defaultDocName, uncounted))
           requestAnimationFrame(() => setTimeout(refresh, 50));
       }, { withText: true, defaultDocName });
     } else if (config.normRecurrent && norm === config.normRecurrent) {
-      showInputDialog(title, app, defaultDocName, (text, notes, docName) => {
+      showInputDialog(title, app, defaultDocName, (text, notes, docName, uncounted) => {
         showRecurrentTriggerDialog(app, async (triggerStr) => {
           const n = new Date();
           const skipStr = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
           const recurrentPart = triggerStr ? ` @${config.normRecurrent} ${triggerStr}` : "";
           const annotated = `${text}${recurrentPart} %% @skip:${skipStr} %%`;
-          if (await addNewItem(app, tag, annotated, null, config, notes, docName, defaultDocName))
+          if (await addNewItem(app, tag, annotated, null, config, notes, docName, defaultDocName, uncounted))
             requestAnimationFrame(() => setTimeout(refresh, 50));
         });
       });
     } else {
-      showInputDialog(title, app, defaultDocName, async (text, notes, docName) => {
-        if (await addNewItem(app, tag, text, null, config, notes, docName, defaultDocName))
+      showInputDialog(title, app, defaultDocName, async (text, notes, docName, uncounted) => {
+        if (await addNewItem(app, tag, text, null, config, notes, docName, defaultDocName, uncounted))
           requestAnimationFrame(() => setTimeout(refresh, 50));
       });
     }
@@ -5970,6 +6057,12 @@ function extractDoneDate(text) {
 function isDeletedNode(node) {
   return (node.tags ?? []).some((t) => normalizeTag(t) === "deleted");
 }
+function isUncountedNode(node) {
+  return isUncountedText(node?.text ?? "");
+}
+function isUncountedChildrenNode(node) {
+  return isUncountedChildrenText(node?.text ?? "");
+}
 function isCheckboxItemText(text) {
   return /^[-*+]\s+\[[ xX]\]/.test((text ?? "").trim());
 }
@@ -5992,47 +6085,57 @@ function collectOpenAndEvents(items, config, vaultName) {
   const events = [];
   const PARKED_EXCLUDED_TAGS = /* @__PURE__ */ new Set([config.normLater, config.normRecurrent, ...config.normMaybeSomeday]);
   const OPEN_EXCLUDED_TAGS = /* @__PURE__ */ new Set([config.normDone, ...PARKED_EXCLUDED_TAGS]);
-  const visitForEvents = (node, ancestors) => {
+  const excludedKeys = /* @__PURE__ */ new Set();
+  const visitForEvents = (node, ancestors, filePath, excluded) => {
     if (isDeletedNode(node))
       return;
-    const norms = (node.tags ?? []).map(normalizeTag);
+    const selfExcluded = excluded || isUncountedNode(node);
+    if (selfExcluded)
+      excludedKeys.add(`${filePath}::${node.line}`);
     const title = cleanTaskText(node.text);
     const checked = isCheckedItemText(node.text);
-    events.push({
-      createdDate: extractCreatedDate(node.text),
-      doneDate: extractDoneDate(node.text),
-      title,
-      isOwnCard: norms.some((t) => config.normKanban.includes(t)),
-      checked,
-      ancestors,
-      excludedFromNew: norms.some((t) => PARKED_EXCLUDED_TAGS.has(t))
-    });
+    if (!selfExcluded) {
+      const norms = (node.tags ?? []).map(normalizeTag);
+      events.push({
+        createdDate: extractCreatedDate(node.text),
+        doneDate: extractDoneDate(node.text),
+        title,
+        isOwnCard: norms.some((t) => config.normKanban.includes(t)),
+        checked,
+        ancestors,
+        excludedFromNew: norms.some((t) => PARKED_EXCLUDED_TAGS.has(t))
+      });
+    }
+    const kidsExcluded = excluded || isUncountedChildrenNode(node);
     for (const sub of node.subs ?? [])
-      visitForEvents(sub, [...ancestors, { title, checked }]);
+      visitForEvents(sub, [...ancestors, { title, checked }], filePath, kidsExcluded);
   };
-  const countSubs = (subs) => {
+  const countSubs = (subs, excluded) => {
     let total = 0;
     let open = 0;
     for (const s of subs ?? []) {
       if (isDeletedNode(s))
         continue;
-      if (isCheckboxItemText(s.text)) {
+      const selfExcluded = excluded || isUncountedNode(s);
+      if (!selfExcluded && isCheckboxItemText(s.text)) {
         total++;
         if (!isCheckedItemText(s.text))
           open++;
       }
-      const nested = countSubs(s.subs);
+      const nested = countSubs(s.subs, excluded || isUncountedChildrenNode(s));
       total += nested.total;
       open += nested.open;
     }
     return { total, open };
   };
-  const buildTaskChildren = (filePath, subs) => {
+  const buildTaskChildren = (filePath, subs, excluded) => {
     const result = [];
     for (const s of subs ?? []) {
       if (isDeletedNode(s))
         continue;
-      if (isCheckboxItemText(s.text)) {
+      const selfExcluded = excluded || isUncountedNode(s);
+      const kidsExcluded = excluded || isUncountedChildrenNode(s);
+      if (isCheckboxItemText(s.text) && !selfExcluded) {
         result.push({
           filePath,
           line: s.line,
@@ -6041,10 +6144,10 @@ function collectOpenAndEvents(items, config, vaultName) {
           createdDate: extractCreatedDate(s.text),
           doneDate: extractDoneDate(s.text),
           displayHtml: formatInlineEmphasis(linksToHtml(cleanTaskText(s.text), vaultName)),
-          children: buildTaskChildren(filePath, s.subs)
+          children: buildTaskChildren(filePath, s.subs, kidsExcluded)
         });
       } else {
-        result.push(...buildTaskChildren(filePath, s.subs));
+        result.push(...buildTaskChildren(filePath, s.subs, kidsExcluded));
       }
     }
     return result;
@@ -6070,16 +6173,20 @@ function collectOpenAndEvents(items, config, vaultName) {
   };
   for (const card of items)
     collectChildKeys(card.filePath, card.item.subs);
-  const openCards = [];
   for (const card of items) {
     if (!childKeys.has(`${card.filePath}::${card.item.line}`)) {
-      visitForEvents(card.item, []);
+      visitForEvents(card.item, [], card.filePath, false);
     }
+  }
+  const openCards = [];
+  for (const card of items) {
+    const key = `${card.filePath}::${card.item.line}`;
     const norms = card.item.tags.map(normalizeTag);
-    if (!norms.some((t) => OPEN_EXCLUDED_TAGS.has(t))) {
-      const subCounts = countSubs(card.item.subs);
+    if (!norms.some((t) => OPEN_EXCLUDED_TAGS.has(t)) && !isUncountedNode(card.item) && !excludedKeys.has(key)) {
+      const kidsExcluded = isUncountedChildrenNode(card.item);
+      const subCounts = countSubs(card.item.subs, kidsExcluded);
       const createdDate = extractCreatedDate(card.item.text);
-      const children = buildTaskChildren(card.filePath, card.item.subs);
+      const children = buildTaskChildren(card.filePath, card.item.subs, kidsExcluded);
       openCards.push({
         filePath: card.filePath,
         line: card.item.line,
@@ -6120,8 +6227,9 @@ async function collectDeletedEvents(app, paths) {
       const indent = bulletMatch[1].length;
       while (stack.length && stack[stack.length - 1].indent >= indent)
         stack.pop();
+      const ancestorExcluded = stack.some((a) => a.uncountedChildren);
       const m = line.match(RE);
-      if (m) {
+      if (m && !ancestorExcluded && !isUncountedText(line)) {
         const d = new Date(m[1] + "T00:00:00");
         if (!isNaN(d.getTime())) {
           results.push({
@@ -6133,7 +6241,12 @@ async function collectDeletedEvents(app, paths) {
           });
         }
       }
-      stack.push({ indent, title: cleanTaskText(line), checked: isCheckedItemText(line) });
+      stack.push({
+        indent,
+        title: cleanTaskText(line),
+        checked: isCheckedItemText(line),
+        uncountedChildren: ancestorExcluded || isUncountedChildrenText(line)
+      });
     }
   }
   return results;
@@ -6142,6 +6255,8 @@ function collectDoneGroups(items, vaultName, rangeStart, rangeEnd) {
   const inRange = (d) => d.getTime() >= rangeStart.getTime() && d.getTime() <= rangeEnd.getTime();
   const matchDate = (node) => {
     if ((node.tags ?? []).some((t) => normalizeTag(t) === "deleted"))
+      return null;
+    if (isUncountedText(node.text))
       return null;
     const m = (node.text ?? "").match(/✅(\d{4}-\d{2}-\d{2})/);
     if (!m)
@@ -6161,9 +6276,22 @@ function collectDoneGroups(items, vaultName, rangeStart, rangeEnd) {
   };
   for (const card of items)
     collectChildKeys(card.filePath, card.item.subs);
+  const buildChildren = (filePath, subs, excluded) => {
+    const result = [];
+    for (const sub of subs || []) {
+      if ((sub.tags ?? []).some((t) => normalizeTag(t) === "deleted"))
+        continue;
+      if (excluded || isUncountedText(sub.text)) {
+        result.push(...buildChildren(filePath, sub.subs, excluded || isUncountedChildrenText(sub.text)));
+      } else {
+        result.push(buildNode(filePath, sub));
+      }
+    }
+    return result;
+  };
   const buildNode = (filePath, node) => {
     const date = matchDate(node);
-    const children = (node.subs || []).filter((sub) => !(sub.tags ?? []).some((t) => normalizeTag(t) === "deleted")).map((sub) => buildNode(filePath, sub));
+    const children = buildChildren(filePath, node.subs, isUncountedChildrenText(node.text));
     return {
       filePath,
       line: node.line,
@@ -6603,6 +6731,7 @@ var KanbanStatisticsView = class extends import_obsidian3.ItemView {
       const paths = await getTargetFilePaths(this.app, config);
       await stampMissingCreatedDates(this.app, paths, config);
       await moveCheckedCardsToDone(this.app, paths, config);
+      await expandUncountedShorthand(this.app, paths);
       const items = await collectItems(this.app, paths, config);
       const { events, openCards } = collectOpenAndEvents(items, config, vaultName);
       const deletedEvents = await collectDeletedEvents(this.app, paths);

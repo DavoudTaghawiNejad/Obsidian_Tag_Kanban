@@ -4,8 +4,11 @@ import {
   buildColorCSS,
   buildConfig,
   collectItems,
+  expandUncountedShorthand,
   formatInlineEmphasis,
   getTargetFilePaths,
+  isUncountedChildrenText,
+  isUncountedText,
   KanbanConfig,
   linksToHtml,
   moveCheckedCardsToDone,
@@ -303,6 +306,20 @@ function isDeletedNode(node: any): boolean {
   return (node.tags ?? []).some((t: string) => normalizeTag(t) === "deleted");
 }
 
+// See the UNCOUNTED section in kanban.ts. isUncountedNode is a per-line
+// exclusion (only this node's own event/row is dropped); isUncountedChildrenNode
+// excludes everything nested under the node, at any depth, while the node
+// itself still counts. Every walker below threads an `excluded` flag ("an
+// ancestor already carried @uncounted_children") through its own recursion so
+// the two compose and cascade live off the tree — nothing is ever stamped
+// onto a descendant line to make this work.
+function isUncountedNode(node: any): boolean {
+  return isUncountedText(node?.text ?? "");
+}
+function isUncountedChildrenNode(node: any): boolean {
+  return isUncountedChildrenText(node?.text ?? "");
+}
+
 function isCheckboxItemText(text: string): boolean {
   return /^[-*+]\s+\[[ xX]\]/.test((text ?? "").trim());
 }
@@ -378,33 +395,51 @@ function collectOpenAndEvents(
   const PARKED_EXCLUDED_TAGS = new Set([config.normLater, config.normRecurrent, ...config.normMaybeSomeday]);
   const OPEN_EXCLUDED_TAGS = new Set([config.normDone, ...PARKED_EXCLUDED_TAGS]);
 
-  const visitForEvents = (node: any, ancestors: HoverParent[]) => {
+  // filePath::line of every node whose own event/row was dropped, whether by
+  // its own @uncounted or by an @uncounted_children ancestor — consulted by
+  // the openCards loop below, since that table (unlike this events walk) is
+  // NOT deduped against promoted subtasks (see childKeys further down), so a
+  // promoted subtask's own exclusion can't be inferred from this walk's own
+  // recursion the way it can everywhere else.
+  const excludedKeys = new Set<string>();
+
+  const visitForEvents = (node: any, ancestors: HoverParent[], filePath: string, excluded: boolean) => {
     if (isDeletedNode(node)) return;
-    const norms = (node.tags ?? []).map(normalizeTag);
+    const selfExcluded = excluded || isUncountedNode(node);
+    if (selfExcluded) excludedKeys.add(`${filePath}::${node.line}`);
     const title = cleanTaskText(node.text);
     const checked = isCheckedItemText(node.text);
-    events.push({
-      createdDate: extractCreatedDate(node.text),
-      doneDate: extractDoneDate(node.text),
-      title,
-      isOwnCard: norms.some((t: string) => config.normKanban.includes(t)),
-      checked,
-      ancestors,
-      excludedFromNew: norms.some((t: string) => PARKED_EXCLUDED_TAGS.has(t)),
-    });
-    for (const sub of node.subs ?? []) visitForEvents(sub, [...ancestors, { title, checked }]);
+    if (!selfExcluded) {
+      const norms = (node.tags ?? []).map(normalizeTag);
+      events.push({
+        createdDate: extractCreatedDate(node.text),
+        doneDate: extractDoneDate(node.text),
+        title,
+        isOwnCard: norms.some((t: string) => config.normKanban.includes(t)),
+        checked,
+        ancestors,
+        excludedFromNew: norms.some((t: string) => PARKED_EXCLUDED_TAGS.has(t)),
+      });
+    }
+    // Still recurse (with ancestors extended) even when this node's own event
+    // was dropped — @uncounted excludes only the node itself, not its
+    // children, and a still-counted descendant needs this node in its own
+    // ancestor breadcrumb regardless.
+    const kidsExcluded = excluded || isUncountedChildrenNode(node);
+    for (const sub of node.subs ?? []) visitForEvents(sub, [...ancestors, { title, checked }], filePath, kidsExcluded);
   };
 
-  const countSubs = (subs: any[]): { total: number; open: number } => {
+  const countSubs = (subs: any[], excluded: boolean): { total: number; open: number } => {
     let total = 0;
     let open = 0;
     for (const s of subs ?? []) {
       if (isDeletedNode(s)) continue;
-      if (isCheckboxItemText(s.text)) {
+      const selfExcluded = excluded || isUncountedNode(s);
+      if (!selfExcluded && isCheckboxItemText(s.text)) {
         total++;
         if (!isCheckedItemText(s.text)) open++;
       }
-      const nested = countSubs(s.subs);
+      const nested = countSubs(s.subs, excluded || isUncountedChildrenNode(s));
       total += nested.total;
       open += nested.open;
     }
@@ -414,12 +449,17 @@ function collectOpenAndEvents(
   // Builds the expandable subtree for a card's row in the "Oldest open tasks"
   // table — same total/open scope as countSubs above (only real checkbox
   // items become a node; a plain note bullet is skipped but still recursed
-  // into, so a checkbox nested a level below one isn't lost).
-  const buildTaskChildren = (filePath: string, subs: any[]): TaskNode[] => {
+  // into, so a checkbox nested a level below one isn't lost). A checkbox item
+  // excluded by its own @uncounted is dropped the same way a plain bullet
+  // always was — its own children are flattened into this level instead of
+  // vanishing with it.
+  const buildTaskChildren = (filePath: string, subs: any[], excluded: boolean): TaskNode[] => {
     const result: TaskNode[] = [];
     for (const s of subs ?? []) {
       if (isDeletedNode(s)) continue;
-      if (isCheckboxItemText(s.text)) {
+      const selfExcluded = excluded || isUncountedNode(s);
+      const kidsExcluded = excluded || isUncountedChildrenNode(s);
+      if (isCheckboxItemText(s.text) && !selfExcluded) {
         result.push({
           filePath,
           line: s.line,
@@ -428,10 +468,10 @@ function collectOpenAndEvents(
           createdDate: extractCreatedDate(s.text),
           doneDate: extractDoneDate(s.text),
           displayHtml: formatInlineEmphasis(linksToHtml(cleanTaskText(s.text), vaultName)),
-          children: buildTaskChildren(filePath, s.subs),
+          children: buildTaskChildren(filePath, s.subs, kidsExcluded),
         });
       } else {
-        result.push(...buildTaskChildren(filePath, s.subs));
+        result.push(...buildTaskChildren(filePath, s.subs, kidsExcluded));
       }
     }
     return result;
@@ -471,16 +511,34 @@ function collectOpenAndEvents(
   };
   for (const card of items) collectChildKeys(card.filePath, card.item.subs);
 
-  const openCards: OpenCardRow[] = [];
+  // Pass 1: walk every non-promoted top-level card's full tree, populating
+  // `events` and `excludedKeys` — must finish before pass 2 below reads
+  // excludedKeys, since a promoted card's exclusion is only ever discovered
+  // while its true parent is being walked, and that parent may sit anywhere
+  // in `items` relative to the promoted card's own entry.
   for (const card of items) {
     if (!childKeys.has(`${card.filePath}::${card.item.line}`)) {
-      visitForEvents(card.item, []);
+      visitForEvents(card.item, [], card.filePath, false);
     }
+  }
+
+  // Pass 2: openCards is flat and deliberately NOT deduped against childKeys
+  // (see the comment above) — so a promoted subtask's own exclusion has to be
+  // looked up in excludedKeys rather than inferred from this loop's own
+  // (nonexistent) recursion.
+  const openCards: OpenCardRow[] = [];
+  for (const card of items) {
+    const key = `${card.filePath}::${card.item.line}`;
     const norms = card.item.tags.map(normalizeTag);
-    if (!norms.some((t) => OPEN_EXCLUDED_TAGS.has(t))) {
-      const subCounts = countSubs(card.item.subs);
+    if (
+      !norms.some((t) => OPEN_EXCLUDED_TAGS.has(t)) &&
+      !isUncountedNode(card.item) &&
+      !excludedKeys.has(key)
+    ) {
+      const kidsExcluded = isUncountedChildrenNode(card.item);
+      const subCounts = countSubs(card.item.subs, kidsExcluded);
       const createdDate = extractCreatedDate(card.item.text);
-      const children = buildTaskChildren(card.filePath, card.item.subs);
+      const children = buildTaskChildren(card.filePath, card.item.subs, kidsExcluded);
       openCards.push({
         filePath: card.filePath,
         line: card.item.line,
@@ -540,7 +598,11 @@ async function collectDeletedEvents(app: App, paths: string[]): Promise<DeletedE
     } catch {
       continue;
     }
-    const stack: { indent: number; title: string; checked: boolean }[] = [];
+    // uncountedChildren carried on a frame means "this line's own descendants
+    // are excluded" — the same ancestor-cascade every other walker in this
+    // file threads explicitly, reconstructed here from raw indentation since
+    // there's no parsed tree to recurse (see the function comment above).
+    const stack: { indent: number; title: string; checked: boolean; uncountedChildren: boolean }[] = [];
     for (const rawLine of raw.split("\n")) {
       // A deleted card is archived into a blockquoted "> " callout
       // (see archiveToSection), which would otherwise make its bullet
@@ -550,8 +612,9 @@ async function collectDeletedEvents(app: App, paths: string[]): Promise<DeletedE
       if (!bulletMatch) continue;
       const indent = bulletMatch[1].length;
       while (stack.length && stack[stack.length - 1].indent >= indent) stack.pop();
+      const ancestorExcluded = stack.some((a) => a.uncountedChildren);
       const m = line.match(RE);
-      if (m) {
+      if (m && !ancestorExcluded && !isUncountedText(line)) {
         const d = new Date(m[1] + "T00:00:00");
         if (!isNaN(d.getTime())) {
           results.push({
@@ -563,7 +626,12 @@ async function collectDeletedEvents(app: App, paths: string[]): Promise<DeletedE
           });
         }
       }
-      stack.push({ indent, title: cleanTaskText(line), checked: isCheckedItemText(line) });
+      stack.push({
+        indent,
+        title: cleanTaskText(line),
+        checked: isCheckedItemText(line),
+        uncountedChildren: ancestorExcluded || isUncountedChildrenText(line),
+      });
     }
   }
   return results;
@@ -585,6 +653,7 @@ function collectDoneGroups(
 
   const matchDate = (node: { text: string; tags: string[] }): Date | null => {
     if ((node.tags ?? []).some((t: string) => normalizeTag(t) === "deleted")) return null;
+    if (isUncountedText(node.text)) return null;
     const m = (node.text ?? "").match(/✅(\d{4}-\d{2}-\d{2})/);
     if (!m) return null;
     const date = new Date(m[1] + "T00:00:00");
@@ -605,11 +674,47 @@ function collectDoneGroups(
   };
   for (const card of items) collectChildKeys(card.filePath, card.item.subs);
 
+  // renderDoneNode (below, in render()) shows every node in `children`
+  // unconditionally, matched or not — that's the whole point of this tree
+  // (the function's own doc comment: "completed and still-open alike"), so a
+  // self-@uncounted subtask can't just be left in with matched:false the way
+  // an ordinary not-yet-done subtask is — it would still visibly appear as a
+  // row. buildChildren drops it as its own row instead, splicing its own
+  // still-countable children into this level, same flatten-on-exclusion
+  // buildTaskChildren uses on the Open tasks tab. `excluded` here means "an
+  // ancestor already carried @uncounted_children" — it cascades to every
+  // descendant via the OR below (same as #deleted's own filter, just
+  // flattening a row out instead of a hard continue), so buildNode is never
+  // reached for anything inside an excluded subtree. Only the group's own
+  // root is exempt from all of this (see the top-level loop below) — it's
+  // the one node with nowhere to flatten to, so an @uncounted CARD with a
+  // matching descendant still shows as an unmatched header row for that
+  // descendant's context, exactly like an ordinary still-open card already
+  // does today.
+  const buildChildren = (filePath: string, subs: any[], excluded: boolean): DoneNode[] => {
+    const result: DoneNode[] = [];
+    for (const sub of subs || []) {
+      if ((sub.tags ?? []).some((t: string) => normalizeTag(t) === "deleted")) continue;
+      if (excluded || isUncountedText(sub.text)) {
+        result.push(...buildChildren(filePath, sub.subs, excluded || isUncountedChildrenText(sub.text)));
+      } else {
+        result.push(buildNode(filePath, sub));
+      }
+    }
+    return result;
+  };
+
+  // No "am I excluded" parameter: buildChildren above only ever calls this
+  // on a node it has already confirmed isn't itself self- or
+  // ancestor-excluded, and the one direct call site left — the group's own
+  // root, in the top-level loop below — always wants matchDate's normal
+  // (self-check-only) verdict. Only this node's *own* @uncounted_children
+  // matters for what its children see; an ancestor's already-decided
+  // exclusion is handled entirely by buildChildren before this is ever
+  // reached, so it isn't threaded through here at all.
   const buildNode = (filePath: string, node: any): DoneNode => {
     const date = matchDate(node);
-    const children: DoneNode[] = (node.subs || [])
-      .filter((sub: any) => !(sub.tags ?? []).some((t: string) => normalizeTag(t) === "deleted"))
-      .map((sub: any) => buildNode(filePath, sub));
+    const children = buildChildren(filePath, node.subs, isUncountedChildrenText(node.text));
 
     return {
       filePath,
@@ -1208,6 +1313,9 @@ export class KanbanStatisticsView extends ItemView {
       // backfilled here too — this page shouldn't depend on the Kanban
       // board having been opened first for its own numbers to be complete.
       await moveCheckedCardsToDone(this.app, paths, config);
+      // Normalizes "%% @ucc %%" → "%% @uncounted_children %%" on disk — this
+      // page shouldn't depend on the board having normalized it first either.
+      await expandUncountedShorthand(this.app, paths);
 
       const items = await collectItems(this.app, paths, config);
       const { events, openCards } = collectOpenAndEvents(items, config, vaultName);
