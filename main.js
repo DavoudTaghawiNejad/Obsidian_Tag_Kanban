@@ -4218,10 +4218,10 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
     scroll = wrapper.querySelector("#kanban-scroll");
   }
   if (!wrapper.querySelector("#kb-search-bar")) {
-    const searchBar = boardDoc.createElement("div");
-    searchBar.id = "kb-search-bar";
-    searchBar.style.cssText = "display:flex;gap:8px;align-items:center;padding:10px 6px 0;";
-    searchBar.innerHTML = `
+    const searchBar2 = boardDoc.createElement("div");
+    searchBar2.id = "kb-search-bar";
+    searchBar2.style.cssText = "display:flex;gap:8px;align-items:center;padding:10px 6px 0;box-sizing:border-box;";
+    searchBar2.innerHTML = `
       <input id="kb-search-input" type="text" placeholder="Filter cards\u2026 (supports * and ?)"
         style="flex:1;padding:7px 10px;border:1px solid var(--background-modifier-border);
                border-radius:6px;background:var(--background-primary);color:var(--kb-text);
@@ -4230,8 +4230,9 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
         style="padding:7px 14px;border:1px solid var(--background-modifier-border);
                border-radius:6px;background:var(--background-secondary);color:var(--kb-text);
                cursor:pointer;font-size:.9em;white-space:nowrap;">Clear</button>`;
-    wrapper.insertBefore(searchBar, wrapper.firstChild);
+    wrapper.insertBefore(searchBar2, wrapper.firstChild);
   }
+  const searchBar = wrapper.querySelector("#kb-search-bar");
   const isNarrow = isNarrowLayout(
     wrapper.clientWidth > 0 ? wrapper.clientWidth : window.innerWidth
   );
@@ -4243,6 +4244,15 @@ async function buildBoard(app, containerEl, config, savedActiveCol) {
   if (!allNorms.includes(activeNorm))
     activeNorm = allNorms[0];
   reconcileColumns(scroll, columns, allNorms, activeNorm, isNarrow, config, vaultName, boardDoc);
+  if (isNarrow) {
+    searchBar.style.maxWidth = "";
+  } else {
+    const boardContentWidth = Array.from(
+      scroll.querySelectorAll(":scope > [data-col-container]")
+    ).reduce((sum, el) => sum + el.offsetWidth, 0);
+    const available = wrapper.clientWidth || window.innerWidth;
+    searchBar.style.maxWidth = boardContentWidth > 0 ? `${Math.min(boardContentWidth, available)}px` : "";
+  }
   let statusEl = wrapper.querySelector("#kanban-status");
   if (!statusEl) {
     statusEl = wrapper.createEl("p", {

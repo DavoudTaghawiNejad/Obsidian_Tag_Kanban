@@ -6120,7 +6120,7 @@ export async function buildBoard(
     const searchBar = boardDoc.createElement("div");
     searchBar.id = "kb-search-bar";
     searchBar.style.cssText =
-      "display:flex;gap:8px;align-items:center;padding:10px 6px 0;";
+      "display:flex;gap:8px;align-items:center;padding:10px 6px 0;box-sizing:border-box;";
     searchBar.innerHTML = `
       <input id="kb-search-input" type="text" placeholder="Filter cards… (supports * and ?)"
         style="flex:1;padding:7px 10px;border:1px solid var(--background-modifier-border);
@@ -6132,6 +6132,7 @@ export async function buildBoard(
                cursor:pointer;font-size:.9em;white-space:nowrap;">Clear</button>`;
     wrapper.insertBefore(searchBar, wrapper.firstChild);
   }
+  const searchBar = wrapper.querySelector<HTMLElement>("#kb-search-bar")!;
 
   const isNarrow = isNarrowLayout(
     wrapper.clientWidth > 0 ? wrapper.clientWidth : window.innerWidth
@@ -6147,6 +6148,24 @@ export async function buildBoard(
   if (!allNorms.includes(activeNorm)) activeNorm = allNorms[0];
 
   reconcileColumns(scroll, columns, allNorms, activeNorm, isNarrow, config, vaultName, boardDoc);
+
+  // #kb-search-bar has no width of its own, so it defaults to the full pane
+  // width — matching #kanban-scroll's box, not the columns actually painted
+  // inside it. Columns stop growing at columnMaxWidth each, so once
+  // N*columnMaxWidth falls short of the pane, the search bar visibly
+  // overruns the board. Cap it to the columns' real rendered width (never
+  // wider than the available space, so an overflowing/scrolling board isn't
+  // affected). Narrow mode already renders the active column near full
+  // width, so it's left unconstrained there.
+  if (isNarrow) {
+    searchBar.style.maxWidth = "";
+  } else {
+    const boardContentWidth = Array.from(
+      scroll.querySelectorAll<HTMLElement>(":scope > [data-col-container]")
+    ).reduce((sum, el) => sum + el.offsetWidth, 0);
+    const available = wrapper.clientWidth || window.innerWidth;
+    searchBar.style.maxWidth = boardContentWidth > 0 ? `${Math.min(boardContentWidth, available)}px` : "";
+  }
 
   let statusEl = wrapper.querySelector<HTMLElement>("#kanban-status");
   if (!statusEl) {
