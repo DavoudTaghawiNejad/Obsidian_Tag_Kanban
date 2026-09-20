@@ -5729,7 +5729,7 @@ function buildColumnHeader(norm: string, col: { rawTag: string; cards: any[] }, 
 
   const h4 = doc.createElement("h4");
   h4.textContent = col.rawTag.replace(/^#/, "").toUpperCase();
-  h4.style.cssText = `margin:0;flex-grow:1;font-weight:bold;color:${titleColor};${titleShadow}${
+  h4.style.cssText = `margin:0;flex-grow:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:bold;color:${titleColor};${titleShadow}${
     config.fontSizeColumnTitle ? `font-size:${config.fontSizeColumnTitle};` : ""
   }`;
   header.appendChild(h4);
@@ -5745,11 +5745,11 @@ function buildColumnHeader(norm: string, col: { rawTag: string; cards: any[] }, 
   (btn as HTMLButtonElement).dataset.column = norm;
   if (norm !== config.normDone) {
     btn.textContent = "+";
-    btn.style.cssText = `width:24px;height:24px;border-radius:50%;border:1px solid var(--background-modifier-border);background:none;cursor:pointer;display:flex;align-items:center;justify-content:center;color:${titleColor};`;
+    btn.style.cssText = `width:24px;height:24px;border-radius:50%;border:1px solid var(--background-modifier-border);background:none;cursor:pointer;display:flex;align-items:center;justify-content:center;color:${titleColor};flex-shrink:0;`;
     (btn as HTMLButtonElement).dataset.tag = col.rawTag;
   } else {
     btn.textContent = "Archive";
-    btn.style.cssText = `height:24px;padding:0 8px;border-radius:12px;border:1px solid var(--background-modifier-border);background:none;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:0.75em;color:${titleColor};`;
+    btn.style.cssText = `height:24px;padding:0 8px;border-radius:12px;border:1px solid var(--background-modifier-border);background:none;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:0.75em;color:${titleColor};flex-shrink:0;`;
   }
   header.appendChild(btn);
 
