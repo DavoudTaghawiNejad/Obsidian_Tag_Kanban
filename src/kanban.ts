@@ -6373,16 +6373,26 @@ export function attachListeners(
   const isNarrowNow = () => boardEl.dataset.narrow === "1";
 
   // ── Search / filter ──
+  // Folds accented/diacritic letters to their base form (é→e, ü→u, ñ→n, ...)
+  // so the filter matches regardless of accents on either side — decompose
+  // to NFD (base letter + separate combining marks), then drop the marks. ß
+  // has no such decomposition under Unicode normalization (it isn't a base
+  // letter plus a combining mark), so it's folded separately to "ss" — the
+  // standard German transliteration, which also satisfies matching on a bare
+  // "s" (since "ss" contains "s"), not just "ss".
+  const stripDiacritics = (s: string): string =>
+    s.normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[ßẞ]/g, "ss");
+
   // Strips markdown emphasis markers and all whitespace from card text so
   // "text hig" and "texthig" both match "...**higlightedguy**..." — words
   // glued together without spaces or ** are treated the same as words typed
   // with them. The query gets its own (lighter) normalization below, since
   // "*"/"?" in the query are wildcards, not markdown to strip.
   const normalizeHaystack = (s: string): string =>
-    s.toLowerCase().replace(/[*_`]/g, "").replace(/\s+/g, "");
+    stripDiacritics(s).toLowerCase().replace(/[*_`]/g, "").replace(/\s+/g, "");
 
   const normalizeQuery = (s: string): string =>
-    s.toLowerCase().replace(/\s+/g, "");
+    stripDiacritics(s).toLowerCase().replace(/\s+/g, "");
 
   // "*" → any run of characters, "?" → any single character; everything
   // else is matched literally (regex-escaped first).

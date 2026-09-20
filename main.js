@@ -4407,8 +4407,9 @@ function attachListeners(boardEl, config, app, refresh) {
       clearHighlights();
   }
   const isNarrowNow = () => boardEl.dataset.narrow === "1";
-  const normalizeHaystack = (s) => s.toLowerCase().replace(/[*_`]/g, "").replace(/\s+/g, "");
-  const normalizeQuery = (s) => s.toLowerCase().replace(/\s+/g, "");
+  const stripDiacritics = (s) => s.normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[ßẞ]/g, "ss");
+  const normalizeHaystack = (s) => stripDiacritics(s).toLowerCase().replace(/[*_`]/g, "").replace(/\s+/g, "");
+  const normalizeQuery = (s) => stripDiacritics(s).toLowerCase().replace(/\s+/g, "");
   const wildcardToRegExp = (query) => {
     const escaped = query.replace(/[.+^${}()|[\]\\]/g, "\\$&");
     return new RegExp(escaped.replace(/\*/g, ".*").replace(/\?/g, "."));
