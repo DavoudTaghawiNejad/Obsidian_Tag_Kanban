@@ -21,6 +21,10 @@ export interface KanbanSettings {
   // being the active leaf, so a brief tab-away doesn't collapse whatever the
   // user was reading. 0 disables it (cards always come back collapsed).
   keepLastExpandedMinutes: number;
+  // Column width range (px) columns flex between on desktop; narrow/mobile
+  // layout ignores these and always uses full width.
+  columnMinWidth: number;
+  columnMaxWidth: number;
   // ── Colors ─────────────────────────────────────────────────────────────
   // Every color choice is its own independent Hue (0-360). Saturation and
   // Lightness are shared/central (colorSaturation, colorLightness) for
@@ -178,6 +182,8 @@ export const DEFAULT_SETTINGS: KanbanSettings = {
   activeColumns: ["#next", "#important", "#today"],
   projectsDocument: "",
   keepLastExpandedMinutes: 5,
+  columnMinWidth: 180,
+  columnMaxWidth: 260,
   ...DEFAULT_COLORS,
   columnMaxCards: [],
   fontDate: "",
@@ -903,6 +909,40 @@ class KanbanSettingTab extends PluginSettingTab {
             this.plugin.settings.keepLastExpandedMinutes = Number.isFinite(n) && n >= 0 ? n : DEFAULT_SETTINGS.keepLastExpandedMinutes;
             await this.plugin.saveSettings();
           });
+      });
+
+    containerEl.createEl("h4", { text: "Column width" });
+    containerEl.createEl("p", {
+      text: "Minimum and maximum width (px) each column flexes between on desktop. Narrow/mobile layout always uses full width regardless of these values.",
+      attr: { style: "color:var(--text-muted);font-size:.85em;margin-top:-6px;" },
+    });
+
+    new Setting(containerEl)
+      .setName("Minimum column width")
+      .setDesc("Columns never shrink narrower than this, in pixels.")
+      .addText((text) => {
+        text.inputEl.type = "number";
+        text.inputEl.min = "100";
+        text.inputEl.style.width = "5em";
+        text.setValue(String(this.plugin.settings.columnMinWidth)).onChange(async (value) => {
+          const n = parseInt(value.trim(), 10);
+          this.plugin.settings.columnMinWidth = Number.isFinite(n) && n >= 100 ? n : DEFAULT_SETTINGS.columnMinWidth;
+          await this.plugin.saveSettings();
+        });
+      });
+
+    new Setting(containerEl)
+      .setName("Maximum column width")
+      .setDesc("Columns never grow wider than this, in pixels.")
+      .addText((text) => {
+        text.inputEl.type = "number";
+        text.inputEl.min = "100";
+        text.inputEl.style.width = "5em";
+        text.setValue(String(this.plugin.settings.columnMaxWidth)).onChange(async (value) => {
+          const n = parseInt(value.trim(), 10);
+          this.plugin.settings.columnMaxWidth = Number.isFinite(n) && n >= 100 ? n : DEFAULT_SETTINGS.columnMaxWidth;
+          await this.plugin.saveSettings();
+        });
       });
 
     new Setting(containerEl)

@@ -86,6 +86,8 @@ function buildConfig(settings) {
   const chartHex = (hue, themeFallback) => hue === null || hue === void 0 ? themeFallback : hslToHex((hue % 360 + 360) % 360, chartSatC, chartL);
   const colorColumnTitleDark = textHex(settings.hueColumnTitle ?? settings.hueText ?? 225);
   const colorTextContrastThreshold = clamp(settings.textContrastThreshold ?? 45, 0, 108);
+  const columnMinWidth = clamp(settings.columnMinWidth ?? 180, 100, 400);
+  const columnMaxWidth = clamp(settings.columnMaxWidth ?? 260, columnMinWidth, 600);
   const boldL = clamp(textL + (settings.boldLightnessDelta ?? 0), 0, 100);
   const italicStarL = clamp(textL + (settings.italicStarLightnessDelta ?? 0), 0, 100);
   const italicUnderscoreL = clamp(textL + (settings.italicUnderscoreLightnessDelta ?? 0), 0, 100);
@@ -131,6 +133,8 @@ function buildConfig(settings) {
     colorColumnTitleDark,
     colorTextContrastThreshold,
     columnTitleShadowLength: clamp(settings.columnTitleShadowLength ?? 2, 0, 10),
+    columnMinWidth,
+    columnMaxWidth,
     colorLink: textHex(settings.hueLink),
     colorDate: textHex(settings.hueDate) || "#7ab8e8",
     colorBold: textHueHex(settings.hueBold, boldL),
@@ -3967,7 +3971,7 @@ function buildColumnShell(scroll, norm, col, doc) {
   return { colDiv, zone };
 }
 function updateColumnChrome(colDiv, norm, col, config, isNarrow, activeNorm, doc) {
-  const colStyle = isNarrow ? `width:calc(100% - 16px);margin:0 8px 20px;padding:10px;` : `flex:1;min-width:200px;max-width:260px;padding:10px 0 10px 0;margin:0;display:flex;flex-direction:column;`;
+  const colStyle = isNarrow ? `width:calc(100% - 16px);margin:0 8px 20px;padding:10px;` : `flex:1;min-width:${config.columnMinWidth}px;max-width:${config.columnMaxWidth}px;padding:10px 0 10px 0;margin:0;display:flex;flex-direction:column;`;
   colDiv.style.cssText = colStyle + (isNarrow ? `display:${norm === activeNorm ? "block" : "none"};` : "");
   const colMax = config.columnMaxCards[norm] || 0;
   if (colMax > 0 && col.cards.length > colMax)
@@ -7119,6 +7123,8 @@ var DEFAULT_SETTINGS = {
   activeColumns: ["#next", "#important", "#today"],
   projectsDocument: "",
   keepLastExpandedMinutes: 5,
+  columnMinWidth: 180,
+  columnMaxWidth: 260,
   ...DEFAULT_COLORS,
   columnMaxCards: [],
   fontDate: "",
@@ -7656,6 +7662,31 @@ var KanbanSettingTab = class extends import_obsidian4.PluginSettingTab {
         text.setValue(String(this.plugin.settings.keepLastExpandedMinutes)).onChange(async (value) => {
           const n = parseInt(value.trim(), 10);
           this.plugin.settings.keepLastExpandedMinutes = Number.isFinite(n) && n >= 0 ? n : DEFAULT_SETTINGS.keepLastExpandedMinutes;
+          await this.plugin.saveSettings();
+        });
+      });
+      containerEl.createEl("h4", { text: "Column width" });
+      containerEl.createEl("p", {
+        text: "Minimum and maximum width (px) each column flexes between on desktop. Narrow/mobile layout always uses full width regardless of these values.",
+        attr: { style: "color:var(--text-muted);font-size:.85em;margin-top:-6px;" }
+      });
+      new import_obsidian4.Setting(containerEl).setName("Minimum column width").setDesc("Columns never shrink narrower than this, in pixels.").addText((text) => {
+        text.inputEl.type = "number";
+        text.inputEl.min = "100";
+        text.inputEl.style.width = "5em";
+        text.setValue(String(this.plugin.settings.columnMinWidth)).onChange(async (value) => {
+          const n = parseInt(value.trim(), 10);
+          this.plugin.settings.columnMinWidth = Number.isFinite(n) && n >= 100 ? n : DEFAULT_SETTINGS.columnMinWidth;
+          await this.plugin.saveSettings();
+        });
+      });
+      new import_obsidian4.Setting(containerEl).setName("Maximum column width").setDesc("Columns never grow wider than this, in pixels.").addText((text) => {
+        text.inputEl.type = "number";
+        text.inputEl.min = "100";
+        text.inputEl.style.width = "5em";
+        text.setValue(String(this.plugin.settings.columnMaxWidth)).onChange(async (value) => {
+          const n = parseInt(value.trim(), 10);
+          this.plugin.settings.columnMaxWidth = Number.isFinite(n) && n >= 100 ? n : DEFAULT_SETTINGS.columnMaxWidth;
           await this.plugin.saveSettings();
         });
       });

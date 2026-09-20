@@ -56,6 +56,10 @@ export interface KanbanConfig {
   colorTextContrastThreshold: number;
   // Length (px) of the directional (top-left-lit) white title shadow. 0 = none.
   columnTitleShadowLength: number;
+  // Column width range (px) columns flex between on desktop; buildConfig()
+  // clamps max to never fall below min, so the rendered CSS is always valid.
+  columnMinWidth: number;
+  columnMaxWidth: number;
   colorAccent: string;
   colorLink: string;
   colorFamilySelf: string;
@@ -185,6 +189,8 @@ export function buildConfig(settings: KanbanSettings): KanbanConfig {
   // columnTitleTextColor / textOnBg). Unset hue → Font color's current hue.
   const colorColumnTitleDark = textHex(settings.hueColumnTitle ?? settings.hueText ?? 225);
   const colorTextContrastThreshold = clamp(settings.textContrastThreshold ?? 45, 0, 108);
+  const columnMinWidth = clamp(settings.columnMinWidth ?? 180, 100, 400);
+  const columnMaxWidth = clamp(settings.columnMaxWidth ?? 260, columnMinWidth, 600);
   // Bold/Italic/Italic each shift up to ±50% away from Text lightness.
   const boldL = clamp(textL + (settings.boldLightnessDelta ?? 0), 0, 100);
   const italicStarL = clamp(textL + (settings.italicStarLightnessDelta ?? 0), 0, 100);
@@ -232,6 +238,8 @@ export function buildConfig(settings: KanbanSettings): KanbanConfig {
     colorColumnTitleDark,
     colorTextContrastThreshold,
     columnTitleShadowLength: clamp(settings.columnTitleShadowLength ?? 2, 0, 10),
+    columnMinWidth,
+    columnMaxWidth,
     colorLink: textHex(settings.hueLink),
     colorDate: textHex(settings.hueDate) || "#7ab8e8",
     colorBold: textHueHex(settings.hueBold, boldL),
@@ -5792,7 +5800,7 @@ function updateColumnChrome(
 ): void {
   const colStyle = isNarrow
     ? `width:calc(100% - 16px);margin:0 8px 20px;padding:10px;`
-    : `flex:1;min-width:200px;max-width:260px;padding:10px 0 10px 0;margin:0;display:flex;flex-direction:column;`;
+    : `flex:1;min-width:${config.columnMinWidth}px;max-width:${config.columnMaxWidth}px;padding:10px 0 10px 0;margin:0;display:flex;flex-direction:column;`;
   // Narrow mode never set an explicit `display` before (every column but the
   // active one simply didn't exist) — matching that means "block" (a div's
   // default), not "flex", for the visible one; only "none" is new here.
