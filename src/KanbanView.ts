@@ -9,7 +9,7 @@ import {
   noteBoardLeft,
   expireLastExpandedIfStale,
   collapseAllCards,
-  clearFamilyIsolation,
+  clearAllFiltering,
 } from "./kanban";
 
 export const VIEW_TYPE_KANBAN = "kanban-board-view";
@@ -36,6 +36,46 @@ export class KanbanView extends ItemView {
   // on top of this one (see makeOverlay in kanban.ts), so its Escape
   // naturally takes priority while it's open.
   private boardScope: Scope | null = null;
+  // Lets the user start filtering by typing anywhere on the board, without
+  // clicking into #kb-search-input first. Tied to pushBoardScope/
+  // popBoardScope's lifecycle (not attachListeners', which re-runs on every
+  // refresh regardless of whether this leaf is active) so it's only live
+  // while this leaf actually is. Declared as a bound arrow field (rather
+  // than a plain method) so add/removeEventListener see the same function
+  // identity. Deliberately a raw keydown listener, not a Scope binding —
+  // Scope has no documented wildcard for the key itself, and this relies on
+  // focusing the input synchronously so the browser's own subsequent
+  // character-insertion step lands there, the same way Scope's Escape/Mod+F
+  // bindings can't achieve.
+  private onBoardKeydown = (e: KeyboardEvent): void => {
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.isComposing || e.keyCode === 229) return; // mid-IME-composition
+    if (e.key.length !== 1) return; // excludes Enter/Backspace/Escape/arrows/Tab/F-keys/etc.
+
+    const doc = this.contentEl.ownerDocument;
+    const active = doc.activeElement as HTMLElement | null;
+    if (active && (
+      active.tagName === "INPUT" || active.tagName === "TEXTAREA" ||
+      active.tagName === "SELECT" || active.isContentEditable
+    )) return; // covers the search box itself, inline card/subtask editors, dialog fields
+
+    // Hand-rolled dialogs/sheets (kanban.ts's makeOverlay, showCardMenu)
+    // don't always focus anything of their own, so the activeElement check
+    // above can't be relied on alone to detect them — .kb-overlay is added
+    // by both. .modal-container is a defensive backstop for Obsidian's own
+    // native modals (Command Palette, Quick Switcher, ...), which stay
+    // reachable here since opening one doesn't pop this board's scope.
+    if (doc.querySelector(".kb-overlay")) return;
+    if (doc.querySelector(".modal-container")) return;
+
+    if (!this.contentEl.querySelector("#kb-search-input")) return;
+    this.focusSearchBar(); // scrolls to top + .focus() — see below
+    // No preventDefault(), no manual value append: focusing synchronously
+    // here, before returning, lets the browser's own character-insertion
+    // step (which runs after this handler) land in the input just focused —
+    // the same thing that happens if the user clicks the box and types.
+    // Doing both would double-insert the keystroke.
+  };
 
   constructor(leaf: WorkspaceLeaf, plugin: KanbanPlugin) {
     super(leaf);
@@ -128,12 +168,14 @@ export class KanbanView extends ItemView {
     });
     this.boardScope = scope;
     this.app.keymap.pushScope(scope);
+    this.contentEl.ownerDocument.addEventListener("keydown", this.onBoardKeydown);
   }
 
   private popBoardScope() {
     if (!this.boardScope) return;
     this.app.keymap.popScope(this.boardScope);
     this.boardScope = null;
+    this.contentEl.ownerDocument.removeEventListener("keydown", this.onBoardKeydown);
   }
 
   // Bare Escape on the board itself (no dialog open — a dialog's own Scope,
@@ -144,7 +186,7 @@ export class KanbanView extends ItemView {
     const boardEl = this.contentEl.querySelector<HTMLElement>("#kanban-wrapper");
     if (boardEl) {
       collapseAllCards(boardEl);
-      clearFamilyIsolation(boardEl);
+      clearAllFiltering(boardEl);
     }
     this.scrollPastSearchBar();
   }

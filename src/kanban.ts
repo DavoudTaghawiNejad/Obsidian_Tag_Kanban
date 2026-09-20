@@ -1425,17 +1425,20 @@ export function collapseAllCards(boardEl: HTMLElement): void {
   currentlyExpandedKey = null;
 }
 
-// Releases the click-to-isolate family filter (see toggleFamilyIsolation in
-// attachListeners) — used by the board-level Escape handler. Safe to call
-// unconditionally: a no-op when no isolation is active. Restores card
-// visibility directly rather than going through attachListeners' applyFilter
-// (private to that closure) — correct because activating isolation always
-// clears the search box first, so whenever isolation is active the query is
-// guaranteed empty and "show everything" is exactly what applyFilter's own
-// no-query branch would do anyway.
-export function clearFamilyIsolation(boardEl: HTMLElement): void {
-  if (!boardEl.dataset.familyIsolate) return;
+// Clears both filtering modes at once — family isolation and any typed
+// search query — so Escape always leaves the board fully unfiltered,
+// regardless of which mode (or both, or neither) was active. Lives at module
+// scope (not inside attachListeners) so KanbanView's Escape handler, outside
+// that closure, can call it directly. Restores card visibility directly
+// rather than going through attachListeners' applyFilter (private to that
+// closure).
+export function clearAllFiltering(boardEl: HTMLElement): void {
+  const searchInput = boardEl.querySelector<HTMLInputElement>("#kb-search-input");
+  const hadIsolation = !!boardEl.dataset.familyIsolate;
+  const hadQuery = !!searchInput?.value;
+  if (!hadIsolation && !hadQuery) return;
   delete boardEl.dataset.familyIsolate;
+  if (searchInput) searchInput.value = "";
   boardEl.querySelectorAll<HTMLElement>(".kanban-card").forEach((c) => { c.style.display = ""; });
   if (boardEl.dataset.narrow === "1") {
     const activeNorm = boardEl.querySelector<HTMLElement>(
@@ -2901,6 +2904,7 @@ function makeOverlay(id: string, app: App) {
   doc.getElementById(id)?.remove();
   const overlay = doc.createElement("div");
   overlay.id = id;
+  overlay.classList.add("kb-overlay");
   // 100vw/100vh rather than 100% — a `position:fixed` element with a
   // percentage size resolves against its nearest transformed ancestor (if
   // any), not the real viewport. Obsidian's app shell can apply a transform
@@ -6481,6 +6485,20 @@ export function attachListeners(
     }
   };
 
+  // Clears both filtering modes together (see clearAllFiltering, module
+  // scope, for the twin used outside this closure) and re-applies via the
+  // scroll-preserving applyFilter — a no-op fast path when neither mode was
+  // active, so a blank-space click (much more frequent than Escape) doesn't
+  // force a needless reflow/rAF write on every click.
+  const resetFilters = () => {
+    const hadIsolation = !!boardEl.dataset.familyIsolate;
+    const hadQuery = !!searchInputEl?.value;
+    if (!hadIsolation && !hadQuery) return;
+    delete boardEl.dataset.familyIsolate;
+    if (searchInputEl) searchInputEl.value = "";
+    applyFilter();
+  };
+
   const searchInputEl = boardEl.querySelector<HTMLInputElement>("#kb-search-input");
   const searchClearEl = boardEl.querySelector<HTMLButtonElement>("#kb-search-clear");
 
@@ -6509,13 +6527,15 @@ export function attachListeners(
   };
 
   const onSearchInput = () => {
+    // Also cancels a still-armed deferred isolation (see onCardClick) so a
+    // click-then-type within its 300ms window can't re-isolate the family
+    // and wipe the query the user just typed.
+    if (familyIsolateTimer) { clearTimeout(familyIsolateTimer); familyIsolateTimer = null; }
     delete boardEl.dataset.familyIsolate;
     applyFilter();
   };
   const onSearchClear = () => {
-    if (searchInputEl) searchInputEl.value = "";
-    delete boardEl.dataset.familyIsolate;
-    applyFilter();
+    resetFilters();
     searchInputEl?.focus();
   };
   searchInputEl?.addEventListener("input", onSearchInput);
@@ -6634,12 +6654,12 @@ export function attachListeners(
     const card = (e.target as Element).closest(".kanban-card") as HTMLElement | null;
     if (!card) {
       // Clicking anywhere else on the board (blank column space, a header,
-      // the tab bar, ...) releases an active isolation the same way clicking
-      // the isolated card again or pressing Escape does.
-      if (boardEl.dataset.familyIsolate) {
-        delete boardEl.dataset.familyIsolate;
-        applyFilter();
-      }
+      // the tab bar, ...) clears both filtering modes, the same way pressing
+      // Escape does. Also cancels a still-armed deferred isolation (see
+      // below) so it can't silently re-apply ~300ms after this clearing
+      // click.
+      if (familyIsolateTimer) { clearTimeout(familyIsolateTimer); familyIsolateTimer = null; }
+      resetFilters();
       return;
     }
     applyHighlights(card); // paint-only (outline/background) — safe to run immediately, never shifts layout
@@ -7265,6 +7285,7 @@ export function attachListeners(
     const doc = ownerDoc();
     const overlay = doc.createElement("div");
     overlay.id = "kanban-col-picker";
+    overlay.classList.add("kb-overlay");
     overlay.style.cssText =
       "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.5);z-index:10000;display:flex;align-items:flex-end;justify-content:center;";
     doc.body.appendChild(overlay);

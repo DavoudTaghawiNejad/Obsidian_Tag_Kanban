@@ -976,10 +976,15 @@ function collapseAllCards(boardEl) {
   });
   currentlyExpandedKey = null;
 }
-function clearFamilyIsolation(boardEl) {
-  if (!boardEl.dataset.familyIsolate)
+function clearAllFiltering(boardEl) {
+  const searchInput = boardEl.querySelector("#kb-search-input");
+  const hadIsolation = !!boardEl.dataset.familyIsolate;
+  const hadQuery = !!searchInput?.value;
+  if (!hadIsolation && !hadQuery)
     return;
   delete boardEl.dataset.familyIsolate;
+  if (searchInput)
+    searchInput.value = "";
   boardEl.querySelectorAll(".kanban-card").forEach((c) => {
     c.style.display = "";
   });
@@ -1903,6 +1908,7 @@ function makeOverlay(id, app) {
   doc.getElementById(id)?.remove();
   const overlay = doc.createElement("div");
   overlay.id = id;
+  overlay.classList.add("kb-overlay");
   overlay.style.cssText = "position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,.5);z-index:10000;display:flex;align-items:center;justify-content:center;";
   doc.body.appendChild(overlay);
   const dialog = doc.createElement("div");
@@ -4472,6 +4478,16 @@ function attachListeners(boardEl, config, app, refresh) {
       });
     }
   };
+  const resetFilters = () => {
+    const hadIsolation = !!boardEl.dataset.familyIsolate;
+    const hadQuery = !!searchInputEl?.value;
+    if (!hadIsolation && !hadQuery)
+      return;
+    delete boardEl.dataset.familyIsolate;
+    if (searchInputEl)
+      searchInputEl.value = "";
+    applyFilter();
+  };
   const searchInputEl = boardEl.querySelector("#kb-search-input");
   const searchClearEl = boardEl.querySelector("#kb-search-clear");
   const toggleFamilyIsolation = (card) => {
@@ -4490,14 +4506,15 @@ function attachListeners(boardEl, config, app, refresh) {
     applyFilter();
   };
   const onSearchInput = () => {
+    if (familyIsolateTimer) {
+      clearTimeout(familyIsolateTimer);
+      familyIsolateTimer = null;
+    }
     delete boardEl.dataset.familyIsolate;
     applyFilter();
   };
   const onSearchClear = () => {
-    if (searchInputEl)
-      searchInputEl.value = "";
-    delete boardEl.dataset.familyIsolate;
-    applyFilter();
+    resetFilters();
     searchInputEl?.focus();
   };
   searchInputEl?.addEventListener("input", onSearchInput);
@@ -4604,10 +4621,11 @@ function attachListeners(boardEl, config, app, refresh) {
   function onCardClick(e) {
     const card = e.target.closest(".kanban-card");
     if (!card) {
-      if (boardEl.dataset.familyIsolate) {
-        delete boardEl.dataset.familyIsolate;
-        applyFilter();
+      if (familyIsolateTimer) {
+        clearTimeout(familyIsolateTimer);
+        familyIsolateTimer = null;
       }
+      resetFilters();
       return;
     }
     applyHighlights(card);
@@ -5158,6 +5176,7 @@ function attachListeners(boardEl, config, app, refresh) {
     const doc = ownerDoc();
     const overlay = doc.createElement("div");
     overlay.id = "kanban-col-picker";
+    overlay.classList.add("kb-overlay");
     overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.5);z-index:10000;display:flex;align-items:flex-end;justify-content:center;";
     doc.body.appendChild(overlay);
     colPickerOverlay = overlay;
@@ -5760,6 +5779,36 @@ var KanbanView = class extends import_obsidian2.ItemView {
     // on top of this one (see makeOverlay in kanban.ts), so its Escape
     // naturally takes priority while it's open.
     this.boardScope = null;
+    // Lets the user start filtering by typing anywhere on the board, without
+    // clicking into #kb-search-input first. Tied to pushBoardScope/
+    // popBoardScope's lifecycle (not attachListeners', which re-runs on every
+    // refresh regardless of whether this leaf is active) so it's only live
+    // while this leaf actually is. Declared as a bound arrow field (rather
+    // than a plain method) so add/removeEventListener see the same function
+    // identity. Deliberately a raw keydown listener, not a Scope binding —
+    // Scope has no documented wildcard for the key itself, and this relies on
+    // focusing the input synchronously so the browser's own subsequent
+    // character-insertion step lands there, the same way Scope's Escape/Mod+F
+    // bindings can't achieve.
+    this.onBoardKeydown = (e) => {
+      if (e.ctrlKey || e.metaKey || e.altKey)
+        return;
+      if (e.isComposing || e.keyCode === 229)
+        return;
+      if (e.key.length !== 1)
+        return;
+      const doc = this.contentEl.ownerDocument;
+      const active = doc.activeElement;
+      if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.tagName === "SELECT" || active.isContentEditable))
+        return;
+      if (doc.querySelector(".kb-overlay"))
+        return;
+      if (doc.querySelector(".modal-container"))
+        return;
+      if (!this.contentEl.querySelector("#kb-search-input"))
+        return;
+      this.focusSearchBar();
+    };
     this.plugin = plugin;
   }
   getViewType() {
@@ -5827,12 +5876,14 @@ var KanbanView = class extends import_obsidian2.ItemView {
     });
     this.boardScope = scope;
     this.app.keymap.pushScope(scope);
+    this.contentEl.ownerDocument.addEventListener("keydown", this.onBoardKeydown);
   }
   popBoardScope() {
     if (!this.boardScope)
       return;
     this.app.keymap.popScope(this.boardScope);
     this.boardScope = null;
+    this.contentEl.ownerDocument.removeEventListener("keydown", this.onBoardKeydown);
   }
   // Bare Escape on the board itself (no dialog open — a dialog's own Scope,
   // pushed on top of this one, would have already handled Escape as a
@@ -5842,7 +5893,7 @@ var KanbanView = class extends import_obsidian2.ItemView {
     const boardEl = this.contentEl.querySelector("#kanban-wrapper");
     if (boardEl) {
       collapseAllCards(boardEl);
-      clearFamilyIsolation(boardEl);
+      clearAllFiltering(boardEl);
     }
     this.scrollPastSearchBar();
   }
