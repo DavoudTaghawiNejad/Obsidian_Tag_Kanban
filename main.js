@@ -726,6 +726,12 @@ function isLaterDueToday(text, today, normRecurrent) {
     return matchesTriggerAnnotations(triggers, today);
   return true;
 }
+function toDateInputValue(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
 function getNextMonday() {
   const d = new Date();
   d.setHours(0, 0, 0, 0);
@@ -760,9 +766,7 @@ function getInThirtyDays() {
 }
 function getNextMonth() {
   const d = new Date();
-  d.setHours(0, 0, 0, 0);
-  d.setMonth(d.getMonth() + 1);
-  return d;
+  return new Date(d.getFullYear(), d.getMonth() + 1, 1);
 }
 var DATE_PRESETS = [
   ["tomorrow", "Tomorrow", getTomorrow],
@@ -2267,9 +2271,10 @@ function showInputDialog(title, app, defaultDocName, onSubmit) {
 }
 function showDateDialog(title, defaultDate, app, onSubmit, opts = {}) {
   const { withText, defaultDocName } = opts;
+  const isTablet = import_obsidian.Platform.isTablet;
   const { dialog, close, setEscapeHandler } = makeOverlay(withText ? "kanban-later-add-dialog" : "kanban-date-dialog", app);
   const presetBtnStyle = (active) => `padding:4px 10px;border:none;border-radius:12px;cursor:pointer;font-size:.75em;` + (active ? `background:var(--kb-dialog-text, var(--text-normal));color:#fff;` : `background:var(--background-modifier-border);color:var(--text-normal);`);
-  let selectedPreset = DATE_PRESETS.find(([, , fn]) => fn().toISOString().split("T")[0] === defaultDate)?.[0] ?? null;
+  let selectedPreset = DATE_PRESETS.find(([, , fn]) => toDateInputValue(fn()) === defaultDate)?.[0] ?? null;
   const presetBtnsHtml = DATE_PRESETS.map(
     ([key, label]) => `<button type="button" class="kb-date-preset" data-preset="${key}" style="${presetBtnStyle(key === selectedPreset)}">${label}</button>`
   ).join("");
@@ -2282,7 +2287,8 @@ function showDateDialog(title, defaultDate, app, onSubmit, opts = {}) {
     </details>
     <div style="text-align:left;">${uncountedCheckboxHtml("k-uncounted", "Don't count this card in statistics", false)}</div>` : ""}
     <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:center;margin-bottom:8px;">${presetBtnsHtml}</div>
-    <input id="k-date" type="date" value="${defaultDate}" style="${dateInputStyle()}" ${withText ? "" : "autofocus"}>
+    ${isTablet ? `<button type="button" id="k-date-trigger" style="${dateInputStyle()}cursor:pointer;" ${withText ? "" : "autofocus"}>${defaultDate}</button>` : ""}
+    <input id="k-date" type="date" value="${defaultDate}" style="${dateInputStyle()}${isTablet ? "display:none;" : ""}" ${!isTablet && !withText ? "autofocus" : ""}>
     ${withText ? docNameFieldHtml() : ""}
     <div id="k-date-actions" style="display:flex;gap:10px;justify-content:center;">${buttonHtml(withText ? "Add" : "Set", true)}${buttonHtml("No date", false)}${buttonHtml("Cancel", false)}</div>`;
   const [actionBtn, noDateBtn, cancelBtn] = dialog.querySelectorAll("#k-date-actions button");
@@ -2291,6 +2297,15 @@ function showDateDialog(title, defaultDate, app, onSubmit, opts = {}) {
   const checklistBtn = withText ? dialog.querySelector("#k-notes-checklist") : null;
   const uncountedInput = withText ? dialog.querySelector("#k-uncounted") : null;
   const dateInput = dialog.querySelector("#k-date");
+  const dateTrigger = isTablet ? dialog.querySelector("#k-date-trigger") : null;
+  if (dateTrigger) {
+    dateTrigger.onclick = () => {
+      dateTrigger.style.display = "none";
+      dateInput.style.cssText = dateInputStyle();
+      dateInput.focus();
+      dateInput.showPicker?.();
+    };
+  }
   let submit;
   const getDocName = withText ? wireDocNameField(app, dialog, defaultDocName ?? "", () => submit(true), close, setEscapeHandler) : null;
   if (checklistBtn && notesInput) {
@@ -2300,7 +2315,9 @@ function showDateDialog(title, defaultDate, app, onSubmit, opts = {}) {
   presetBtns.forEach((btn) => {
     const preset = DATE_PRESETS.find(([key]) => key === btn.dataset.preset);
     btn.onclick = () => {
-      dateInput.value = preset[2]().toISOString().split("T")[0];
+      dateInput.value = toDateInputValue(preset[2]());
+      if (dateTrigger)
+        dateTrigger.textContent = dateInput.value;
       selectedPreset = preset[0];
       presetBtns.forEach((b) => {
         b.style.cssText = presetBtnStyle(b.dataset.preset === selectedPreset);
@@ -2327,7 +2344,7 @@ function showDateDialog(title, defaultDate, app, onSubmit, opts = {}) {
         submit(true);
     });
   });
-  (textInput ?? dateInput).focus();
+  (textInput ?? dateTrigger ?? dateInput).focus();
 }
 function showRecurrentTriggerDialog(app, onSubmit, existingTriggers = [], existingRepeatSpec = null, opts = {}) {
   const { allowNoTrigger = true } = opts;
@@ -4721,7 +4738,7 @@ function attachListeners(boardEl, config, app, refresh) {
       const lineTxt = lines[card.lineNum - 1] || "";
       const dateMatch = lineTxt.replace(/%%[\s\S]*?@\s*\d+\s*[cx]?\s*%%/g, "").trim().match(/@(\d{4}-\d{2}-\d{2})/);
       const existing = dateMatch ? new Date(dateMatch[1] + "T00:00:00") : null;
-      const defDate = getDefaultDate(existing).toISOString().split("T")[0];
+      const defDate = toDateInputValue(getDefaultDate(existing));
       showDateDialog(
         `Set date for ${colTitle}`,
         defDate,
@@ -4818,7 +4835,7 @@ function attachListeners(boardEl, config, app, refresh) {
     };
     showSubtaskDialog(app, async (text) => {
       if (isLater) {
-        const defDate = getDefaultDate().toISOString().split("T")[0];
+        const defDate = toDateInputValue(getDefaultDate());
         showDateDialog("Set date for subtask", defDate, app, async (dateStr) => {
           await doAdd(dateStr ? appendToFirstLine(text, dateStr) : text);
         });
@@ -4886,7 +4903,7 @@ function attachListeners(boardEl, config, app, refresh) {
       return;
     const currentDateStr = span.dataset.date || "";
     const existing = currentDateStr ? new Date(currentDateStr + "T00:00:00") : null;
-    const defDate = (existing && !isNaN(existing.getTime()) ? existing : getDefaultDate()).toISOString().split("T")[0];
+    const defDate = toDateInputValue(existing && !isNaN(existing.getTime()) ? existing : getDefaultDate());
     showDateDialog("Change date", defDate, app, async (dateStr) => {
       await updateCardDate(app, card.dataset.file, parseInt(card.dataset.line, 10), dateStr);
       requestAnimationFrame(() => setTimeout(refresh, 50));
@@ -5599,7 +5616,7 @@ function attachListeners(boardEl, config, app, refresh) {
     const title = `Add to ${tag.replace(/^#/, "").toUpperCase()} Column`;
     const defaultDocName = computeDefaultDocName(config.newTaskInsert, tag, config);
     if (norm === config.normLater) {
-      const defDate = getDefaultDate().toISOString().split("T")[0];
+      const defDate = toDateInputValue(getDefaultDate());
       showDateDialog(title, defDate, app, async (dateStr, text, notes, docName, uncounted) => {
         if (text && await addNewItem(app, tag, text, dateStr, config, notes, docName, defaultDocName, uncounted))
           requestAnimationFrame(() => setTimeout(refresh, 50));
