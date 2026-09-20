@@ -1938,7 +1938,7 @@ function makeOverlay(id, app) {
     }
   };
 }
-function withNewlineOnModEnter(app, input, autoResize) {
+function withNewlineOnModEnter(app, input, autoResize, onEscape) {
   const scope = new import_obsidian.Scope();
   scope.register(["Mod"], "Enter", () => {
     const value = input.value;
@@ -1950,6 +1950,12 @@ function withNewlineOnModEnter(app, input, autoResize) {
     autoResize();
     return false;
   });
+  if (onEscape) {
+    scope.register([], "Escape", () => {
+      onEscape();
+      return false;
+    });
+  }
   app.keymap.pushScope(scope);
   return () => app.keymap.popScope(scope);
 }
@@ -2916,8 +2922,8 @@ function wireSubtaskTree(app, containerEl, titleEl, root, config, onEditSubtask,
     label.innerHTML = "";
     label.style.pointerEvents = "auto";
     label.appendChild(input);
-    const popModEnterScope = withNewlineOnModEnter(app, input, autoResize);
     let finished = false;
+    const popModEnterScope = withNewlineOnModEnter(app, input, autoResize, () => finishEdit(false));
     const finishEdit = async (save) => {
       if (finished || !label.contains(input))
         return;
@@ -2942,7 +2948,6 @@ function wireSubtaskTree(app, containerEl, titleEl, root, config, onEditSubtask,
         label.innerHTML = savedHTML;
       }
     };
-    setEscapeHandler(() => finishEdit(false));
     input.addEventListener("keydown", async (ev) => {
       if (ev.key === "Enter" && !ev.ctrlKey && !ev.metaKey) {
         ev.preventDefault();
@@ -2982,8 +2987,8 @@ function wireSubtaskTree(app, containerEl, titleEl, root, config, onEditSubtask,
     label.innerHTML = "";
     label.style.pointerEvents = "auto";
     label.appendChild(input);
-    const popModEnterScope = withNewlineOnModEnter(app, input, autoResize);
     let finished = false;
+    const popModEnterScope = withNewlineOnModEnter(app, input, autoResize, () => finish());
     const finish = () => {
       if (finished)
         return;
@@ -3005,7 +3010,6 @@ function wireSubtaskTree(app, containerEl, titleEl, root, config, onEditSubtask,
       dirty = true;
       render();
     };
-    setEscapeHandler(finish);
     input.addEventListener("keydown", (ev) => {
       if (ev.key === "Enter" && !ev.ctrlKey && !ev.metaKey) {
         ev.preventDefault();
@@ -4980,8 +4984,8 @@ function attachListeners(boardEl, config, app, refresh) {
     if (arrow)
       titleDiv.appendChild(arrow);
     titleDiv.onclick = null;
-    const popModEnterScope = withNewlineOnModEnter(app, input, autoResize);
     let finished = false;
+    const popModEnterScope = withNewlineOnModEnter(app, input, autoResize, () => finishEdit(false));
     const finishEdit = async (save) => {
       if (finished || !titleDiv.contains(input))
         return;
@@ -5028,10 +5032,6 @@ function attachListeners(boardEl, config, app, refresh) {
         e.preventDefault();
         await finishEdit(true);
       }
-      if (e.key === "Escape") {
-        e.stopPropagation();
-        await finishEdit(false);
-      }
     });
     input.addEventListener("input", autoResize);
     input.addEventListener("blur", () => finishEdit(true));
@@ -5077,8 +5077,8 @@ function attachListeners(boardEl, config, app, refresh) {
     };
     subRow.innerHTML = "";
     subRow.appendChild(input);
-    const popModEnterScope = withNewlineOnModEnter(app, input, autoResize);
     let finished = false;
+    const popModEnterScope = withNewlineOnModEnter(app, input, autoResize, () => finishEdit(false));
     const finishEdit = async (save) => {
       if (finished || !subRow.contains(input))
         return;
@@ -5126,10 +5126,6 @@ function attachListeners(boardEl, config, app, refresh) {
         e2.preventDefault();
         await finishEdit(true);
       }
-      if (e2.key === "Escape") {
-        e2.stopPropagation();
-        await finishEdit(false);
-      }
     });
     input.addEventListener("input", autoResize);
     input.addEventListener("blur", () => finishEdit(true));
@@ -5160,6 +5156,7 @@ function attachListeners(boardEl, config, app, refresh) {
   let touchTimer = null;
   let selectedCard = null;
   let colPickerOverlay = null;
+  let colPickerScope = null;
   const DRAG_DELAY = 450, MOVE_THRESHOLD = 8;
   let touchStartX = 0, touchStartY = 0;
   let isPanning = false;
@@ -5168,6 +5165,10 @@ function attachListeners(boardEl, config, app, refresh) {
   let panScrollStart = 0;
   let panScrollTopStart = 0;
   const closeColPicker = () => {
+    if (colPickerScope) {
+      app.keymap.popScope(colPickerScope);
+      colPickerScope = null;
+    }
     colPickerOverlay?.remove();
     colPickerOverlay = null;
   };
@@ -5198,6 +5199,14 @@ function attachListeners(boardEl, config, app, refresh) {
     overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.5);z-index:10000;display:flex;align-items:flex-end;justify-content:center;";
     doc.body.appendChild(overlay);
     colPickerOverlay = overlay;
+    const scope = new import_obsidian.Scope();
+    scope.register([], "Escape", () => {
+      clearSelection();
+      touchCard = null;
+      return false;
+    });
+    app.keymap.pushScope(scope);
+    colPickerScope = scope;
     const sheet = doc.createElement("div");
     sheet.style.cssText = "background:var(--background-primary);color:var(--text-normal);padding:16px 16px 32px;border-radius:16px 16px 0 0;width:100%;max-width:480px;box-shadow:0 -4px 24px rgba(0,0,0,.2);";
     overlay.appendChild(sheet);

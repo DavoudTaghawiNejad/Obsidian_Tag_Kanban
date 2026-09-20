@@ -2960,10 +2960,21 @@ function makeOverlay(id: string, app: App) {
 // Mod+Enter for the lifetime of an inline text edit lets that combo insert a
 // newline instead of following a link; callers must pop it (call the
 // returned function) once editing ends, on every exit path.
+//
+// `onEscape`, when given, registers Escape on this same Scope. A plain
+// "keydown" listener's stopPropagation() cannot substitute for this: Obsidian
+// resolves Escape through its keymap Scope stack ahead of any DOM listener,
+// regardless of where the focused element sits in the document, so an inline
+// edit that's part of the leaf's own DOM leaks Escape to Obsidian's default
+// handling exactly like a body-appended dialog would without a Scope of its
+// own. Callers editing inside an existing dialog should omit `onEscape` and
+// rely on that dialog's own Scope (via its `setEscapeHandler`) instead —
+// registering it twice would just shadow the dialog's row-level handling.
 function withNewlineOnModEnter(
   app: App,
   input: HTMLTextAreaElement,
-  autoResize: () => void
+  autoResize: () => void,
+  onEscape?: () => void
 ): () => void {
   const scope = new Scope();
   scope.register(["Mod"], "Enter", () => {
@@ -2976,6 +2987,9 @@ function withNewlineOnModEnter(
     autoResize();
     return false;
   });
+  if (onEscape) {
+    scope.register([], "Escape", () => { onEscape(); return false; });
+  }
   app.keymap.pushScope(scope);
   return () => app.keymap.popScope(scope);
 }
@@ -4303,8 +4317,16 @@ function wireSubtaskTree(
     label.style.pointerEvents = "auto";
     label.appendChild(input);
 
-    const popModEnterScope = withNewlineOnModEnter(app, input, autoResize);
     let finished = false;
+    // pushScope() *replaces* the dialog's own active scope for the
+    // duration of this edit rather than layering on top of it — an
+    // unregistered key on this new scope is left alone (not handled), it
+    // does not fall through to the dialog's scope underneath. So Escape
+    // must be registered here, on the scope that's actually active while
+    // typing; leaving it to the dialog's own setEscapeHandler callback
+    // below (which only applies once this scope pops again) would let
+    // Escape leak past Keymap entirely and reach Obsidian's own handling.
+    const popModEnterScope = withNewlineOnModEnter(app, input, autoResize, () => finishEdit(false));
     const finishEdit = async (save: boolean) => {
       if (finished || !label.contains(input)) return;
       finished = true;
@@ -4324,12 +4346,6 @@ function wireSubtaskTree(
         label.innerHTML = savedHTML;
       }
     };
-
-    // Claims Escape for the duration of this edit (cancel just this row)
-    // instead of the dialog's own Escape handler, which would otherwise
-    // close/cancel the whole dialog — see makeOverlay's Scope-based Escape
-    // handling for why a DOM-level stopPropagation() alone can't do this.
-    setEscapeHandler(() => finishEdit(false));
 
     input.addEventListener("keydown", async (ev) => {
       if (ev.key === "Enter" && !ev.ctrlKey && !ev.metaKey) { ev.preventDefault(); await finishEdit(true); }
@@ -4379,8 +4395,12 @@ function wireSubtaskTree(
     label.style.pointerEvents = "auto";
     label.appendChild(input);
 
-    const popModEnterScope = withNewlineOnModEnter(app, input, autoResize);
     let finished = false;
+    // See the matching comment in onRowDblClick's edit: pushScope() replaces
+    // the dialog's active scope rather than layering on it, so Escape has to
+    // be registered on this row-edit scope directly, not left to the
+    // dialog's own setEscapeHandler callback below.
+    const popModEnterScope = withNewlineOnModEnter(app, input, autoResize, () => finish());
     const finish = () => {
       if (finished) return;
       finished = true;
@@ -4402,7 +4422,6 @@ function wireSubtaskTree(
       render();
     };
 
-    setEscapeHandler(finish);
     input.addEventListener("keydown", (ev) => {
       if (ev.key === "Enter" && !ev.ctrlKey && !ev.metaKey) { ev.preventDefault(); finish(); }
     });
@@ -7088,8 +7107,8 @@ export function attachListeners(
     // pass archived/moved content. titleDiv.contains(input) alone doesn't
     // catch this, since input stays a DOM child of titleDiv even once
     // titleDiv itself has been detached from the document.
-    const popModEnterScope = withNewlineOnModEnter(app, input, autoResize);
     let finished = false;
+    const popModEnterScope = withNewlineOnModEnter(app, input, autoResize, () => finishEdit(false));
     const finishEdit = async (save: boolean) => {
       if (finished || !titleDiv.contains(input)) return;
       finished = true;
@@ -7131,13 +7150,6 @@ export function attachListeners(
       if (e.key === "Enter" && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
         await finishEdit(true);
-      }
-      if (e.key === "Escape") {
-        // Not stopping propagation here would let the keydown bubble past the
-        // card/column/board out to Obsidian's own workspace handling — which
-        // is exactly what caused Escape to switch to a neighboring tab.
-        e.stopPropagation();
-        await finishEdit(false);
       }
     });
     input.addEventListener("input", autoResize);
@@ -7190,8 +7202,8 @@ export function attachListeners(
     // See the matching guard in startTitleEdit's finishEdit: refresh() detaches
     // this still-focused input, which fires another "blur" and would otherwise
     // re-enter here a second time.
-    const popModEnterScope = withNewlineOnModEnter(app, input, autoResize);
     let finished = false;
+    const popModEnterScope = withNewlineOnModEnter(app, input, autoResize, () => finishEdit(false));
     const finishEdit = async (save: boolean) => {
       if (finished || !subRow.contains(input)) return;
       finished = true;
@@ -7234,13 +7246,6 @@ export function attachListeners(
         e.preventDefault();
         await finishEdit(true);
       }
-      if (e.key === "Escape") {
-        // Not stopping propagation here would let the keydown bubble past the
-        // card/column/board out to Obsidian's own workspace handling — which
-        // is exactly what caused Escape to switch to a neighboring tab.
-        e.stopPropagation();
-        await finishEdit(false);
-      }
     });
     input.addEventListener("input", autoResize);
     input.addEventListener("blur", () => finishEdit(true));
@@ -7276,6 +7281,7 @@ export function attachListeners(
   let touchTimer: ReturnType<typeof setTimeout> | null = null;
   let selectedCard: HTMLElement | null = null;
   let colPickerOverlay: HTMLElement | null = null;
+  let colPickerScope: Scope | null = null;
   const DRAG_DELAY = 450,
     MOVE_THRESHOLD = 8;
   let touchStartX = 0,
@@ -7287,6 +7293,10 @@ export function attachListeners(
   let panScrollTopStart = 0;
 
   const closeColPicker = () => {
+    if (colPickerScope) {
+      app.keymap.popScope(colPickerScope);
+      colPickerScope = null;
+    }
     colPickerOverlay?.remove();
     colPickerOverlay = null;
   };
@@ -7321,6 +7331,14 @@ export function attachListeners(
       "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.5);z-index:10000;display:flex;align-items:flex-end;justify-content:center;";
     doc.body.appendChild(overlay);
     colPickerOverlay = overlay;
+
+    // This sheet is appended straight to <body>, so Escape needs its own
+    // Scope to reach it — see the comment on makeOverlay for why a plain
+    // keydown listener wouldn't be enough.
+    const scope = new Scope();
+    scope.register([], "Escape", () => { clearSelection(); touchCard = null; return false; });
+    app.keymap.pushScope(scope);
+    colPickerScope = scope;
 
     const sheet = doc.createElement("div");
     sheet.style.cssText =
